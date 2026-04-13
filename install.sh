@@ -3,8 +3,23 @@
 # Symlinks all skills (first-party + vendor) into ~/.claude/skills/,
 # installs the user-prompt KB hook, and appends the standing rule to ~/.claude/CLAUDE.md.
 # Idempotent — safe to re-run.
+#
+# Flags:
+#   (no flags)          — install missing symlinks, leave existing alone
+#   --update-symlinks   — also replace stale symlinks (existing symlinks that
+#                          point somewhere OTHER than dev-stack will be removed
+#                          and re-linked). Real files are still preserved.
 
 set -euo pipefail
+
+update_symlinks=0
+case "${1:-}" in
+  --update-symlinks) update_symlinks=1 ;;
+  --help|-h)
+    sed -n '3,12p' "$0" | sed 's/^# *//'
+    exit 0
+    ;;
+esac
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
@@ -12,8 +27,9 @@ SKILLS_DIR="$CLAUDE_HOME/skills"
 HOOKS_DIR="$CLAUDE_HOME/hooks"
 
 echo "==> dev-stack installer"
-echo "    repo:        $REPO"
-echo "    claude home: $CLAUDE_HOME"
+echo "    repo:             $REPO"
+echo "    claude home:      $CLAUDE_HOME"
+echo "    update-symlinks:  $([ $update_symlinks -eq 1 ] && echo yes || echo no)"
 echo
 
 mkdir -p "$SKILLS_DIR" "$HOOKS_DIR"
@@ -23,16 +39,34 @@ link_skill() {
   local name
   name="$(basename "$src")"
   local dst="$SKILLS_DIR/$name"
-  if [ -L "$dst" ] || [ -e "$dst" ]; then
-    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
-      echo "  ok   $name (already linked)"
+
+  if [ -L "$dst" ]; then
+    # It's a symlink — check where it points
+    local current_target
+    current_target="$(readlink "$dst")"
+    if [ "$current_target" = "$src" ]; then
+      echo "  ok       $name (already linked to dev-stack)"
       return 0
     fi
-    echo "  skip $name (exists, not ours — leaving alone)"
+    # Stale symlink (points elsewhere)
+    if [ $update_symlinks -eq 1 ]; then
+      rm "$dst"
+      ln -s "$src" "$dst"
+      echo "  updated  $name (was → $current_target)"
+      return 0
+    fi
+    echo "  stale    $name → $current_target (run with --update-symlinks to fix)"
     return 0
   fi
+
+  if [ -e "$dst" ]; then
+    # It's a real file — never touch it
+    echo "  skip     $name (real file exists, not a symlink — leaving alone)"
+    return 0
+  fi
+
   ln -s "$src" "$dst"
-  echo "  link $name"
+  echo "  link     $name"
 }
 
 # 1. First-party skills
@@ -73,13 +107,22 @@ fi
 echo "[5/6] hook"
 hook_src="$REPO/hooks/user-prompt-kb-check.sh"
 hook_dst="$HOOKS_DIR/user-prompt-kb-check.sh"
-if [ -L "$hook_dst" ] && [ "$(readlink "$hook_dst")" = "$hook_src" ]; then
-  echo "  ok   user-prompt-kb-check.sh (already linked)"
+if [ -L "$hook_dst" ]; then
+  current_target="$(readlink "$hook_dst")"
+  if [ "$current_target" = "$hook_src" ]; then
+    echo "  ok       user-prompt-kb-check.sh (already linked to dev-stack)"
+  elif [ $update_symlinks -eq 1 ]; then
+    rm "$hook_dst"
+    ln -s "$hook_src" "$hook_dst"
+    echo "  updated  user-prompt-kb-check.sh (was → $current_target)"
+  else
+    echo "  stale    user-prompt-kb-check.sh → $current_target (run with --update-symlinks to fix)"
+  fi
 elif [ -e "$hook_dst" ]; then
-  echo "  skip user-prompt-kb-check.sh (exists, not ours — leaving alone)"
+  echo "  skip     user-prompt-kb-check.sh (real file exists, leaving alone)"
 else
   ln -s "$hook_src" "$hook_dst"
-  echo "  link user-prompt-kb-check.sh"
+  echo "  link     user-prompt-kb-check.sh"
 fi
 
 # 6. Bin (universal helpers like kb-capture)
@@ -91,14 +134,33 @@ if [ -d "$REPO/bin" ]; then
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     dst="$LOCAL_BIN/$name"
-    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
-      echo "  ok   $name (already linked)"
+    if [ -L "$dst" ]; then
+      current_target="$(readlink "$dst")"
+      if [ "$current_target" = "$src" ]; then
+        echo "  ok       $name (already linked to dev-stack)"
+      elif [ $update_symlinks -eq 1 ]; then
+        rm "$dst"
+        ln -s "$src" "$dst"
+        chmod +x "$src"
+        echo "  updated  $name (was → $current_target)"
+      else
+        echo "  stale    $name → $current_target (run with --update-symlinks to fix)"
+      fi
     elif [ -e "$dst" ]; then
-      echo "  skip $name (exists, not ours — leaving alone)"
+      if [ $update_symlinks -eq 1 ]; then
+        # For bin, existing real files are likely stale hand-written copies.
+        # Move aside as .bak and link to dev-stack.
+        mv "$dst" "$dst.bak-$(date +%s)"
+        ln -s "$src" "$dst"
+        chmod +x "$src"
+        echo "  updated  $name (real file backed up as $dst.bak-*, now linked to dev-stack)"
+      else
+        echo "  stale    $name (real file, not a symlink — run with --update-symlinks to replace it with a dev-stack symlink, original will be backed up)"
+      fi
     else
       ln -s "$src" "$dst"
       chmod +x "$src"
-      echo "  link $name → $dst"
+      echo "  link     $name → $dst"
     fi
   done
   case ":$PATH:" in

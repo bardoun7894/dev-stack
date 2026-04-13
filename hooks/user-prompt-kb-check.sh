@@ -190,19 +190,32 @@ if [ -n "$root" ]; then
     printf '\n'
   fi
 
-  # --- raw/ scanner: alert when un-ingested files are sitting in the inbox ---
+  # --- raw/ scanner: alert ONCE when new files appear in the inbox ---
+  #
+  # Fire-once semantics: when we see a state we haven't seen before, alert AND
+  # write the snapshot. The next prompt with the same state won't re-alert.
+  # A new alert only fires when the set of files changes again (new file
+  # added, existing file deleted or modified).
+  #
+  # Note: upstream /kb-ingest does not update the snapshot after processing,
+  # so this snapshot tracks "last seen state", not "last ingested state".
+  # If the user ignores the alert, they see it once and then silence; if they
+  # process the files by deleting/moving them, the next alert correctly reflects
+  # the empty state.
   raw_dir="$root/ai-knowledge-base/raw"
   if [ -d "$raw_dir" ]; then
     snapshot="$raw_dir/.last-ingest-snapshot"
-    # Build current state: filename + size, sorted, excluding .gitkeep and snapshot itself
     current_state=$(cd "$raw_dir" 2>/dev/null && find . -maxdepth 2 -type f -not -name '.gitkeep' -not -name '.last-ingest-snapshot' -exec stat -f '%N %z' {} \; 2>/dev/null | sort)
-    if [ -n "$current_state" ]; then
-      saved_state=""
-      [ -f "$snapshot" ] && saved_state=$(cat "$snapshot" 2>/dev/null)
-      if [ "$current_state" != "$saved_state" ]; then
-        # Count files (lines)
+    saved_state=""
+    [ -f "$snapshot" ] && saved_state=$(cat "$snapshot" 2>/dev/null)
+
+    if [ "$current_state" != "$saved_state" ]; then
+      # State changed — write the new snapshot regardless of direction
+      printf '%s' "$current_state" > "$snapshot"
+
+      if [ -n "$current_state" ]; then
         new_count=$(printf '%s\n' "$current_state" | wc -l | tr -d ' ')
-        printf '📥 INGEST PENDING: %s file(s) in %s have not been ingested into the KB. Run /kb-ingest to process them into knowledge/sources/. The hook tracks them via %s — once ingested, this alert stops.\n\n' "$new_count" "$raw_dir" ".last-ingest-snapshot"
+        printf '📥 INGEST PENDING: %s file(s) in %s have not been ingested into the KB. Run /kb-ingest to process them into knowledge/sources/. This alert fires once per state change — it will not repeat unless new files appear or existing files change.\n\n' "$new_count" "$raw_dir"
       fi
     fi
   fi
