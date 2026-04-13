@@ -66,3 +66,172 @@ If unsure, ask once: "Solo or fan-out?"
 ## Relationship to the standing-rule hook
 
 The global `UserPromptSubmit` hook at `~/.claude/hooks/user-prompt-kb-check.sh` already reminds you to run `/kb-query` and `/kb-spec <phase>` before each matching action. kb-dev is the **explicit** codification of that rule as a complete skill — use it when the user wants "the whole pipeline" instead of cherry-picking phases manually.
+
+## Connect-the-dots: skill relations map
+
+This is the canonical map of how all 36 installed skills relate to each other. kb-dev is the hub — every other skill is reachable through one of its phases or as an explicit standalone branch.
+
+```
+                              ┌─────────────────────────┐
+                              │   USER PROMPT (any)     │
+                              └────────────┬────────────┘
+                                           │
+                          ┌────────────────┴────────────────┐
+                          │  UserPromptSubmit hook fires    │
+                          │  - bootstraps git/kb/speckit    │
+                          │  - injects standing-rule reminder│
+                          └────────────────┬────────────────┘
+                                           │
+              ┌────────────────────────────┼────────────────────────────┐
+              │                            │                            │
+              ▼                            ▼                            ▼
+    ┌──────────────────┐       ┌──────────────────────┐     ┌──────────────────┐
+    │ trivial Q/cmd    │       │  spec-only request   │     │ feature/build/   │
+    │ (no skills)      │       │  "spec out X"        │     │ ship/fix request │
+    └──────────────────┘       └─────────┬────────────┘     └────────┬─────────┘
+                                         │                           │
+                                         ▼                           ▼
+                              ┌────────────────────┐       ┌──────────────────┐
+                              │   /kb-spec only    │       │     /kb-dev      │
+                              │ (phases 0,2,3,4)   │       │  (full pipeline) │
+                              └─────────┬──────────┘       └────────┬─────────┘
+                                        │                           │
+                                        └─────────────┬─────────────┘
+                                                      │
+                                                      ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │                  Phase 0: /kb-query                          │
+              │  → cites [[wikilinks]] from prior decisions                  │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │            Phase 1: brainstorming (obra)                     │
+              │  → option exploration, before committing to a direction     │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │   Phase 2: /kb-spec pre  →  /speckit.specify  →  spec.md     │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 3: /kb-spec plan  →  /speckit.plan                    │
+              │           →  writing-plans (obra)  →  plan.md                │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 4: /kb-spec tasks  →  /speckit.tasks  →  tasks.md     │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │  AUTO-CONTINUE
+                                             ▼
+                          ┌──────────────────────────────────┐
+                          │  Read tasks.md. Decide:          │
+                          │  ≤3 tasks  →  solo               │
+                          │  ≥4 indep  →  fan-out            │
+                          └────────┬────────────────┬────────┘
+                                   │                │
+                          ┌────────┘                └────────┐
+                          ▼                                   ▼
+              ┌──────────────────────┐         ┌──────────────────────────────┐
+              │ Phase 5a: SOLO       │         │ Phase 5b: FAN-OUT            │
+              │ executing-plans      │         │ Opus orchestrator (Agent)    │
+              │ in current session   │         │  ↓                           │
+              │ Sonnet               │         │ dispatching-parallel-agents  │
+              └──────────┬───────────┘         │  ↓                           │
+                         │                     │ N × Sonnet workers           │
+                         │                     │  each running:               │
+                         │                     │  subagent-driven-development │
+                         │                     │  Haiku for cheap lookups     │
+                         │                     └──────────┬───────────────────┘
+                         │                                │
+                         └────────────────┬───────────────┘
+                                          │
+                                          ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 6: test-driven-development (obra) — inside each       │
+              │           worker. Red-Green-Refactor before each commit.     │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 7: systematic-debugging (obra) — only fires on test   │
+              │           failure or unexpected behavior                     │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 8: verification-before-completion (obra)              │
+              │  → runs full test suite + DoD checks before claiming done    │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 9: requesting-code-review (obra)                      │
+              │  Phase 10: receiving-code-review (obra)                      │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 11: finishing-a-development-branch (obra)             │
+              │  Optional: using-git-worktrees (obra) for isolation          │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │  Phase 12: KNOWLEDGE CAPTURE (auto-continue)                 │
+              │  /kb-spec post  →  /kb-docs-sync  →  /kb-compile  →  /kb-lint│
+              │  → next feature benefits from what we just learned           │
+              └──────────────────────────────────────────────────────────────┘
+```
+
+### Auto-continue rules (no user nudge required)
+
+These transitions fire automatically. Do NOT pause to ask the user; just continue.
+
+| From          | To                  | Trigger                                                        |
+|---------------|---------------------|----------------------------------------------------------------|
+| Phase 4 done  | Phase 5 (solo/fan-out) | `tasks.md` exists and has at least one task                  |
+| Phase 5 done  | Phase 6             | Code written, before any commit                                |
+| Phase 6 fail  | Phase 7             | Any test red                                                   |
+| Phase 7 done  | Phase 6             | Bug fixed, re-run tests                                        |
+| Phase 6 green | Phase 8             | All tests pass                                                 |
+| Phase 8 done  | Phase 9             | Verification passed                                            |
+| Phase 9 done  | Phase 10            | Review feedback received                                       |
+| Phase 10 done | Phase 11            | Feedback applied                                               |
+| Phase 11 done | Phase 12            | Branch finished                                                |
+
+The **only** transitions that pause for the user are:
+- Phase 4 → 5 if tasks.md is borderline (3-4 tasks) and solo/fan-out is genuinely ambiguous
+- Phase 11 → merge to main (destructive, always confirm)
+- Any failure mode that needs a design call
+
+### Standalone branches (NOT part of kb-dev pipeline)
+
+These are reachable via direct user invocation only. They never auto-fire from kb-dev:
+
+| Skill          | Trigger                                              | Why standalone                            |
+|----------------|------------------------------------------------------|-------------------------------------------|
+| `grill-me`     | "grill me", "stress-test this", "poke holes"         | High-friction; opt-in only                |
+| `tech-company` | "act as a tech company", "delegate to engineers"    | Alternative orchestrator pattern          |
+| UI skills (`adapt`/`animate`/`audit`/`clarify`/`harden`/`normalize`/`optimize`/`polish`/`quieter`) | Single-phase user request | Can be used inside Phase 5, but also standalone |
+| `frontend-design` | "build a landing page", "create a UI for X"      | Single-phase generator                    |
+| `vercel-react-best-practices` | React/Next.js refactor or review     | Reference/lint, not workflow              |
+| `kb-ingest`    | "ingest these docs", file dropped in `raw/`         | Manual document ingest                    |
+| `kb-publish`   | "publish KB to NotebookLM"                          | Manual publishing                         |
+| `kb-lint`      | Periodic / on demand                                | Audit, not workflow                       |
+| `writing-skills` | "create a new skill"                              | Skill authoring meta-tool                 |
+
+### Cross-references (which skill calls which)
+
+- `kb-dev` calls everything in the main pipeline.
+- `kb-spec` calls `kb-query` (reads prior art) and `kb-docs-sync` (in `post` mode).
+- `dispatching-parallel-agents` calls the `Agent` tool with `subagent-driven-development` loaded into each worker.
+- `executing-plans` calls `test-driven-development` for each task and `verification-before-completion` at the end.
+- `requesting-code-review` reads the diff and writes a review request; `receiving-code-review` reads incoming feedback and routes it back to `executing-plans` for fixes.
+- `kb-compile` reads `daily/` logs (auto-captured by the SessionStart hook) and writes to `knowledge/concepts/` + `knowledge/connections/`.
+- `kb-docs-sync` mirrors `specs/`, `plans/`, `CLAUDE.md`, `README.md` into `knowledge/sources/`.
+
+This is the complete map. If a skill is not on it, it is either a meta-tool (writing-skills, using-superpowers) or a user-utility (loop, schedule, update-config, keybindings-help) and is not part of the dev pipeline.
