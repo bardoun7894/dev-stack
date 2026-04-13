@@ -1,6 +1,6 @@
 ---
 name: design-md
-description: Use when the user wants to adopt, reference, or build UI inspired by a real-world brand's design system (e.g. "build this like Linear", "use the Stripe aesthetic", "make it look like Notion", "apply a design system"). Downloads a curated DESIGN.md file into the project root and auto-wires it into the knowledge base. 58+ brands available.
+description: Use when the user wants to adopt, reference, or build UI inspired by a real-world brand's design system (e.g. "build this like Linear", "use the Stripe aesthetic", "make it look like Notion", "apply a design system"). Downloads a curated DESIGN.md file into the project root and auto-wires it into the knowledge base. 58+ brands available. Pipeline position — Entry point of the design workflow chain. Upstream: USER. Downstream: design-check (auto-offers conformance scan after brand adoption). Full chain: design-md → design-check → normalize → polish → audit → finishing-a-development-branch.
 user-invocable: true
 argument-hint: "[brand-name | list]"
 allowed-tools: Bash Read Write Skill WebFetch

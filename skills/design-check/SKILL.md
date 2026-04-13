@@ -1,6 +1,6 @@
 ---
 name: design-check
-description: Use when the user wants to verify their app's UI matches a design system — either their own adopted DESIGN.md or any brand from the awesome-design-md catalog (Linear, Stripe, Notion, etc.). Triggers on "check if our design matches", "is the theme respected", "find design conflicts", "how close is our app to Linear", "compare our design to Stripe". Read-only conformance scan that compares actual code against a reference design system and reports every mismatch with file:line references. Does NOT edit code — hands off to /normalize for fixes.
+description: Use when the user wants to verify their app's UI matches a design system — either their own adopted DESIGN.md or any brand from the awesome-design-md catalog (Linear, Stripe, Notion, etc.). Triggers on "check if our design matches", "is the theme respected", "find design conflicts", "how close is our app to Linear", "compare our design to Stripe". Read-only conformance scan that compares actual code against a reference design system and reports every mismatch with file:line references. Does NOT edit code — hands off to /normalize for fixes. Pipeline position — Step 2 of the design workflow chain. Upstream: design-md (after brand adoption), USER (direct invocation). Downstream: normalize (auto-offers handoff at end of scan). Full chain: design-md → design-check → normalize → polish → audit → finishing-a-development-branch.
 user-invocable: true
 argument-hint: "[scope] [--against <brand>]"
 allowed-tools: Bash Read Grep Glob Skill

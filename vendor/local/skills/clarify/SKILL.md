@@ -1,6 +1,6 @@
 ---
 name: clarify
-description: Improve unclear UX copy, error messages, microcopy, labels, and instructions to make interfaces easier to understand. Use when the user mentions confusing text, unclear labels, bad error messages, hard-to-follow instructions, or wanting better UX writing.
+description: Improve unclear UX copy, error messages, microcopy, labels, and instructions to make interfaces easier to understand. Use when the user mentions confusing text, unclear labels, bad error messages, hard-to-follow instructions, or wanting better UX writing. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "confusing copy"/"label"/"error message"/"microcopy"), OR standalone. Upstream: executing-plans, subagent-driven-development. Downstream: test-driven-development (cover the new copy in tests so translations and edge cases don't regress).
 user-invocable: true
 argument-hint: "[target]"
 ---

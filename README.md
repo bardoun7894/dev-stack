@@ -23,7 +23,7 @@ dev-stack/
 └── README.md
 ```
 
-## The 35-skill suite
+## The 38-skill suite
 
 | Layer          | Source         | Skills                                                                                                         |
 |----------------|----------------|----------------------------------------------------------------------------------------------------------------|
@@ -35,7 +35,11 @@ dev-stack/
 | Meta           | superpowers    | writing-skills, using-superpowers                                                                              |
 | Frontend / UI  | (vendored)     | adapt, animate, audit, clarify, harden, normalize, optimize, polish, quieter, frontend-design, vercel-react-best-practices |
 | Orchestration  | (vendored)     | tech-company                                                                                                   |
-| First-party    | dev-stack      | **kb-dev** (unified entry point), **grill-me** (standalone adversarial planner)                                |
+| First-party    | dev-stack      | **kb-dev** (unified entry point), **grill-me** (standalone adversarial planner), **design-check** (conformance scanner), **design-md** (brand design system adopter) |
+
+Total: **4 first-party + 8 kb-skill + 14 superpowers + 12 vendor-local = 38 skills.**
+
+See [`docs/CONNECTIONS.md`](docs/CONNECTIONS.md) for the canonical skill-to-skill edge list and [`docs/RELATIONS.md`](docs/RELATIONS.md) for the human-readable map.
 
 ## Install
 

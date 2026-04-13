@@ -1,6 +1,6 @@
 ---
 name: animate
-description: Review a feature and enhance it with purposeful animations, micro-interactions, and motion effects that improve usability and delight. Use when the user mentions adding animation, transitions, micro-interactions, motion design, hover effects, or making the UI feel more alive.
+description: Review a feature and enhance it with purposeful animations, micro-interactions, and motion effects that improve usability and delight. Use when the user mentions adding animation, transitions, micro-interactions, motion design, hover effects, or making the UI feel more alive. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "animate"/"transition"/"motion"/"hover"/"micro-interaction"), OR standalone. Upstream: executing-plans, subagent-driven-development, frontend-design. Downstream: polish (align the new animated elements pixel-perfectly).
 user-invocable: true
 argument-hint: "[target]"
 ---

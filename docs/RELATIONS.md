@@ -1,8 +1,9 @@
 # dev-stack — skill relations map
 
-This is the reference document for how all 36 skills in dev-stack connect to each other.
-The canonical version lives inside `skills/kb-dev/SKILL.md`. This file is the
-human-readable extract for humans who want the map without scrolling through a SKILL.
+This is the reference document for how all 38 skills in dev-stack connect to each other.
+The canonical version lives inside `skills/kb-dev/SKILL.md`, and the per-edge list lives in
+`docs/CONNECTIONS.md`. This file is the human-readable extract for humans who want the map
+without scrolling through a SKILL.
 
 ## The hub-and-spoke model
 
@@ -86,10 +87,24 @@ off so they don't surprise the user mid-pipeline:
 |----------------------|----------------------------------------------------------|
 | `grill-me`           | "grill me", "stress-test this", "poke holes"             |
 | `tech-company`       | "act as a tech company", "delegate to engineers"         |
+| `design-check`       | "check the design", "is our theme respected"             |
+| `design-md`          | "use the Linear aesthetic", "apply the Stripe design"    |
 | `kb-ingest`          | "ingest these docs"                                      |
 | `kb-publish`         | "publish KB to NotebookLM"                               |
 | `kb-lint`            | "audit the KB"                                           |
 | `writing-skills`     | "create a new skill"                                     |
+
+## Design workflow chain
+
+When the user is working on theme consistency, the preferred chain is:
+
+```
+design-md <brand>  →  design-check  →  normalize  →  polish  →  audit  →  finishing-a-development-branch
+   (optional)          (read-only)     (fixes)      (pixels)   (a11y/perf)       (ship)
+```
+
+`design-check` auto-offers to invoke `/normalize` at the end of its scan. `/polish` closes
+with `/audit` for the final quality pass before branch finishing.
 
 ## The two entry points
 
@@ -116,7 +131,7 @@ The `UserPromptSubmit` hook at `~/.claude/hooks/user-prompt-kb-check.sh`:
 
 | Mechanism                          | Cost                                  |
 |------------------------------------|---------------------------------------|
-| 36 skill descriptions at session start | ~10 kB of metadata (one-time)     |
+| 38 skill descriptions at session start | ~11 kB of metadata (one-time)     |
 | Smart hook on engineering prompt   | ~150 tokens                           |
 | Smart hook on trivial prompt       | 0 tokens                              |
 | `kb-query` cited answer            | ~200-500 tokens (vs. 5k+ for raw file reads) |

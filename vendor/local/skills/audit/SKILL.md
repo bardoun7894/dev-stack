@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Run technical quality checks across accessibility, performance, theming, responsive design, and anti-patterns. Generates a scored report with P0-P3 severity ratings and actionable plan. Use when the user wants an accessibility check, performance audit, or technical quality review.
+description: Run technical quality checks across accessibility, performance, theming, responsive design, and anti-patterns. Generates a scored report with P0-P3 severity ratings and actionable plan. Use when the user wants an accessibility check, performance audit, or technical quality review. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "a11y"/"accessibility"/"audit"/"lighthouse"), AND the terminal quality gate of the design workflow chain (after polish). Upstream: polish, executing-plans, subagent-driven-development, frontend-design. Downstream: finishing-a-development-branch (ship the audited work).
 user-invocable: true
 argument-hint: "[area (feature, page, component...)]"
 ---

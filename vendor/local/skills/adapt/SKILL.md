@@ -1,6 +1,6 @@
 ---
 name: adapt
-description: Adapt designs to work across different screen sizes, devices, contexts, or platforms. Implements breakpoints, fluid layouts, and touch targets. Use when the user mentions responsive design, mobile layouts, breakpoints, viewport adaptation, or cross-device compatibility.
+description: Adapt designs to work across different screen sizes, devices, contexts, or platforms. Implements breakpoints, fluid layouts, and touch targets. Use when the user mentions responsive design, mobile layouts, breakpoints, viewport adaptation, or cross-device compatibility. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "responsive"/"mobile"/"breakpoint"/"viewport"/"tablet"/"iPad"), OR standalone. Upstream: executing-plans, subagent-driven-development. Downstream: test-driven-development (verify the adaptation works at each breakpoint).
 user-invocable: true
 argument-hint: "[target] [context (mobile, tablet, print...)]"
 ---

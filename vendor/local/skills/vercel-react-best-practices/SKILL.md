@@ -1,6 +1,6 @@
 ---
 name: vercel-react-best-practices
-description: React and Next.js performance optimization guidelines from Vercel Engineering. This skill should be used when writing, reviewing, or refactoring React/Next.js code to ensure optimal performance patterns. Triggers on tasks involving React components, Next.js pages, data fetching, bundle optimization, or performance improvements.
+description: React and Next.js performance optimization guidelines from Vercel Engineering. This skill should be used when writing, reviewing, or refactoring React/Next.js code to ensure optimal performance patterns. Triggers on tasks involving React components, Next.js pages, data fetching, bundle optimization, or performance improvements. Pipeline position — Phase 5 specialist inside kb-dev (auto-routes on React/Next.js component or perf work), OR standalone. Upstream: executing-plans, subagent-driven-development, frontend-design. Downstream: optimize (if perf is the primary concern) OR verification-before-completion (if correctness is the primary concern).
 license: MIT
 metadata:
   author: vercel
