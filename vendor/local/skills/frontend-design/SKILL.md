@@ -8,6 +8,23 @@ This skill guides creation of distinctive, production-grade frontend interfaces 
 
 The user provides frontend requirements: a component, page, application, or interface to build. They may include context about the purpose, audience, or technical constraints.
 
+## DESIGN.md — Auto-load (mandatory first step)
+
+Before designing anything, walk up from cwd to the project root and check for `DESIGN.md`:
+
+```bash
+root="$PWD"
+while [ "$root" != "/" ] && [ "$root" != "$HOME" ]; do
+  if [ -d "$root/.git" ] || [ -d "$root/.claude" ]; then break; fi
+  root=$(dirname "$root")
+done
+[ -f "$root/DESIGN.md" ] && echo "FOUND: $root/DESIGN.md" || echo "NONE"
+```
+
+**If `DESIGN.md` exists → Read it in full (via the Read tool) and treat it as the authoritative design system.** Every decision below (colors, typography, spacing, components, motion) must be derived from the tokens and rules in that file — do NOT invent a new aesthetic direction. State upfront in one line: "Using design system from DESIGN.md — <tone + signature color>." Extract the tone and signature color from the file's first section.
+
+**If `DESIGN.md` is absent → proceed with the creative direction below.** Once, at the start, suggest: "Tip: run `/design-md <brand>` to adopt a curated design system (Linear, Stripe, Notion, etc.) before building." Do not repeat the suggestion on subsequent requests in the same session.
+
 ## Design Thinking
 
 Before coding, understand the context and commit to a BOLD aesthetic direction:
