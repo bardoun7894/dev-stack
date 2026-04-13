@@ -105,6 +105,39 @@ if [ $needs_dev_stack_install -eq 1 ]; then
   printf '\n'
 fi
 
+# --- Rule drift detection (auto-gen section in CLAUDE.md vs filesystem) ---
+#
+# Calls refresh-rule.sh --check. If exit code is non-zero, the auto-generated
+# section in CLAUDE.md is stale. We inject an alert telling Claude to ASK
+# before applying the refresh. Cached for 5 minutes.
+rule_drift_cache="$HOME/.claude/.rule-drift-cache"
+rule_drift_recheck=1
+drift_msg=""
+if [ -f "$rule_drift_cache" ]; then
+  now_epoch=$(date +%s)
+  cache_epoch=$(stat -f '%m' "$rule_drift_cache" 2>/dev/null || echo 0)
+  age=$((now_epoch - cache_epoch))
+  if [ "$age" -lt 300 ]; then
+    rule_drift_recheck=0
+    drift_msg=$(cat "$rule_drift_cache" 2>/dev/null)
+  fi
+fi
+if [ $rule_drift_recheck -eq 1 ]; then
+  refresh_script="$HOME/code/dev-stack/scripts/refresh-rule.sh"
+  if [ -x "$refresh_script" ]; then
+    drift_output=$("$refresh_script" --check 2>/dev/null || true)
+    case "$drift_output" in
+      DRIFT*) drift_msg="$drift_output" ;;
+      *)      drift_msg="" ;;
+    esac
+    echo "$drift_msg" > "$rule_drift_cache"
+  fi
+fi
+if [ -n "$drift_msg" ]; then
+  printf '📋 RULE OUT OF DATE: %s\n' "$drift_msg"
+  printf '  The auto-generated dev-stack-state section in ~/.claude/CLAUDE.md is stale. Run `bash ~/code/dev-stack/scripts/refresh-rule.sh --dry-run` to see what changed, then ASK THE USER before applying with `bash ~/code/dev-stack/scripts/refresh-rule.sh`. Never apply without explicit confirmation.\n\n'
+fi
+
 # --- Auto git init for unmarked user-project candidates ---
 if [ -z "$root" ]; then
   case "$PWD" in

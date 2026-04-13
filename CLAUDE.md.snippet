@@ -54,6 +54,29 @@ The smart `UserPromptSubmit` hook only injects the standing-rule reminder when t
 
 You should still follow the rule on every relevant turn even if the hook stays silent — the silent skip is for token efficiency, not for permission to ignore the rule.
 
+### Mandatory skill use — never skip these
+
+When a non-trivial engineering task is in flight, **all** of these skills participate, in this order. Do not cherry-pick. Do not skip "to save time" — the rule is what makes the workflow trustworthy.
+
+**KB layer (always)** — every relevant phase consults the knowledge base: `/kb-query`, `/kb-spec pre/plan/tasks/implement/post`, `/kb-docs-sync`, `/kb-compile`, `/kb-lint`, `/kb-ingest`. Skipping `/kb-query` before a history question is a violation.
+
+**Spec layer (always)** — every non-trivial change goes through the full Spec Kit pipeline: `/kb-spec pre` → `/speckit.specify` → `/kb-spec plan` → `/speckit.plan` → `/kb-spec tasks` → `/speckit.tasks` → `/kb-spec implement` → `/speckit.implement` → `/kb-spec post`. Skipping a phase to "just code it" is forbidden for any task larger than a one-line fix.
+
+**Branch layer (always)** — every implementation runs on a real branch with isolation: `using-git-worktrees` (start), `finishing-a-development-branch` (end). Implementation that touches `main` directly is forbidden.
+
+**Quality layer (always)** — `test-driven-development`, `verification-before-completion`, `systematic-debugging` (on failure), `requesting-code-review`, `receiving-code-review`. "It works on my machine" is not a verification.
+
+### Auto-generated dev-stack state
+
+The `scripts/refresh-rule.sh` script regenerates a section of `~/.claude/CLAUDE.md` between these markers, reflecting current filesystem state (installed skills, helpers, hook source). **Add these two lines somewhere in your CLAUDE.md** so the script can find them:
+
+```
+<!-- BEGIN AUTO-GENERATED: dev-stack-state do-not-edit-by-hand -->
+<!-- END AUTO-GENERATED: dev-stack-state -->
+```
+
+Then run `bash ~/code/dev-stack/scripts/refresh-rule.sh` to populate them. The `UserPromptSubmit` hook auto-detects drift on every prompt (cached 5 min) and alerts with `📋 RULE OUT OF DATE` when the section is stale. **Claude must always ASK the user before applying a refresh** — never auto-apply.
+
 ### Project-level overrides
 
 A project's own `CLAUDE.md` can tighten or relax this rule (e.g. disable auto-bootstrap for a repo where the KB lives elsewhere). Project rules win over this global rule when they conflict.
