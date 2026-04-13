@@ -70,7 +70,29 @@ if [ -z "$root" ]; then
   esac
 fi
 
-# --- Bootstrap alert (always fires when toolchains missing) ---
+# --- False-positive guard: are we INSIDE an existing kb folder? ---
+#
+# If cwd is at or below an ai-knowledge-base/ that has its own scripts/query.py,
+# walk further up to find the real project root that owns that kb. Otherwise the
+# bootstrap check sees "no scripts/query.py at <root>" and falsely triggers.
+inside_kb=""
+probe="$PWD"
+while [ "$probe" != "/" ] && [ "$probe" != "$HOME" ]; do
+  if [ -f "$probe/scripts/query.py" ] && [ -f "$probe/knowledge/index.md" ]; then
+    inside_kb="$probe"
+    break
+  fi
+  probe=$(dirname "$probe")
+done
+if [ -n "$inside_kb" ]; then
+  # The real project root is the parent of the kb folder.
+  parent_root=$(dirname "$inside_kb")
+  if [ -d "$parent_root/.git" ] || [ -d "$parent_root/.claude" ]; then
+    root="$parent_root"
+  fi
+fi
+
+# --- Bootstrap alert (fires when project is missing the toolchains) ---
 if [ -n "$root" ]; then
   needs_kb=0
   needs_spec=0
@@ -82,6 +104,23 @@ if [ -n "$root" ]; then
     [ $needs_kb -eq 1 ]   && printf '  - Run /kb-setup (creates ai-knowledge-base/ with scripts, hooks, knowledge/, daily/, raw/, and wires SessionStart/PreCompact/SessionEnd hooks into .claude/settings.local.json).\n'
     [ $needs_spec -eq 1 ] && printf '  - Run /kb-spec init (copies Spec Kit templates and scripts from ~/.specify/ into this project).\n'
     printf '\n'
+  fi
+
+  # --- raw/ scanner: alert when un-ingested files are sitting in the inbox ---
+  raw_dir="$root/ai-knowledge-base/raw"
+  if [ -d "$raw_dir" ]; then
+    snapshot="$raw_dir/.last-ingest-snapshot"
+    # Build current state: filename + size, sorted, excluding .gitkeep and snapshot itself
+    current_state=$(cd "$raw_dir" 2>/dev/null && find . -maxdepth 2 -type f -not -name '.gitkeep' -not -name '.last-ingest-snapshot' -exec stat -f '%N %z' {} \; 2>/dev/null | sort)
+    if [ -n "$current_state" ]; then
+      saved_state=""
+      [ -f "$snapshot" ] && saved_state=$(cat "$snapshot" 2>/dev/null)
+      if [ "$current_state" != "$saved_state" ]; then
+        # Count files (lines)
+        new_count=$(printf '%s\n' "$current_state" | wc -l | tr -d ' ')
+        printf '📥 INGEST PENDING: %s file(s) in %s have not been ingested into the KB. Run /kb-ingest to process them into knowledge/sources/. The hook tracks them via %s — once ingested, this alert stops.\n\n' "$new_count" "$raw_dir" ".last-ingest-snapshot"
+      fi
+    fi
   fi
 fi
 
