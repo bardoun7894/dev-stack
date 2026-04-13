@@ -236,15 +236,32 @@ These routing rules apply both to **solo mode** (Phase 5a — current session) a
 
 These never auto-fire from kb-dev — the user must explicitly request them:
 
-| Skill          | Trigger                                              | Why standalone                            |
-|----------------|------------------------------------------------------|-------------------------------------------|
-| `grill-me`     | "grill me", "stress-test this", "poke holes"         | High-friction; opt-in only                |
-| `tech-company` | "act as a tech company", "delegate to engineers"     | Alternative orchestrator pattern          |
-| `kb-ingest`    | "ingest these docs", file dropped in `raw/`          | Manual document ingest                    |
-| `kb-publish`   | "publish KB to NotebookLM"                           | Manual publishing                         |
-| `kb-lint`      | "audit the KB", periodic on demand                   | Audit, not workflow                       |
-| `writing-skills` | "create a new skill", "edit a skill"               | Skill authoring meta-tool                 |
-| `using-superpowers` | Auto-loaded at session start by obra              | Bootstrapper, not in pipeline             |
+| Skill               | Trigger                                              | Why standalone                            |
+|---------------------|------------------------------------------------------|-------------------------------------------|
+| `grill-me`          | "grill me", "stress-test this", "poke holes"         | High-friction; opt-in only                |
+| `tech-company`      | "act as a tech company", "delegate to engineers"     | Alternative orchestrator pattern          |
+| `design-check`      | "check the design", "audit the theme", "is our theme respected" | Read-only conformance scan; hands off to `/normalize` for fixes |
+| `design-md`         | "use the Linear aesthetic", "apply the Stripe design" | Adopts an external brand design system into the project |
+| `kb-ingest`         | "ingest these docs", file dropped in `raw/`          | Manual document ingest                    |
+| `kb-publish`        | "publish KB to NotebookLM"                           | Manual publishing                         |
+| `kb-lint`           | "audit the KB", periodic on demand                   | Audit, not workflow                       |
+| `writing-skills`    | "create a new skill", "edit a skill"                 | Skill authoring meta-tool                 |
+| `using-superpowers` | Auto-loaded at session start by obra                 | Bootstrapper, not in pipeline             |
+
+### Design workflow (chain of standalone skills)
+
+When the user is working on a design/theme concern, the preferred chain is:
+
+```
+1. /design-md <brand>       (optional — adopt a brand's design system)
+2. /design-check             (scan for conflicts against the theme — read-only)
+3. /normalize <scope>        (apply the fixes design-check identified)
+4. /polish                   (micro-polish pixel-level details)
+5. /audit                    (technical quality: a11y, perf, responsive)
+6. /finishing-a-development-branch  (ship it)
+```
+
+`design-check` auto-offers to invoke `/normalize` at the end of its scan — the user does not need to type both commands unless they decline the handoff. This is the theme-consistency loop that closes the "all UI should fetch the main design, with fix for gaps" requirement.
 
 ### Cross-references (which skill calls which)
 
