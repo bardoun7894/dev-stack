@@ -91,12 +91,36 @@ fi
 # positives (injecting on a non-project prompt) only cost 150 tokens, while
 # false negatives (skipping injection on a real project prompt) defeat the
 # entire purpose of the standing rule.
+#
+# Bilingual: English + Arabic. Arabic doesn't have case, so -i is a no-op for
+# Arabic but keeps the English half case-insensitive. UTF-8 in regex works
+# with grep/ripgrep on macOS as long as LC_ALL/LANG is sane.
 emit_reminder=1
 if [ -n "$user_prompt" ]; then
   # Trivial-prompt heuristics: short prompts with no engineering vocabulary skip the reminder.
   prompt_len=${#user_prompt}
   if [ "$prompt_len" -lt 200 ]; then
-    if ! printf '%s' "$user_prompt" | grep -qiE 'feature|bug|fix|implement|build|ship|spec|/speckit|/kb|/grill|history|architect|refactor|deploy|migrat|design|create|add |adding|update |updating|change|modif|how do|how does|why does|what does|where is|what was|how did|prior|previous|exist|current|test|review|merge|branch|workflow|pipeline|orchestr|delegat|skill|hook|kb-dev|kb-spec|kb-query|grill-me|claude\.md|\.md|\.py|\.ts|\.tsx|\.js|\.php|\.go|\.rs|\.java|\.kt|\.swift|\.dart|\.rb|\.cs|database|api|endpoint|service|component|module|package|library|repo|repository|commit|push|pull|pr |/pr|issue|tasks|plan|decision|requirement|integration'; then
+    # English engineering vocabulary
+    en_pattern='feature|bug|fix|implement|build|ship|spec|/speckit|/kb|/grill|history|architect|refactor|deploy|migrat|design|create|add |adding|update |updating|change|modif|how do|how does|why does|what does|where is|what was|how did|prior|previous|exist|current|test|review|merge|branch|workflow|pipeline|orchestr|delegat|skill|hook|kb-dev|kb-spec|kb-query|grill-me|claude\.md|\.md|\.py|\.ts|\.tsx|\.js|\.php|\.go|\.rs|\.java|\.kt|\.swift|\.dart|\.rb|\.cs|database|api|endpoint|service|component|module|package|library|repo|repository|commit|push|pull|pr |/pr|issue|tasks|plan|decision|requirement|integration'
+
+    # Arabic engineering vocabulary (root forms + common conjugations)
+    #   ميزة/خاصية = feature        خطأ/علة/مشكلة = bug         أصلح/صلح/إصلاح = fix
+    #   نفذ/نفّذ/تنفيذ = implement   ابني/ابن/بناء/اعمل/صنع = build
+    #   نشر/إطلاق/شحن = ship         مواصفات/مواصفة/سبك = spec
+    #   تاريخ/سجل = history          هيكل/بنية/معمارية = architecture
+    #   إعادة هيكلة = refactor       تصميم = design              أنشئ/إنشاء = create
+    #   أضف/إضافة = add              عدّل/تحديث = update         غيّر/تغيير = change
+    #   اختبار/فحص = test            مراجعة = review             دمج = merge
+    #   فرع = branch                 سير عمل = workflow          قرار = decision
+    #   متطلب = requirement          تكامل = integration         ميزانية = (project work)
+    #   كود/شفرة/برمجة = code        ملف = file                  وحدة/مكون = module/component
+    #   قاعدة بيانات = database     واجهة = interface           خدمة = service
+    #   نقطة نهاية = endpoint        مكتبة = library             مستودع = repo
+    #   لماذا/كيف/ماذا/أين/متى = why/how/what/where/when (question words)
+    #   سابق/الحالي/الموجود = prior/current/existing
+    ar_pattern='ميزة|خاصية|خطأ|علة|مشكلة|أصلح|صلح|إصلاح|نفذ|نفّذ|تنفيذ|ابني|ابن |بناء|اعمل|صنع|نشر|إطلاق|شحن|مواصفات|مواصفة|تاريخ|سجل|هيكل|بنية|معمارية|إعادة هيكلة|تصميم|أنشئ|إنشاء|أضف|إضافة|عدّل|تحديث|غيّر|تغيير|اختبار|فحص|مراجعة|دمج|فرع|سير عمل|قرار|متطلب|تكامل|كود|شفرة|برمجة|ملف |وحدة|مكون|قاعدة بيانات|واجهة|خدمة|نقطة نهاية|مكتبة|مستودع|لماذا|كيف|ماذا|أين|متى|سابق|الحالي|الموجود|كب-ديف|كب-سبك|كب-كويري'
+
+    if ! printf '%s' "$user_prompt" | grep -qiE "$en_pattern|$ar_pattern"; then
       emit_reminder=0
     fi
   fi

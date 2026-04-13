@@ -46,16 +46,20 @@ If unsure, ask once: "Solo or fan-out?"
 - **Sonnet** → the default for all worker agents, implementation, debugging, review.
 - **Haiku** → cheap one-shot lookups the orchestrator needs (file existence, single-file read summaries, "does this symbol exist"). Spawn via `Agent(model: "haiku", ...)`.
 
-## Invocation
+## Invocation (English + Arabic)
 
-| Trigger phrase                                       | What kb-dev does                                                  |
-|------------------------------------------------------|-------------------------------------------------------------------|
-| "new feature X"                                      | Run phases 0 → 4, pause for solo/fan-out decision                 |
-| "implement the spec at specs/NNN"                    | Run phase 0, then jump to phase 5, then 6–12                      |
-| "fix bug Y" (< 30 LOC)                               | Run phase 0, then solo-mode phase 5a straight through to 12       |
-| "ship this branch"                                   | Run phases 9 → 12                                                 |
-| "debug this"                                         | Run `systematic-debugging` directly                               |
-| "brainstorm X"                                       | Run `brainstorming` directly                                      |
+| Trigger phrase (EN)                | Trigger phrase (AR)                          | What kb-dev does                                                  |
+|------------------------------------|----------------------------------------------|-------------------------------------------------------------------|
+| "new feature X"                    | "ميزة جديدة X" / "خاصية جديدة X"             | Run phases 0 → 4, pause for solo/fan-out decision                 |
+| "build X" / "implement X"          | "ابني X" / "اعمل X" / "نفّذ X" / "صنع X"     | Run phases 0 → 12 (full pipeline)                                 |
+| "implement the spec at specs/NNN"  | "نفّذ المواصفات في specs/NNN"                | Run phase 0, then jump to phase 5, then 6–12                      |
+| "fix bug Y" (< 30 LOC)             | "أصلح خطأ Y" / "صلح Y" / "إصلاح Y"           | Run phase 0, then solo-mode phase 5a straight through to 12       |
+| "ship this branch"                 | "انشر هذا الفرع" / "إطلاق"                   | Run phases 9 → 12                                                 |
+| "debug this"                       | "صحح هذا" / "ابحث عن المشكلة"                | Run `systematic-debugging` directly                               |
+| "brainstorm X"                     | "فكّر في X" / "اقتراحات لـ X"                | Run `brainstorming` directly                                      |
+| "spec out X" / "write a spec for X"| "اكتب مواصفات X" / "حدد X"                   | Run `kb-spec` standalone (phases 0,2,3,4 only — no implementation)|
+
+**Language note:** I (Claude) understand Arabic natively. Even prompts in mixed Arabic/English/French route correctly based on semantic content, not just keyword matching. The hook regex covers the most common Arabic engineering vocabulary as a safety net.
 
 ## What kb-dev explicitly does NOT do
 

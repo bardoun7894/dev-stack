@@ -12,13 +12,21 @@ A planning-mode skill that interviews the user **relentlessly but structurally**
 
 **Only on explicit user invocation.** This skill is intentionally separated from the `kb-dev` pipeline — it is opt-in, not automatic.
 
-Trigger phrases:
+Trigger phrases (EN):
 - "grill me" / "/grill-me"
 - "stress-test this"
 - "poke holes"
 - "convince me this is right"
 - "what am I missing"
 - "interrogate this plan"
+
+Trigger phrases (AR):
+- "اختبرني" / "اسألني"
+- "ضع تحت الضغط" / "اختبر هذا"
+- "ابحث عن الثغرات"
+- "أقنعني أن هذا صحيح"
+- "ماذا فاتني"
+- "استجوب هذه الخطة"
 
 Do **not** fire automatically from `kb-dev`, `brainstorming`, `kb-spec`, or any other workflow skill. The user calls grill-me when they decide they want it, and never otherwise.
 
