@@ -208,21 +208,39 @@ The **only** transitions that pause for the user are:
 - Phase 11 → merge to main (destructive, always confirm)
 - Any failure mode that needs a design call
 
-### Standalone branches (NOT part of kb-dev pipeline)
+### UI/frontend skills — wired into Phase 5 implementation (auto-routing)
 
-These are reachable via direct user invocation only. They never auto-fire from kb-dev:
+When Phase 5 hits a UI/frontend task, route to the right specialist skill instead of writing CSS by hand. These are NOT standalone — they fire automatically from inside the worker agent based on what the task says:
+
+| Task content contains…                                                | Auto-route to                |
+|-----------------------------------------------------------------------|------------------------------|
+| "build", "create", "design" + "page" / "component" / "landing"        | `frontend-design`            |
+| "responsive", "mobile", "breakpoint", "viewport", "tablet", "iPad"    | `adapt`                      |
+| "animate", "transition", "motion", "hover effect", "micro-interaction"| `animate`                    |
+| "polish", "alignment", "spacing", "finishing touches", "looks off"    | `polish`                     |
+| "consistent", "design system", "tokens", "drift"                      | `normalize`                  |
+| "harden", "edge case", "i18n", "overflow", "production-ready"         | `harden`                     |
+| "slow", "laggy", "janky", "bundle size", "perf"                       | `optimize`                   |
+| "a11y", "accessibility", "audit", "lighthouse"                        | `audit`                      |
+| "confusing copy", "label", "error message", "microcopy"               | `clarify`                    |
+| "too bold", "too loud", "calmer", "overstimulating"                   | `quieter`                    |
+| React / Next.js component or perf work                                | `vercel-react-best-practices`|
+
+These routing rules apply both to **solo mode** (Phase 5a — current session) and **fan-out mode** (Phase 5b — each Sonnet worker spawns the relevant UI skill inside its own context). The orchestrator does not need to invoke them; the worker recognizes its task and pulls in the matching skill.
+
+### Standalone branches (only on explicit user invocation)
+
+These never auto-fire from kb-dev — the user must explicitly request them:
 
 | Skill          | Trigger                                              | Why standalone                            |
 |----------------|------------------------------------------------------|-------------------------------------------|
 | `grill-me`     | "grill me", "stress-test this", "poke holes"         | High-friction; opt-in only                |
-| `tech-company` | "act as a tech company", "delegate to engineers"    | Alternative orchestrator pattern          |
-| UI skills (`adapt`/`animate`/`audit`/`clarify`/`harden`/`normalize`/`optimize`/`polish`/`quieter`) | Single-phase user request | Can be used inside Phase 5, but also standalone |
-| `frontend-design` | "build a landing page", "create a UI for X"      | Single-phase generator                    |
-| `vercel-react-best-practices` | React/Next.js refactor or review     | Reference/lint, not workflow              |
-| `kb-ingest`    | "ingest these docs", file dropped in `raw/`         | Manual document ingest                    |
-| `kb-publish`   | "publish KB to NotebookLM"                          | Manual publishing                         |
-| `kb-lint`      | Periodic / on demand                                | Audit, not workflow                       |
-| `writing-skills` | "create a new skill"                              | Skill authoring meta-tool                 |
+| `tech-company` | "act as a tech company", "delegate to engineers"     | Alternative orchestrator pattern          |
+| `kb-ingest`    | "ingest these docs", file dropped in `raw/`          | Manual document ingest                    |
+| `kb-publish`   | "publish KB to NotebookLM"                           | Manual publishing                         |
+| `kb-lint`      | "audit the KB", periodic on demand                   | Audit, not workflow                       |
+| `writing-skills` | "create a new skill", "edit a skill"               | Skill authoring meta-tool                 |
+| `using-superpowers` | Auto-loaded at session start by obra              | Bootstrapper, not in pipeline             |
 
 ### Cross-references (which skill calls which)
 
