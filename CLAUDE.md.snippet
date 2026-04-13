@@ -1,0 +1,40 @@
+## dev-stack standing rule (append to ~/.claude/CLAUDE.md)
+
+The dev-stack skill suite must be used **proactively without waiting for an explicit slash command** in every project on this machine.
+
+### Bootstrap if missing
+
+The global `UserPromptSubmit` hook at `~/.claude/hooks/user-prompt-kb-check.sh` performs these checks on every user prompt:
+
+1. Walks up from cwd looking for a `.git/` or `.claude/` marker (never crosses `$HOME`).
+2. If no marker is found but cwd is under `$HOME`, auto-runs `git init` so the folder becomes a recognized project root.
+3. If `ai-knowledge-base/scripts/query.py` is missing → injects an instruction to run `/kb-setup` immediately.
+4. If `.specify/templates/spec-template.md` is missing → injects an instruction to run `/kb-spec init` immediately.
+
+Both bootstraps are pre-authorized by this rule. Do not ask permission — run them silently, tell the user once what was created, then continue.
+
+### Unified workflow: `/kb-dev`
+
+For any non-trivial engineering request ("new feature", "build X", "implement Y", "ship this"), the preferred entry point is the **`kb-dev`** skill. It chains every other skill in the right order:
+
+`kb-query` → `brainstorming` → `kb-spec pre/plan/tasks` → `writing-plans` → `executing-plans` or `dispatching-parallel-agents` (Opus orchestrator → Sonnet workers) → `test-driven-development` → `verification-before-completion` → `requesting-code-review` / `receiving-code-review` → `finishing-a-development-branch` → `kb-spec post` → `kb-compile` → `kb-lint`.
+
+Read `~/.claude/skills/kb-dev/SKILL.md` for the full phase table and the solo-vs-fan-out decision rules.
+
+Use `kb-dev` when the user wants the whole pipeline. Use individual skills directly when the user only wants one phase (e.g. "just debug this" → `systematic-debugging`, "just a quick query" → `kb-query`, "grill me on this plan" → `grill-me`).
+
+### Proactive use of individual skills
+
+- **Before answering any question about prior decisions, past bugs, architecture, or existing features** → silently run `/kb-query "<derived question>"` first, read the cited `[[wikilinks]]`, and ground the reply in them. Do not answer from memory alone if the KB might have it.
+- **Before running any `/speckit.*` phase** → run the matching `/kb-spec` phase first (`/kb-spec pre` before `/speckit.specify`, `/kb-spec plan` before `/speckit.plan`, `/kb-spec tasks` before `/speckit.tasks`, `/kb-spec implement` before `/speckit.implement`).
+- **After finishing `/speckit.tasks`** → run `/kb-spec post` to mirror the finalized feature back into the KB via `/kb-docs-sync`.
+- **After a long coding session or at end of day** → run `/kb-compile && /kb-lint` to roll daily logs into concept articles and catch drift.
+
+### Standalone skills (call only when explicitly invoked)
+
+- **`grill-me`** — adversarial planner. Only fires on "grill me", "stress-test this", "poke holes", "convince me", "what am I missing". Do NOT auto-fire from any workflow.
+- **`tech-company`** — persona-based parallel orchestrator. Only fires on "act as a tech company", "parallelize this", "delegate to engineers".
+
+### Project-level overrides
+
+A project's own `CLAUDE.md` can tighten or relax this rule (e.g. disable auto-bootstrap for a repo where the KB lives elsewhere). Project rules win over this global rule when they conflict.
