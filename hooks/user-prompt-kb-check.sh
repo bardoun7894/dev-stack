@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Global UserPromptSubmit hook.
-# 1. Walk up from cwd to find the project root (first ancestor with .git or .claude,
-#    but never cross $HOME — we must not bootstrap into $HOME itself).
-# 2. If no marker is found but cwd is a user-project candidate (under $HOME,
-#    not $HOME itself), auto-run `git init` at cwd so the folder becomes a
-#    recognized project root for this and future sessions.
-# 3. If the project is missing ai-knowledge-base or .specify, inject a hard
-#    bootstrap instruction telling Claude to run /kb-setup and/or /kb-spec init
-#    before doing anything else.
-# 4. Always append the standing-rule reminder for /kb-query and /kb-spec.
+# Global UserPromptSubmit hook (smart, context-saver mode).
+#
+# Decision tree on every user turn:
+#   1. Walk up from cwd to find .git or .claude marker (never crosses $HOME).
+#   2. If no marker found and cwd is under $HOME, auto-`git init` so the folder
+#      becomes a recognized project root.
+#   3. If kb or speckit toolchains are missing, ALWAYS inject a hard
+#      "BOOTSTRAP REQUIRED" instruction (this fires regardless of prompt content,
+#      because it's a one-time install that needs to happen ASAP).
+#   4. Read the user's prompt from stdin (Claude Code passes hook event JSON).
+#      Only inject the standing-rule REMINDER when the prompt looks like
+#      project work (history, feature, bug, spec, etc.). For trivial prompts
+#      like "ls" or "what's 2+2" the hook outputs nothing.
+#
+# This saves ~150 tokens × every trivial turn while still enforcing the rule
+# on every prompt that actually warrants it.
 
 find_project_root() {
   local dir="$PWD"
@@ -25,9 +31,30 @@ find_project_root() {
   return 1
 }
 
+# Read hook input from stdin — Claude Code passes a JSON blob with the prompt.
+# We capture it once and parse out the prompt field defensively. If anything
+# fails we fall back to "always emit the reminder" so we never under-inject.
+hook_input="$(cat 2>/dev/null || true)"
+user_prompt=""
+if [ -n "$hook_input" ]; then
+  user_prompt="$(printf '%s' "$hook_input" | /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    # Try several known field names across Claude Code versions
+    for k in ("prompt", "user_prompt", "user_message", "message", "input"):
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            print(v)
+            break
+except Exception:
+    pass
+' 2>/dev/null || true)"
+fi
+
 root=$(find_project_root) || root=""
 
-auto_init_notice=""
+# --- Auto git init for unmarked user-project candidates ---
 if [ -z "$root" ]; then
   case "$PWD" in
     "$HOME") ;;
@@ -36,17 +63,14 @@ if [ -z "$root" ]; then
         git init -q "$PWD" >/dev/null 2>&1
         if [ -d "$PWD/.git" ]; then
           root="$PWD"
-          auto_init_notice="AUTO-INITIALIZED an empty git repo at $PWD because no .git or .claude marker was present. Tell the user once that you ran \`git init\` here, then continue.\n\n"
+          printf 'AUTO-INITIALIZED an empty git repo at %s because no .git or .claude marker was present. Tell the user once that you ran `git init` here, then continue.\n\n' "$PWD"
         fi
       fi
       ;;
   esac
 fi
 
-if [ -n "$auto_init_notice" ]; then
-  printf '%b' "$auto_init_notice"
-fi
-
+# --- Bootstrap alert (always fires when toolchains missing) ---
 if [ -n "$root" ]; then
   needs_kb=0
   needs_spec=0
@@ -61,4 +85,23 @@ if [ -n "$root" ]; then
   fi
 fi
 
-printf '%s\n' 'REMINDER (standing rule from ~/.claude/CLAUDE.md): Before answering any question about project history, prior decisions, architecture, past bugs, or existing features, silently run /kb-query first and ground the reply in the cited [[wikilinks]]. Before any /speckit.* phase, run the matching /kb-spec phase first (pre before specify, plan before plan, tasks before tasks, implement before implement). Run /kb-spec post after /speckit.tasks. These are standing bridges — do not wait for explicit invocation.'
+# --- Smart reminder: only inject when the prompt looks like project work ---
+#
+# Match keywords (case-insensitive). We're deliberately broad because false
+# positives (injecting on a non-project prompt) only cost 150 tokens, while
+# false negatives (skipping injection on a real project prompt) defeat the
+# entire purpose of the standing rule.
+emit_reminder=1
+if [ -n "$user_prompt" ]; then
+  # Trivial-prompt heuristics: short prompts with no engineering vocabulary skip the reminder.
+  prompt_len=${#user_prompt}
+  if [ "$prompt_len" -lt 200 ]; then
+    if ! printf '%s' "$user_prompt" | grep -qiE 'feature|bug|fix|implement|build|ship|spec|/speckit|/kb|/grill|history|architect|refactor|deploy|migrat|design|create|add |adding|update |updating|change|modif|how do|how does|why does|what does|where is|what was|how did|prior|previous|exist|current|test|review|merge|branch|workflow|pipeline|orchestr|delegat|skill|hook|kb-dev|kb-spec|kb-query|grill-me|claude\.md|\.md|\.py|\.ts|\.tsx|\.js|\.php|\.go|\.rs|\.java|\.kt|\.swift|\.dart|\.rb|\.cs|database|api|endpoint|service|component|module|package|library|repo|repository|commit|push|pull|pr |/pr|issue|tasks|plan|decision|requirement|integration'; then
+      emit_reminder=0
+    fi
+  fi
+fi
+
+if [ $emit_reminder -eq 1 ]; then
+  printf '%s\n' 'REMINDER (standing rule from ~/.claude/CLAUDE.md): Before answering any question about project history, prior decisions, architecture, past bugs, or existing features, silently run /kb-query first and ground the reply in the cited [[wikilinks]]. Before any /speckit.* phase, run the matching /kb-spec phase first (pre before specify, plan before plan, tasks before tasks, implement before implement). Run /kb-spec post after /speckit.tasks. These are standing bridges — do not wait for explicit invocation.'
+fi

@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: Adversarial planning interviewer. Stress-tests a plan, design, spec, or feature idea by walking the user through a structured decision tree — coverage check, adversarial counter-arguments, dependency resolution, and a written decisions document. STANDALONE — only fires when the user explicitly invokes it. Trigger phrases: "grill me", "/grill-me", "stress-test this", "poke holes", "what am I missing", "convince me this is right", "interrogate this plan". Do NOT auto-fire from kb-dev or any other workflow. Pulls prior decisions from /kb-query so questions are grounded in what the project already knows. Outputs a structured `decisions.md` the user can carry into /speckit.specify and /speckit.plan.
+description: Adversarial planning interviewer. STANDALONE — only fires on explicit invocation ("grill me", "stress-test this", "poke holes", "convince me", "what am I missing"). Walks a structured 7-phase decision tree and writes decisions.md. Never auto-fires from kb-dev or any workflow.
 allowed-tools: Bash Read Write Edit Glob Grep
 ---
 

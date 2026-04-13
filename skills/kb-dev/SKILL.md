@@ -1,6 +1,6 @@
 ---
 name: kb-dev
-description: One-company dev team in a single skill. Unified end-to-end pipeline that chains the kb-* knowledge base, GitHub Spec Kit, and obra/superpowers skills into a complete workflow — from research → spec → plan → tasks → implement (with orchestrator delegation) → verify → review → merge → knowledge capture. TRIGGER PROACTIVELY when the user says "new feature", "build X", "implement Y", "let's start a spec", "ship this", or gives any non-trivial engineering request. Routes the user through the right sub-skill at each phase; do not reimplement any phase yourself. For small one-off edits, run solo-mode; for multi-task features, delegate to dispatching-parallel-agents with an Opus orchestrator and Sonnet workers.
+description: Unified 12-phase dev pipeline. Chains kb-query → brainstorming → kb-spec → writing-plans → implement (solo or fan-out) → TDD → verify → review → finish → kb capture. Use for any non-trivial feature/build/ship request. Read SKILL.md for the phase table.
 allowed-tools: Bash Read Write Edit Glob Grep Agent Skill
 ---
 
