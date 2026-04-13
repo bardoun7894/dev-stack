@@ -70,7 +70,7 @@ if [ -d "$REPO/vendor/local/skills" ]; then
 fi
 
 # 5. Hook
-echo "[5/5] hook"
+echo "[5/6] hook"
 hook_src="$REPO/hooks/user-prompt-kb-check.sh"
 hook_dst="$HOOKS_DIR/user-prompt-kb-check.sh"
 if [ -L "$hook_dst" ] && [ "$(readlink "$hook_dst")" = "$hook_src" ]; then
@@ -80,6 +80,31 @@ elif [ -e "$hook_dst" ]; then
 else
   ln -s "$hook_src" "$hook_dst"
   echo "  link user-prompt-kb-check.sh"
+fi
+
+# 6. Bin (universal helpers like kb-capture)
+echo "[6/6] bin"
+LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
+mkdir -p "$LOCAL_BIN"
+if [ -d "$REPO/bin" ]; then
+  for src in "$REPO"/bin/*; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src")"
+    dst="$LOCAL_BIN/$name"
+    if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
+      echo "  ok   $name (already linked)"
+    elif [ -e "$dst" ]; then
+      echo "  skip $name (exists, not ours — leaving alone)"
+    else
+      ln -s "$src" "$dst"
+      chmod +x "$src"
+      echo "  link $name → $dst"
+    fi
+  done
+  case ":$PATH:" in
+    *":$LOCAL_BIN:"*) ;;
+    *) echo "  warning: $LOCAL_BIN is not in your PATH — add 'export PATH=\"\$HOME/.local/bin:\$PATH\"' to your shell rc" ;;
+  esac
 fi
 
 # Settings reminder

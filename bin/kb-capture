@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#
+# kb-capture — universal AI conversation capture into the knowledge base
+#
+# Reads a transcript from stdin (or a file) and writes it to the nearest
+# project's ai-knowledge-base/raw/ as <model>-<timestamp>.md with frontmatter.
+# The dev-stack UserPromptSubmit hook will then alert Claude on the next session
+# to run /kb-ingest, which processes the file into knowledge/sources/.
+#
+# Usage:
+#   kb-capture <model-name>                       # read transcript from stdin
+#   kb-capture <model-name> < transcript.txt      # same, via redirect
+#   kb-capture <model-name> path/to/transcript    # read from a file
+#   kb-capture --help
+#
+# Example integrations:
+#   chat-qwen.py | kb-capture qwen
+#   pbpaste | kb-capture chatgpt
+#   opencode session export | kb-capture opencode
+#
+# Optional env vars:
+#   KB_CAPTURE_PROJECT  — override project root detection (default: walk up from cwd)
+#   KB_CAPTURE_TITLE    — short title appended to the filename
+#
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+kb-capture — universal AI conversation capture into the knowledge base
+
+Usage:
+  kb-capture <model-name>                       # read transcript from stdin
+  kb-capture <model-name> < transcript.txt      # same, via redirect
+  kb-capture <model-name> path/to/transcript    # read from a file
+  kb-capture --help
+
+Writes to the nearest <project>/ai-knowledge-base/raw/<model>-<timestamp>.md
+with frontmatter (source, model, captured timestamp). The dev-stack hook will
+then alert Claude on the next session to run /kb-ingest.
+
+Env vars:
+  KB_CAPTURE_PROJECT  override project root (default: walk up from cwd)
+  KB_CAPTURE_TITLE    short title appended to the filename (kebab-case)
+EOF
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  usage
+  exit 0
+fi
+
+if [ $# -lt 1 ]; then
+  echo "kb-capture: missing model name" >&2
+  echo "Run 'kb-capture --help' for usage." >&2
+  exit 1
+fi
+
+model="$1"
+input_file="${2:-}"
+
+# --- Find the project root: walk up looking for ai-knowledge-base/ ---
+find_project_with_kb() {
+  local dir
+  if [ -n "${KB_CAPTURE_PROJECT:-}" ]; then
+    echo "$KB_CAPTURE_PROJECT"
+    return 0
+  fi
+  dir="$PWD"
+  while [ "$dir" != "/" ] && [ "$dir" != "$HOME" ]; do
+    if [ -d "$dir/ai-knowledge-base/raw" ]; then
+      echo "$dir"
+      return 0
+    fi
+    dir=$(dirname "$dir")
+  done
+  return 1
+}
+
+project_root=$(find_project_with_kb) || {
+  echo "kb-capture: no ai-knowledge-base/raw/ found in cwd or any ancestor (and KB_CAPTURE_PROJECT is unset)" >&2
+  echo "kb-capture: hint — cd into a project that has 'ai-knowledge-base/raw/', or run /kb-setup first" >&2
+  exit 2
+}
+
+raw_dir="$project_root/ai-knowledge-base/raw"
+
+# --- Build the filename ---
+timestamp=$(date +%Y-%m-%d-%H%M%S)
+title_slug=""
+if [ -n "${KB_CAPTURE_TITLE:-}" ]; then
+  # kebab-case the title
+  title_slug="-$(printf '%s' "$KB_CAPTURE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
+fi
+filename="${model}-${timestamp}${title_slug}.md"
+target="$raw_dir/$filename"
+
+# --- Read the transcript ---
+if [ -n "$input_file" ]; then
+  if [ ! -f "$input_file" ]; then
+    echo "kb-capture: input file not found: $input_file" >&2
+    exit 3
+  fi
+  transcript=$(cat "$input_file")
+else
+  transcript=$(cat)
+fi
+
+if [ -z "$transcript" ]; then
+  echo "kb-capture: empty transcript, nothing to capture" >&2
+  exit 4
+fi
+
+# --- Write the file with frontmatter ---
+captured_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+captured_local=$(date "+%Y-%m-%d %H:%M:%S %z")
+
+mkdir -p "$raw_dir"
+{
+  printf -- '---\n'
+  printf 'source: %s\n' "$model"
+  printf 'captured: %s\n' "$captured_iso"
+  printf 'captured_local: "%s"\n' "$captured_local"
+  printf 'cwd: "%s"\n' "$PWD"
+  [ -n "${KB_CAPTURE_TITLE:-}" ] && printf 'title: "%s"\n' "$KB_CAPTURE_TITLE"
+  printf -- '---\n\n'
+  printf '# Conversation with %s\n\n' "$model"
+  printf '%s\n' "$transcript"
+} > "$target"
+
+# Friendly summary to stderr so stdout stays clean for piping
+{
+  echo "kb-capture: wrote $target"
+  echo "kb-capture: $(wc -l < "$target") lines, $(wc -c < "$target") bytes"
+  echo "kb-capture: dev-stack hook will alert /kb-ingest on next Claude Code prompt in this project"
+} >&2
+
+# Echo the path on stdout so callers can chain
+echo "$target"
