@@ -7,33 +7,41 @@ The dev-stack skill suite must be used **proactively without waiting for an expl
 The global `UserPromptSubmit` hook at `~/.claude/hooks/user-prompt-kb-check.sh` performs these checks on every user prompt:
 
 1. Walks up from cwd looking for a `.git/` or `.claude/` marker (never crosses `$HOME`).
-2. If no marker is found but cwd is under `$HOME`, auto-runs `git init` so the folder becomes a recognized project root.
+2. If no marker is found and cwd is under `$HOME`, auto-runs `git init` so the folder becomes a recognized project root.
 3. If `ai-knowledge-base/scripts/query.py` is missing → injects an instruction to run `/kb-setup` immediately.
 4. If `.specify/templates/spec-template.md` is missing → injects an instruction to run `/kb-spec init` immediately.
 
 Both bootstraps are pre-authorized by this rule. Do not ask permission — run them silently, tell the user once what was created, then continue.
 
-### Unified workflow: `/kb-dev`
+### Unified workflow: `/kb-dev` (preferred entry point)
 
-For any non-trivial engineering request ("new feature", "build X", "implement Y", "ship this"), the preferred entry point is the **`kb-dev`** skill. It chains every other skill in the right order:
+For any non-trivial engineering request — **"new feature", "build X", "implement Y", "ship this", "fix bug Z", "refactor A"** — the preferred entry point is the **`kb-dev`** skill at `~/.claude/skills/kb-dev/`. It chains every other skill in the right order:
 
 `kb-query` → `brainstorming` → `kb-spec pre/plan/tasks` → `writing-plans` → `executing-plans` or `dispatching-parallel-agents` (Opus orchestrator → Sonnet workers) → `test-driven-development` → `verification-before-completion` → `requesting-code-review` / `receiving-code-review` → `finishing-a-development-branch` → `kb-spec post` → `kb-compile` → `kb-lint`.
 
 Read `~/.claude/skills/kb-dev/SKILL.md` for the full phase table and the solo-vs-fan-out decision rules.
 
-Use `kb-dev` when the user wants the whole pipeline. Use individual skills directly when the user only wants one phase (e.g. "just debug this" → `systematic-debugging`, "just a quick query" → `kb-query`, "grill me on this plan" → `grill-me`).
+**Always reach for `kb-dev` first** when the user wants the whole pipeline. Only use individual skills directly when the user has explicitly scoped to a single phase (e.g. "just debug this" → `systematic-debugging`, "just polish the buttons" → `polish`, "just a quick query" → `kb-query`).
 
-### Proactive use of individual skills
+### Proactive use of individual skills (when not running the full pipeline)
 
 - **Before answering any question about prior decisions, past bugs, architecture, or existing features** → silently run `/kb-query "<derived question>"` first, read the cited `[[wikilinks]]`, and ground the reply in them. Do not answer from memory alone if the KB might have it.
 - **Before running any `/speckit.*` phase** → run the matching `/kb-spec` phase first (`/kb-spec pre` before `/speckit.specify`, `/kb-spec plan` before `/speckit.plan`, `/kb-spec tasks` before `/speckit.tasks`, `/kb-spec implement` before `/speckit.implement`).
 - **After finishing `/speckit.tasks`** → run `/kb-spec post` to mirror the finalized feature back into the KB via `/kb-docs-sync`.
 - **After a long coding session or at end of day** → run `/kb-compile && /kb-lint` to roll daily logs into concept articles and catch drift.
 
-### Standalone skills (call only when explicitly invoked)
+### Standalone-only skills (call only on explicit invocation)
 
-- **`grill-me`** — adversarial planner. Only fires on "grill me", "stress-test this", "poke holes", "convince me", "what am I missing". Do NOT auto-fire from any workflow.
-- **`tech-company`** — persona-based parallel orchestrator. Only fires on "act as a tech company", "parallelize this", "delegate to engineers".
+These skills are powerful but **must never auto-fire** — they are standalone, opt-in tools. They are deliberately kept out of the `kb-dev` pipeline so the user can call them when, and only when, they want them:
+
+- **`grill-me`** — adversarial planning interviewer. Trigger phrases: "grill me", "/grill-me", "stress-test this", "poke holes", "convince me", "what am I missing", "interrogate this plan". Walks a 7-phase decision tree and writes `decisions.md`. Do **not** invoke from inside `kb-dev`, `brainstorming`, or any workflow.
+- **`tech-company`** — persona-based parallel orchestrator (Frontend / Backend / DevOps / QA / Design roles in one context). Trigger phrases: "act as a tech company", "delegate to engineers", "parallelize this as roles". Different pattern from `kb-dev`'s real-subagent fan-out — use when the user explicitly wants persona role-play instead of separate-context workers.
+
+### How the standing rule is enforced
+
+The smart `UserPromptSubmit` hook only injects the standing-rule reminder when the prompt contains engineering vocabulary (feature, bug, fix, implement, spec, history, architecture, file extensions, etc.). Trivial prompts like "ls" or "what is 2+2" skip the reminder to save tokens. **Bootstrap-when-missing always fires; reminders only fire when they matter.**
+
+You should still follow the rule on every relevant turn even if the hook stays silent — the silent skip is for token efficiency, not for permission to ignore the rule.
 
 ### Project-level overrides
 
