@@ -26,9 +26,20 @@ Read `~/.claude/skills/kb-dev/SKILL.md` for the full phase table and the solo-vs
 ### Proactive use of individual skills (when not running the full pipeline)
 
 - **Before answering any question about prior decisions, past bugs, architecture, or existing features** → silently run `/kb-query "<derived question>"` first, read the cited `[[wikilinks]]`, and ground the reply in them. Do not answer from memory alone if the KB might have it.
-- **Before running any `/speckit.*` phase** → run the matching `/kb-spec` phase first (`/kb-spec pre` before `/speckit.specify`, `/kb-spec plan` before `/speckit.plan`, `/kb-spec tasks` before `/speckit.tasks`, `/kb-spec implement` before `/speckit.implement`).
+- **`/kb-spec` fires proactively on natural-language spec requests** — same as `/kb-dev`. Trigger phrases: "spec out X", "write a spec for Y", "let's spec X", "draft a spec", "we need a spec for Z", "specify X". Do NOT wait for the user to type `/speckit.*` first. Pick the right phase based on the state of the feature directory:
+  - No `specs/<NNN>/` yet → start with `/kb-spec pre` → then `/speckit.specify`
+  - `spec.md` exists, no `plan.md` → `/kb-spec plan` → `/speckit.plan`
+  - `plan.md` exists, no `tasks.md` → `/kb-spec tasks` → `/speckit.tasks`
+  - `tasks.md` exists, no implementation yet → `/kb-spec implement` → `/speckit.implement`
+- **Before running any `/speckit.*` phase manually** → also run the matching `/kb-spec` phase first.
 - **After finishing `/speckit.tasks`** → run `/kb-spec post` to mirror the finalized feature back into the KB via `/kb-docs-sync`.
 - **After a long coding session or at end of day** → run `/kb-compile && /kb-lint` to roll daily logs into concept articles and catch drift.
+
+### When `/kb-spec` fires standalone vs. inside `/kb-dev`
+
+- **`/kb-dev` fires** when the user wants the whole pipeline (spec → plan → tasks → implement → test → review → ship). Triggers: "build X", "implement Y", "ship Z", "fix bug A". `kb-spec` runs as phases 2-4 inside it.
+- **`/kb-spec` fires standalone** when the user wants ONLY the spec/plan/tasks phase, not the implementation. Triggers: "spec out X", "write a spec for Y", "draft a plan for Z". Do not invoke `kb-dev` for these — go straight to `kb-spec`.
+- If you cannot tell which the user wants, ask one short question: "Just write the spec, or run the full pipeline?"
 
 ### Standalone-only skills (call only on explicit invocation)
 
