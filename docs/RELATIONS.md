@@ -1,6 +1,6 @@
 # dev-stack — skill relations map
 
-This is the reference document for how all 38 skills in dev-stack connect to each other.
+This is the reference document for how all 39 skills in dev-stack connect to each other.
 The canonical version lives inside `skills/kb-dev/SKILL.md`, and the per-edge list lives in
 `docs/CONNECTIONS.md`. This file is the human-readable extract for humans who want the map
 without scrolling through a SKILL.
@@ -89,6 +89,7 @@ off so they don't surprise the user mid-pipeline:
 | `tech-company`       | "act as a tech company", "delegate to engineers"         |
 | `design-check`       | "check the design", "is our theme respected"             |
 | `design-md`          | "use the Linear aesthetic", "apply the Stripe design"    |
+| `caveman`            | "caveman lite/full/ultra", "talk like caveman", "terse mode", "compress output" |
 | `kb-ingest`          | "ingest these docs"                                      |
 | `kb-publish`         | "publish KB to NotebookLM"                               |
 | `kb-lint`            | "audit the KB"                                           |
@@ -127,11 +128,36 @@ The `UserPromptSubmit` hook at `~/.claude/hooks/user-prompt-kb-check.sh`:
 4. Always injects "BOOTSTRAP REQUIRED: run /kb-spec init" if `.specify/templates/spec-template.md` is missing.
 5. Smart-injects the standing-rule reminder ONLY when the prompt contains engineering vocabulary (saves ~150 tokens per trivial turn).
 
+## Agent layer (8 registered subagents)
+
+Skills handle "what to do". Agents handle "who does it in parallel". The 8 registered Claude Code subagents in `~/.claude/agents/` are:
+
+| Agent              | Default model | Specialty                                   |
+|--------------------|---------------|---------------------------------------------|
+| `orchestrator`     | opus          | Decompose / dispatch / aggregate            |
+| `planner`          | sonnet        | Spec → role-tagged tasks.md                 |
+| `frontend-engineer`| sonnet        | UI / CSS / React / Flutter                  |
+| `backend-engineer` | sonnet        | API / DB / server / migrations              |
+| `qa-engineer`      | sonnet        | Testing & verification                      |
+| `debugger`         | sonnet→opus   | Root-cause analysis                         |
+| `designer`         | sonnet        | Full design workflow chain                  |
+| `reviewer`         | sonnet        | Spec compliance + code quality              |
+
+The orchestrator picks the model per worker based on packet complexity:
+- **trivial** (lookups) → `haiku`
+- **simple/medium** (most work) → `sonnet`
+- **hard** (architectural reasoning, hairy debugging) → `opus`
+
+**Fan-out fires at NIU ≥ 2** (Number of Independent Units) — the previous threshold of 4 was too conservative and is the reason fan-out almost never fired automatically.
+
+If the parent session is Opus, the parent IS the orchestrator (no need to spawn a separate Opus subagent). If parent is Sonnet/Haiku, spawn the orchestrator as a separate subagent.
+
 ## Token cost summary
 
 | Mechanism                          | Cost                                  |
 |------------------------------------|---------------------------------------|
-| 38 skill descriptions at session start | ~11 kB of metadata (one-time)     |
+| 39 skill descriptions at session start | ~12 kB of metadata (one-time)     |
+| 8 agent definitions in ~/.claude/agents/ | ~8 kB total — only loaded on Agent spawn, not in every prompt |
 | Smart hook on engineering prompt   | ~150 tokens                           |
 | Smart hook on trivial prompt       | 0 tokens                              |
 | `kb-query` cited answer            | ~200-500 tokens (vs. 5k+ for raw file reads) |

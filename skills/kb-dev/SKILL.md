@@ -25,13 +25,61 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 11. Finish branch          | `finishing-a-development-branch` (obra) — optional: `using-git-worktrees`              | inline         |
 | 12. Capture knowledge      | `/kb-spec post` → `/kb-docs-sync` → `/kb-compile` → `/kb-lint`                         | inline         |
 
-## Decision: solo vs fan-out
+## Decision: solo vs fan-out (NIU-based, threshold = 2)
 
-Read `specs/<feature>/tasks.md`. If it has:
-- **≤ 3 tasks** or **a single dependency chain** → **solo mode** (phase 5a). One `executing-plans` run in-session.
-- **≥ 4 independent tasks** OR the user says "parallelize" / "fan-out" / "team" → **fan-out mode** (phase 5b). Spawn an Opus orchestrator via the `Agent` tool with `subagent_type` set to a general-purpose agent loaded with the `dispatching-parallel-agents` skill. The orchestrator then spawns one Sonnet worker per task group, each running `subagent-driven-development`.
+The fan-out gate is the **Number of Independent Units** (NIU) in the work — *not* the number of tasks in tasks.md. NIU counts work that touches different files, different subsystems, with no sequential coupling.
 
-If unsure, ask once: "Solo or fan-out?"
+| NIU | Mode | What you do |
+|----|------|-------------|
+| **1** | **Solo** (phase 5a) | One `executing-plans` run in current session. No orchestration. |
+| **2-4** | **Fan-out** (phase 5b) | Spawn one specialist agent per unit, all in parallel, in a single message. |
+| **5-8** | **Fan-out with batching** | Group into 4 packets, distribute units across them. Cap at 4 parallel workers. |
+| **9+** | **Stop and escalate** | Tell the user "this is too big, suggest narrowing scope". |
+
+**Fan-out fires at NIU ≥ 2.** Not 4. The previous threshold was wrong and is the reason fan-out almost never fired automatically.
+
+### How to count NIU when there's no tasks.md
+
+The user almost never runs `/speckit.tasks` first. So you derive NIU yourself:
+
+1. Read the user's request and any files they pointed at
+2. Identify the subsystems the work touches (UI, API, DB, tests, docs, deployment)
+3. Identify the file boundaries — which files share state, which don't
+4. NIU = number of subsystem × file-boundary intersections that have no sequential coupling
+
+Examples:
+- "Add a settings page" → NIU = 2 (frontend + backend, parallel)
+- "Fix this bug in api_service.dart" → NIU = 1 (single file, single root cause)
+- "Refactor the booking flow across the Flutter client and Laravel API" → NIU = 3-4 (frontend + backend + tests + maybe migrations, parallel)
+- "Update the README" → NIU = 1 (single file, no test surface)
+
+**If NIU ≥ 2, you fan-out. No "should I ask first" — you fan-out.** Asking the user "solo or fan-out?" wastes a turn for borderline cases. The only borderline that needs asking is NIU = 1 vs 2 when the work is genuinely small.
+
+## Who is the controller?
+
+**You (the current Claude session) are the controller of all skills and the god of dispatch.** The orchestrator is a *role*, not necessarily a separate subagent. You decide how it gets spawned:
+
+| Current session model | Spawn pattern                                                    |
+|-----------------------|------------------------------------------------------------------|
+| **Opus**              | YOU are the orchestrator. Do the decomposition in this session, spawn Sonnet/Haiku workers directly via the `Agent` tool. Do NOT spawn a separate Opus orchestrator subagent — that's wasted indirection. |
+| **Sonnet** or **Haiku** | Spawn the dedicated `orchestrator` subagent (Opus) via `Agent(subagent_type: "orchestrator", ...)`. Let it do the decomposition, then it spawns workers. |
+
+When in doubt, check the model name in your environment and apply the rule.
+
+### Model selection per worker
+
+When you (or the orchestrator) spawn workers, pick the model based on packet complexity:
+
+| Class | Model | Examples |
+|-------|-------|----------|
+| **trivial** | `haiku` | "Does X exist in file Y?", "What's the value of Z?", single-line factual lookups |
+| **simple** | `sonnet` | Add a button, fix a typo'd label, add one test case (< 100 LOC, 1-2 files) |
+| **medium** | `sonnet` | New API endpoint with tests, refactor a service class, fix a non-trivial bug (100-500 LOC, 3-10 files) |
+| **hard** | `opus` | Migration between auth schemes, race-condition debugging without a clear hypothesis, novel architecture (500+ LOC, 10+ files, cross-cutting) |
+
+Default: `sonnet`. Bump to `haiku` for trivial lookups (cheap), bump to `opus` only when Sonnet would get stuck (expensive but justified).
+
+The full classifier and per-role defaults live in `~/code/dev-stack/agents/orchestrator.md` — read that file's "complexity rubric" section if unsure.
 
 ## Mandatory sequencing rules
 
@@ -39,6 +87,36 @@ If unsure, ask once: "Solo or fan-out?"
 2. **Never skip phase 8** — `verification-before-completion` runs the full test suite and the user's definition of done. Saying "done" without it is the most common failure mode.
 3. **Capture knowledge in phase 12** — without `/kb-spec post` + `/kb-compile`, the next feature will not benefit from what you just learned.
 4. **Fan-out guardrail** — never spawn more than 4 parallel workers without user confirmation. Cost and debugging difficulty grow non-linearly past that.
+5. **Fan-out tripwire** — if NIU ≥ 2, you MUST spawn parallel workers via the `Agent` tool BEFORE doing any edits yourself. Doing the work serially in the parent session when fan-out is appropriate is the second most common failure mode.
+
+## The team roster (registered subagents)
+
+When you fan out, you spawn one of these specialist agents via `Agent(subagent_type: "<name>", model: "<model>", prompt: "...")`. They are real Claude Code subagents installed at `~/.claude/agents/` by `dev-stack/install.sh`.
+
+| Agent name           | Default model | Specialty                                      | Loads on startup                                                            |
+|----------------------|---------------|------------------------------------------------|-----------------------------------------------------------------------------|
+| `orchestrator`       | opus          | Decompose + dispatch + aggregate               | Reads tasks.md, spawns workers in parallel                                  |
+| `planner`            | sonnet        | Spec → role-tagged tasks.md                    | Substitute for `/speckit.tasks` when none exists                            |
+| `frontend-engineer`  | sonnet        | UI / CSS / React / Flutter                     | TDD, frontend-design, polish, animate, adapt, normalize, harden, optimize, audit, clarify, quieter, vercel-react-best-practices |
+| `backend-engineer`   | sonnet        | API / DB / server / migrations                 | TDD, verification-before-completion, systematic-debugging                   |
+| `qa-engineer`        | sonnet        | Test writing, fixing, regression sweeps        | TDD, verification-before-completion                                         |
+| `debugger`           | sonnet→opus   | Root-cause analysis, regression test authoring | systematic-debugging, TDD, verification-before-completion                   |
+| `designer`           | sonnet        | Full design workflow chain in one context      | design-md, design-check, normalize, polish, audit, TDD                      |
+| `reviewer`           | sonnet        | Spec compliance + code quality review          | requesting-code-review, receiving-code-review                               |
+
+You may also spawn `general-purpose` subagents with `model: haiku` for trivial one-shot lookups (e.g. "does X exist in file Y?").
+
+### Fast-path: no tasks.md needed
+
+If the user says "build X" / "implement Y" / "fix Z" and there is no `specs/<feature>/` yet, you do **not** need to run `/speckit.specify` → `/speckit.plan` → `/speckit.tasks` first. The fast path is:
+
+1. Phase 0 — `/kb-query` (mandatory)
+2. **Compute NIU yourself** from the user's request and any files mentioned
+3. If NIU ≥ 2 — spawn the `planner` agent first to produce a tasks.md substitute, then immediately spawn specialists from its output, all in one message
+4. If NIU = 1 — solo mode, do the work in the parent session
+5. Phases 6-12 run as normal after workers return
+
+This skips Spec Kit entirely for small-to-medium features. Use the full Spec Kit pipeline only for features big enough to deserve a `spec.md` artifact for posterity.
 
 ## Model assignment
 
@@ -73,7 +151,7 @@ The global `UserPromptSubmit` hook at `~/.claude/hooks/user-prompt-kb-check.sh` 
 
 ## Connect-the-dots: skill relations map
 
-This is the canonical map of how all 38 installed skills relate to each other. kb-dev is the hub — every other skill is reachable through one of its phases or as an explicit standalone branch. The per-edge list lives at [`docs/CONNECTIONS.md`](../../docs/CONNECTIONS.md); the human-readable extract lives at [`docs/RELATIONS.md`](../../docs/RELATIONS.md).
+This is the canonical map of how all 39 installed skills relate to each other. kb-dev is the hub — every other skill is reachable through one of its phases or as an explicit standalone branch. The per-edge list lives at [`docs/CONNECTIONS.md`](../../docs/CONNECTIONS.md); the human-readable extract lives at [`docs/RELATIONS.md`](../../docs/RELATIONS.md).
 
 ```
                               ┌─────────────────────────┐
@@ -240,6 +318,7 @@ These never auto-fire from kb-dev — the user must explicitly request them:
 |---------------------|------------------------------------------------------|-------------------------------------------|
 | `grill-me`          | "grill me", "stress-test this", "poke holes"         | High-friction; opt-in only                |
 | `tech-company`      | "act as a tech company", "delegate to engineers"     | Alternative orchestrator pattern          |
+| `caveman`           | "caveman lite/full/ultra", "talk like caveman", "terse mode" | Output-style modifier — must opt in so it doesn't fight kb-* citation rules |
 | `design-check`      | "check the design", "audit the theme", "is our theme respected" | Read-only conformance scan; hands off to `/normalize` for fixes |
 | `design-md`         | "use the Linear aesthetic", "apply the Stripe design" | Adopts an external brand design system into the project |
 | `kb-ingest`         | "ingest these docs", file dropped in `raw/`          | Manual document ingest                    |
@@ -322,6 +401,7 @@ This table lets any skill know where it sits in the graph without reading the fu
 | `vercel-react-best-practices`     | phase 5 auto-route                                  | optimize → verification-before-completion        | **auto**    |
 | `grill-me`                        | USER "grill me" (STANDALONE ONLY)                   | writing-plans (if accepted)                      | manual      |
 | `tech-company`                    | USER "act as tech company" (STANDALONE ONLY)        | (spawns role subagents)                          | manual      |
+| `caveman`                         | USER "caveman lite/full/ultra" (STANDALONE ONLY)    | — (terminal output-style modifier)               | manual      |
 | `writing-skills`                  | USER "create a new skill" (STANDALONE ONLY)         | — (meta)                                         | manual      |
 | `using-superpowers`               | session start (auto)                                | (discovery only, no pipeline)                    | **auto**    |
 

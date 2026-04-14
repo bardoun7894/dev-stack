@@ -9,21 +9,49 @@ planner, a knowledge-base reminder hook, and an idempotent installer.
 
 ```
 dev-stack/
-├── skills/                          first-party
-│   ├── kb-dev/                      unified end-to-end pipeline
-│   └── grill-me/                    standalone adversarial planner
+├── skills/                          first-party (5 skills)
+│   ├── kb-dev/                      unified end-to-end pipeline (the hub)
+│   ├── grill-me/                    standalone adversarial planner
+│   ├── design-check/                read-only design conformance scanner
+│   ├── design-md/                   brand design system adopter
+│   └── caveman/                     standalone output-style modifier (terse mode)
+├── agents/                          8 registered Claude Code subagents
+│   ├── orchestrator.md              opus — decompose / dispatch / aggregate
+│   ├── planner.md                   sonnet — spec → role-tagged tasks.md
+│   ├── frontend-engineer.md         sonnet — UI / CSS / React / Flutter
+│   ├── backend-engineer.md          sonnet — API / DB / server / migrations
+│   ├── qa-engineer.md               sonnet — testing & verification
+│   ├── debugger.md                  sonnet→opus — root-cause analysis
+│   ├── designer.md                  sonnet — full design workflow chain
+│   └── reviewer.md                  sonnet — spec compliance + code quality
 ├── hooks/
 │   └── user-prompt-kb-check.sh      injects KB reminders + auto-bootstrap
-├── agents/                          (reserved for orchestrator/worker defs)
 ├── vendor/                          git submodules (read-only mirrors)
 │   ├── kb-skill/                    bardoun7894/kb-skill   (8 kb-* skills)
 │   └── superpowers/                 obra/superpowers       (14 workflow skills)
-├── install.sh                       symlinks everything into ~/.claude/
+├── install.sh                       symlinks skills/ + agents/ + hooks/ + bin/
 ├── CLAUDE.md.snippet                paste into ~/.claude/CLAUDE.md
 └── README.md
 ```
 
-## The 38-skill suite
+## How the framework works (skills + agents + orchestrator)
+
+You (the parent Claude session) are the **controller of all skills**. When the user says "build X" / "implement Y" / "fix Z":
+
+1. **Phase 0** — `kb-query` for prior art (mandatory)
+2. **Compute NIU** (Number of Independent Units) from the request
+3. **If NIU ≥ 2** — fan out by spawning role-specialist agents in parallel via the `Agent` tool. Each worker loads its own skill set and runs in its own context window
+4. **If NIU = 1** — solo mode, do the work in the current session
+5. **Aggregate worker reports**, run verification, review, finish, and capture knowledge
+
+The **orchestrator** decides:
+- Which agent type each work packet maps to (frontend / backend / qa / debugger / designer / reviewer / planner)
+- Which model each worker runs on (haiku for trivial / sonnet for normal / opus for hard)
+- How to batch packets if NIU > 4
+
+If the parent session is Opus, **you ARE the orchestrator** — no need to spawn a separate Opus subagent. If the parent is Sonnet or Haiku, spawn the dedicated `orchestrator` subagent first.
+
+## The 39-skill suite
 
 | Layer          | Source         | Skills                                                                                                         |
 |----------------|----------------|----------------------------------------------------------------------------------------------------------------|
@@ -35,9 +63,9 @@ dev-stack/
 | Meta           | superpowers    | writing-skills, using-superpowers                                                                              |
 | Frontend / UI  | (vendored)     | adapt, animate, audit, clarify, harden, normalize, optimize, polish, quieter, frontend-design, vercel-react-best-practices |
 | Orchestration  | (vendored)     | tech-company                                                                                                   |
-| First-party    | dev-stack      | **kb-dev** (unified entry point), **grill-me** (standalone adversarial planner), **design-check** (conformance scanner), **design-md** (brand design system adopter) |
+| First-party    | dev-stack      | **kb-dev** (unified entry point), **grill-me** (standalone adversarial planner), **design-check** (conformance scanner), **design-md** (brand design system adopter), **caveman** (standalone output-style modifier — terse mode that respects kb-* citation rules) |
 
-Total: **4 first-party + 8 kb-skill + 14 superpowers + 12 vendor-local = 38 skills.**
+Total: **5 first-party + 8 kb-skill + 14 superpowers + 12 vendor-local = 39 skills.**
 
 See [`docs/CONNECTIONS.md`](docs/CONNECTIONS.md) for the canonical skill-to-skill edge list and [`docs/RELATIONS.md`](docs/RELATIONS.md) for the human-readable map.
 

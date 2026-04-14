@@ -25,6 +25,7 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 SKILLS_DIR="$CLAUDE_HOME/skills"
 HOOKS_DIR="$CLAUDE_HOME/hooks"
+AGENTS_DIR="$CLAUDE_HOME/agents"
 
 echo "==> dev-stack installer"
 echo "    repo:             $REPO"
@@ -32,7 +33,7 @@ echo "    claude home:      $CLAUDE_HOME"
 echo "    update-symlinks:  $([ $update_symlinks -eq 1 ] && echo yes || echo no)"
 echo
 
-mkdir -p "$SKILLS_DIR" "$HOOKS_DIR"
+mkdir -p "$SKILLS_DIR" "$HOOKS_DIR" "$AGENTS_DIR"
 
 link_skill() {
   local src="$1"
@@ -104,7 +105,7 @@ if [ -d "$REPO/vendor/local/skills" ]; then
 fi
 
 # 5. Hook
-echo "[5/6] hook"
+echo "[5/7] hook"
 hook_src="$REPO/hooks/user-prompt-kb-check.sh"
 hook_dst="$HOOKS_DIR/user-prompt-kb-check.sh"
 if [ -L "$hook_dst" ]; then
@@ -125,8 +126,54 @@ else
   echo "  link     user-prompt-kb-check.sh"
 fi
 
-# 6. Bin (universal helpers like kb-capture)
-echo "[6/6] bin"
+# 6. Agents (orchestrator + role specialists)
+echo "[6/7] agents"
+link_agent() {
+  local src="$1"
+  local name
+  name="$(basename "$src")"
+  local dst="$AGENTS_DIR/$name"
+
+  if [ -L "$dst" ]; then
+    local current_target
+    current_target="$(readlink "$dst")"
+    if [ "$current_target" = "$src" ]; then
+      echo "  ok       $name (already linked to dev-stack)"
+      return 0
+    fi
+    if [ $update_symlinks -eq 1 ]; then
+      rm "$dst"
+      ln -s "$src" "$dst"
+      echo "  updated  $name (was → $current_target)"
+      return 0
+    fi
+    echo "  stale    $name → $current_target (run with --update-symlinks to fix)"
+    return 0
+  fi
+
+  if [ -e "$dst" ]; then
+    echo "  skip     $name (real file exists, not a symlink — leaving alone)"
+    return 0
+  fi
+
+  ln -s "$src" "$dst"
+  echo "  link     $name"
+}
+
+if [ -d "$REPO/agents" ]; then
+  for f in "$REPO"/agents/*.md; do
+    [ -f "$f" ] || continue
+    # Skip README-style files — only register actual agent definitions
+    name="$(basename "$f")"
+    case "$name" in
+      README*|readme*) continue ;;
+    esac
+    link_agent "$f"
+  done
+fi
+
+# 7. Bin (universal helpers like kb-capture)
+echo "[7/7] bin"
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
 mkdir -p "$LOCAL_BIN"
 if [ -d "$REPO/bin" ]; then

@@ -5,7 +5,7 @@ When you add, rename, or remove a skill, update this file first — then mirror 
 change into `docs/RELATIONS.md`, `skills/kb-dev/SKILL.md`, and the affected
 individual `SKILL.md` descriptions.
 
-## Node list (38 skills)
+## Node list (39 skills)
 
 | ID                              | Tier         | Role                                 |
 |---------------------------------|--------------|--------------------------------------|
@@ -13,6 +13,7 @@ individual `SKILL.md` descriptions.
 | `grill-me`                      | first-party  | Adversarial planner (standalone)     |
 | `design-check`                  | first-party  | Design conformance scanner           |
 | `design-md`                     | first-party  | Brand design system adopter          |
+| `caveman`                       | first-party  | Output-style modifier (standalone)   |
 | `kb-setup`                      | kb-skill     | Bootstrap KB in a project            |
 | `kb-query`                      | kb-skill     | Ground answer in prior knowledge     |
 | `kb-spec`                       | kb-skill     | Spec Kit ↔ KB bridge                 |
@@ -69,6 +70,7 @@ USER                         → kb-publish       [publish KB to NotebookLM — 
 USER                         → kb-lint          [audit the KB — STANDALONE ONLY]
 USER                         → writing-skills   [create a new skill — STANDALONE ONLY]
 USER                         → using-superpowers [auto at session start]
+USER                         → caveman          [caveman / talk like caveman / terse mode / compress output — STANDALONE ONLY]
 ```
 
 ### kb-dev pipeline (phases 0–12)
@@ -189,15 +191,65 @@ Skills with `—` in a column are pipeline endpoints or standalone-only.
 | `vercel-react-best-practices`     | executing-plans (phase 5 auto-route)              | optimize, verification-before-completion        |
 | `grill-me`                        | USER (STANDALONE ONLY)                            | writing-plans (if user accepts)                 |
 | `tech-company`                    | USER (STANDALONE ONLY)                            | (spawns role subagents — alternative to fan-out)|
+| `caveman`                         | USER (STANDALONE ONLY)                            | — (terminal output-style modifier)              |
 | `writing-skills`                  | USER (STANDALONE ONLY)                            | — (meta)                                        |
 | `using-superpowers`               | session start (auto)                              | (all superpowers skills — discovery only)      |
+
+## The agent layer (8 registered subagents)
+
+Skills live in `~/.claude/skills/`. **Agents** live in `~/.claude/agents/` and are spawned via the `Agent` tool with `subagent_type: "<name>"`. The orchestrator dispatches workers; each worker loads a curated set of skills on startup.
+
+| Agent              | Default model | Loads on startup (skills)                                                                                                  |
+|--------------------|---------------|----------------------------------------------------------------------------------------------------------------------------|
+| `orchestrator`     | opus          | (no skill loads — pure dispatch)                                                                                           |
+| `planner`          | sonnet        | (none — produces tasks.md only)                                                                                            |
+| `frontend-engineer`| sonnet        | test-driven-development, frontend-design, polish, animate, adapt, normalize, harden, optimize, audit, clarify, quieter, vercel-react-best-practices, verification-before-completion |
+| `backend-engineer` | sonnet        | test-driven-development, verification-before-completion, systematic-debugging                                              |
+| `qa-engineer`      | sonnet        | test-driven-development, verification-before-completion, systematic-debugging                                              |
+| `debugger`         | sonnet→opus   | systematic-debugging, test-driven-development, verification-before-completion                                              |
+| `designer`         | sonnet        | design-md, design-check, normalize, polish, audit, test-driven-development, verification-before-completion                 |
+| `reviewer`         | sonnet        | requesting-code-review, receiving-code-review                                                                              |
+
+### Agent dispatch edges
+
+```
+USER                         → kb-dev / orchestrator     [build / implement / ship / fix]
+kb-dev (parent is opus)      → orchestrator (in-session, no spawn)  [phase 5b]
+kb-dev (parent is sonnet)    → Agent(orchestrator, opus)            [phase 5b — spawn separate Opus]
+orchestrator                 → Agent(planner, sonnet)               [no tasks.md → derive one]
+orchestrator                 → Agent(frontend-engineer, sonnet)     [packet has UI/CSS/React]
+orchestrator                 → Agent(backend-engineer, sonnet)      [packet has API/DB/server]
+orchestrator                 → Agent(qa-engineer, sonnet)           [packet has test work]
+orchestrator                 → Agent(debugger, sonnet|opus)         [packet has bug/failure]
+orchestrator                 → Agent(designer, sonnet)              [packet has design system / theme]
+orchestrator                 → Agent(reviewer, sonnet)              [phase 9 — final review]
+orchestrator                 → Agent(general-purpose, haiku)        [trivial one-shot lookups]
+```
+
+Each spawned worker runs in **its own context window**. When it returns, the orchestrator only sees the worker's ~200-word report — not the full transcript. This is the ~100× context efficiency win.
+
+### Model selection by complexity
+
+| Class | Model | LOC | Files | Examples |
+|-------|-------|-----|-------|----------|
+| trivial | haiku | 0 | 0-1 | "Does foo exist in bar.ts?", "What's the value of MAX_RETRIES?" |
+| simple | sonnet | <100 | 1-2 | Add a button, fix a typo'd label, one new test case |
+| medium | sonnet | 100-500 | 3-10 | New API endpoint with tests, refactor a service class, fix a non-trivial bug |
+| hard | opus | 500+ | 10+ | Auth migration, race-condition debugging without a clear hypothesis, novel architecture |
+
+The full classifier lives in `~/code/dev-stack/agents/orchestrator.md`.
 
 ## Invariants
 
 1. **Every skill has at least one upstream edge** (either USER or another skill). No orphans.
-2. **Every pipeline skill has at least one downstream edge.** Only standalone skills (`kb-lint`, `kb-setup`, `kb-ingest`, `kb-publish`, `writing-skills`, `using-superpowers`) end the chain.
-3. **`grill-me` and `tech-company` have no incoming pipeline edges** — they fire only on explicit USER invocation.
+2. **Every pipeline skill has at least one downstream edge.** Only standalone skills (`kb-lint`, `kb-setup`, `kb-ingest`, `kb-publish`, `writing-skills`, `using-superpowers`, `caveman`) end the chain.
+3. **`grill-me`, `tech-company`, and `caveman` have no incoming pipeline edges** — they fire only on explicit USER invocation.
 4. **The design workflow chain terminates at `finishing-a-development-branch`** — same terminal as the main pipeline.
 5. **Phase 5 UI specialists always loop back** into `test-driven-development` or `verification-before-completion`, never exit sideways.
+6. **`caveman` is a parallel modifier**, not a phase. It applies to output style without changing the pipeline graph. It must SUSPEND itself in: kb-query results, kb-spec phase output, spec.md/plan.md/tasks.md authoring, verification-before-completion evidence, both code-review skills, systematic-debugging analysis, and all kb-compile/kb-lint/kb-docs-sync writes.
+7. **Fan-out fires at NIU ≥ 2.** The previous threshold of 4 was wrong. The kb-dev hub and the orchestrator now both enforce 2.
+8. **The current-session model determines whether to spawn a separate orchestrator subagent.** If the current session is Opus, the session IS the orchestrator (no spawn). If Sonnet/Haiku, spawn the Opus orchestrator subagent first.
+9. **Trivial lookups go to Haiku, not Sonnet.** Anything that is a one-shot factual query without code generation should use `Agent(model: "haiku", subagent_type: "general-purpose", ...)`. This saves ~10× cost vs. Sonnet for the same answer quality on factual tasks.
+10. **Workers never recurse.** A spawned worker may not spawn another orchestrator. Only the parent session can.
 
 When editing skills, verify these invariants hold. `/kb-lint` (when run on this file's front-matter) will flag orphans.
