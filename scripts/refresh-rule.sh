@@ -48,6 +48,26 @@ classify_skill() {
   echo "external"
 }
 
+# --- Classify each installed agent by checking the dev-stack repo ---
+classify_agent() {
+  local name="$1"
+  if [ -f "$DEV_STACK/agents/$name.md" ]; then
+    echo "dev-stack"
+    return
+  fi
+  echo "external"
+}
+
+# --- Read the `model:` frontmatter field from an agent definition ---
+agent_model() {
+  local file="$1"
+  [ -f "$file" ] || { echo "?"; return; }
+  awk -F': *' '
+    /^---$/ { n++; if (n==2) exit; next }
+    n==1 && $1=="model" { print $2; exit }
+  ' "$file" | tr -d '[:space:]' | head -c 20
+}
+
 # --- Build the new section content ---
 build_section() {
   local timestamp
@@ -75,6 +95,24 @@ build_section() {
       printf '| %s | %s |\n' "$tier" "$skills_in_tier"
     fi
   done
+
+  # --- Agents table ---
+  local agent_count
+  agent_count=$(ls "$HOME/.claude/agents/" 2>/dev/null | grep -c '\.md$' || echo 0)
+  if [ "$agent_count" -gt 0 ]; then
+    printf '\n**Registered subagents (%s total):**\n\n' "$agent_count"
+    printf '| Agent | Source | Default model |\n'
+    printf '|---|---|---|\n'
+    for f in "$HOME/.claude/agents/"*.md; do
+      [ -f "$f" ] || continue
+      local agent_name tier model
+      agent_name=$(basename "$f" .md)
+      tier=$(classify_agent "$agent_name")
+      model=$(agent_model "$f")
+      [ -z "$model" ] && model="?"
+      printf '| `%s` | %s | %s |\n' "$agent_name" "$tier" "$model"
+    done
+  fi
 
   printf '\n**Helpers in `~/.local/bin/` (from dev-stack):**\n'
   if [ -d "$DEV_STACK/bin" ]; then
