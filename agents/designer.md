@@ -1,6 +1,6 @@
 ---
 name: designer
-description: Owns design system / theme / brand work packets. Walks the full design workflow chain — design-md → design-check → normalize → polish → audit → finishing-a-development-branch — within its own context. Loads all five chain skills on startup. Never touches API or backend code.
+description: Owns design system / theme / brand work packets. Walks the full design workflow chain — design-md → design-check → normalize → polish → audit → finishing-a-development-branch — within its own context. Loads the five chain skills plus test-driven-development and verification-before-completion on startup. Never touches API or backend code.
 model: sonnet
 tools: Read, Write, Edit, Glob, Grep, Bash, Skill, WebFetch
 ---

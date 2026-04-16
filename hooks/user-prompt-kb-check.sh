@@ -22,7 +22,19 @@ find_project_root() {
     if [ "$dir" = "$HOME" ]; then
       return 1
     fi
-    if [ -d "$dir/.git" ] || [ -d "$dir/.claude" ]; then
+    # A git worktree has `.git` as a FILE (gitdir pointer), not a dir.
+    # We also accept `.claude/` as a marker, but Claude Code auto-creates
+    # a `.claude/settings.local.json` inside each worktree, which would
+    # otherwise trap the walk at the worktree boundary. Detect the
+    # `.claude/worktrees/<name>/` segment and skip past it to the real
+    # project root above.
+    case "$dir" in
+      */.claude/worktrees/*)
+        dir=$(dirname "$dir")
+        continue
+        ;;
+    esac
+    if [ -d "$dir/.git" ] || [ -f "$dir/.git" ] || [ -d "$dir/.claude" ]; then
       echo "$dir"
       return 0
     fi

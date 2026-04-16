@@ -108,7 +108,7 @@ Scope: the argument passed to the skill (e.g. `src/app`), or the full `src/` + `
 
 ```bash
 # Hardcoded hex colors
-rg -n --type tsx --type ts --type jsx --type js --type css --type scss '#[0-9a-fA-F]{3,8}\b' <scope>
+rg -n --type typescript --type js --type css '#[0-9a-fA-F]{3,8}\b' <scope>
 
 # Hardcoded rgb/rgba/hsl
 rg -n '\brgba?\(|\bhsla?\(' <scope>

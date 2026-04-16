@@ -210,9 +210,9 @@ This is the canonical map of how all 39 installed skills relate to each other. k
                                              │  AUTO-CONTINUE
                                              ▼
                           ┌──────────────────────────────────┐
-                          │  Read tasks.md. Decide:          │
-                          │  ≤3 tasks  →  solo               │
-                          │  ≥4 indep  →  fan-out            │
+                          │  Compute NIU. Decide:            │
+                          │  NIU = 1  →  solo                │
+                          │  NIU ≥ 2  →  fan-out             │
                           └────────┬────────────────┬────────┘
                                    │                │
                           ┌────────┘                └────────┐
@@ -286,7 +286,7 @@ These transitions fire automatically. Do NOT pause to ask the user; just continu
 | Phase 11 done | Phase 12            | Branch finished                                                |
 
 The **only** transitions that pause for the user are:
-- Phase 4 → 5 if tasks.md is borderline (3-4 tasks) and solo/fan-out is genuinely ambiguous
+- Phase 4 → 5 if NIU is genuinely borderline (NIU = 1 vs NIU = 2 on a small change where solo might win on overhead)
 - Phase 11 → merge to main (destructive, always confirm)
 - Any failure mode that needs a design call
 
@@ -356,7 +356,7 @@ When the user is working on a design/theme concern, the preferred chain is:
 - `normalize` → `polish` → `audit` is the design workflow tail (see "Design workflow" section above).
 - `brainstorming` is the phase-1 gate; every skill path that goes through phase 5 first touches brainstorming unless the user explicitly jumps to "implement the spec at specs/NNN".
 
-### Complete handoff matrix (all 38 skills)
+### Complete handoff matrix (39 skills; `kb-spec` is one skill with four phases)
 
 This table lets any skill know where it sits in the graph without reading the full pipeline.
 

@@ -71,13 +71,13 @@ link_skill() {
 }
 
 # 1. First-party skills
-echo "[1/5] first-party skills"
+echo "[1/7] first-party skills"
 for s in "$REPO"/skills/*/; do
   link_skill "${s%/}"
 done
 
 # 2. Vendor: kb-skill (8 KB skills)
-echo "[2/5] vendor: kb-skill"
+echo "[2/7] vendor: kb-skill"
 if [ -d "$REPO/vendor/kb-skill/skills" ]; then
   for s in "$REPO"/vendor/kb-skill/skills/*/; do
     link_skill "${s%/}"
@@ -87,7 +87,7 @@ else
 fi
 
 # 3. Vendor: superpowers (14 obra skills)
-echo "[3/5] vendor: superpowers"
+echo "[3/7] vendor: superpowers"
 if [ -d "$REPO/vendor/superpowers/skills" ]; then
   for s in "$REPO"/vendor/superpowers/skills/*/; do
     link_skill "${s%/}"
@@ -97,7 +97,7 @@ else
 fi
 
 # 4. Vendor: local (bundled third-party skills with no upstream git source)
-echo "[4/5] vendor: local"
+echo "[4/7] vendor: local"
 if [ -d "$REPO/vendor/local/skills" ]; then
   for s in "$REPO"/vendor/local/skills/*/; do
     link_skill "${s%/}"
