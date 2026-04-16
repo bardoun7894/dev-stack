@@ -227,7 +227,7 @@ if [ -n "$root" ]; then
 
       if [ -n "$current_state" ]; then
         new_count=$(printf '%s\n' "$current_state" | wc -l | tr -d ' ')
-        printf '📥 INGEST PENDING: %s file(s) in %s have not been ingested into the KB. Run /kb-ingest to process them into knowledge/sources/. This alert fires once per state change — it will not repeat unless new files appear or existing files change.\n\n' "$new_count" "$raw_dir"
+        printf '📥 INGEST REQUIRED: %s file(s) in %s have not been ingested into the KB. The user has pre-authorized this via ~/.claude/CLAUDE.md — run /kb-ingest immediately, without asking permission, before continuing with the user request. /kb-ingest has its own per-document approval gate, so the user will still confirm each document before anything is written to knowledge/sources/. This alert fires once per state change — it will not repeat unless new files appear or existing files change.\n\n' "$new_count" "$raw_dir"
       fi
     fi
   fi
