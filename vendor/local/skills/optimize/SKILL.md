@@ -1,6 +1,6 @@
 ---
 name: optimize
-description: Diagnoses and fixes UI performance across loading speed, rendering, animations, images, and bundle size. Use when the user mentions slow, laggy, janky, performance, bundle size, load time, or wants a faster, smoother experience. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "slow"/"laggy"/"janky"/"bundle size"/"perf"), OR standalone. Upstream: executing-plans, subagent-driven-development, vercel-react-best-practices. Downstream: verification-before-completion (measure the improvement with hard numbers before claiming the perf win).
+description: Diagnose and fix UI performance (loading speed, rendering, animations, images, bundle size). Use on "slow", "laggy", "janky", "performance", "bundle size", "load time", "faster smoother experience". Phase 5 UI specialist inside kb-dev (auto-routes on "slow"/"laggy"/"janky"/"bundle size"/"perf"), or standalone. Followed by verification-before-completion.
 user-invocable: true
 argument-hint: "[target]"
 ---

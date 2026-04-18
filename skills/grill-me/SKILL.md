@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: Adversarial planning interviewer. STANDALONE — only fires on explicit invocation ("grill me", "stress-test this", "poke holes", "convince me", "what am I missing"). Walks a structured 7-phase decision tree and writes decisions.md. Never auto-fires from kb-dev, brainstorming, or any workflow. Pipeline position — Parallel to kb-dev phase 1 (brainstorming) but opt-in only. Upstream: USER only. Downstream: writing-plans (if the user accepts the adversarial findings as planning input).
+description: Adversarial planning interviewer. STANDALONE — only fires on explicit invocation ("grill me", "stress-test this", "poke holes", "convince me", "what am I missing", "interrogate this plan"). Walks a 7-phase decision tree and writes `decisions.md`. Never auto-fires from kb-dev, brainstorming, or any workflow. Hands off to writing-plans if the user accepts the findings.
 allowed-tools: Bash Read Write Edit Glob Grep
 ---
 

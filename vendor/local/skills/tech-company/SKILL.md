@@ -1,6 +1,6 @@
 ---
 name: tech-company
-description: "Acts as a technical orchestrator and project manager. Delegates tasks to specialized AI personas (Frontend, Backend, DevOps, QA, Design) and executes their work in parallel using concurrent tool calls. Use this when the user asks to act as a tech company, orchestrator, or parallelize a large project. STANDALONE — alternative to kb-dev fan-out mode (dispatching-parallel-agents). Never auto-fires from kb-dev; user must explicitly invoke. Upstream: USER only. Downstream: spawns persona role subagents in the same context (not real separate workers)."
+description: "Technical orchestrator and PM. Delegates to specialized AI personas (Frontend, Backend, DevOps, QA, Design) and executes their work in parallel. STANDALONE — alternative to kb-dev fan-out (dispatching-parallel-agents). Never auto-fires; user must explicitly invoke. Triggers: \"act as a tech company\", \"delegate to engineers\", \"parallelize as roles\". Spawns persona subagents in the same context (not real separate workers)."
 ---
 
 # Tech Company Orchestrator

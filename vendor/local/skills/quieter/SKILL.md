@@ -1,6 +1,6 @@
 ---
 name: quieter
-description: Tones down visually aggressive or overstimulating designs, reducing intensity while preserving quality. Use when the user mentions too bold, too loud, overwhelming, aggressive, garish, or wants a calmer, more refined aesthetic. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "too bold"/"too loud"/"calmer"/"overstimulating"), OR standalone. Upstream: executing-plans, subagent-driven-development. Downstream: polish (align the toned-down elements pixel-perfectly).
+description: Tone down visually aggressive or overstimulating designs, reducing intensity while preserving quality. Use on "too bold", "too loud", "overwhelming", "aggressive", "garish", "calmer", "more refined aesthetic". Phase 5 UI specialist inside kb-dev (auto-routes on "too bold"/"too loud"/"calmer"/"overstimulating"), or standalone. Followed by polish.
 user-invocable: true
 argument-hint: "[target]"
 ---

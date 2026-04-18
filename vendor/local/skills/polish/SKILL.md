@@ -1,6 +1,6 @@
 ---
 name: polish
-description: Performs a final quality pass fixing alignment, spacing, consistency, and micro-detail issues before shipping. Use when the user mentions polish, finishing touches, pre-launch review, something looks off, or wants to go from good to great. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "polish"/"alignment"/"spacing"/"finishing touches"/"looks off"), AND step 4 of the design workflow chain (after normalize). Upstream: normalize, animate, quieter, frontend-design, executing-plans, subagent-driven-development. Downstream: audit (final quality check before shipping).
+description: Final quality pass fixing alignment, spacing, consistency, and micro-detail before shipping. Use on "polish", "finishing touches", "pre-launch review", "something looks off", "go from good to great". Phase 5 UI specialist inside kb-dev (auto-routes on "polish"/"alignment"/"spacing"/"finishing touches"/"looks off") AND step 4 of the design chain (after normalize). Followed by audit.
 user-invocable: true
 argument-hint: "[target]"
 ---

@@ -1,6 +1,6 @@
 ---
 name: harden
-description: Improve interface resilience through better error handling, i18n support, text overflow handling, and edge case management. Makes interfaces robust and production-ready. Use when the user asks to harden, make production-ready, handle edge cases, add error states, or fix overflow and i18n issues. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "harden"/"edge case"/"i18n"/"overflow"/"production-ready"), OR standalone. Upstream: executing-plans, subagent-driven-development. Downstream: test-driven-development (cover the hardened edge cases in regression tests).
+description: Improve interface resilience through better error handling, i18n, text overflow handling, and edge case management. Use on "harden", "make production-ready", "handle edge cases", "add error states", or fixing overflow/i18n issues. Phase 5 UI specialist inside kb-dev (auto-routes on "harden"/"edge case"/"i18n"/"overflow"/"production-ready"), or standalone. Followed by test-driven-development.
 user-invocable: true
 argument-hint: "[target]"
 ---

@@ -1,6 +1,6 @@
 ---
 name: normalize
-description: Audits and realigns UI to match design system standards, spacing, tokens, and patterns. Use when the user mentions consistency, design drift, mismatched styles, tokens, or wants to bring a feature back in line with the system. Pipeline position — Phase 5 UI specialist inside kb-dev (auto-routes on "consistent"/"design system"/"tokens"/"drift"), AND step 3 of the design workflow chain (after design-check). Upstream: design-check (auto-handoff for fixes), executing-plans, subagent-driven-development. Downstream: polish (pixel-level cleanup after structural fixes).
+description: Audit and realign UI to match design system standards, spacing, tokens, and patterns. Use on "consistency", "design drift", "mismatched styles", "tokens", "bring X back in line with the system". Phase 5 UI specialist inside kb-dev (auto-routes on "consistent"/"design system"/"tokens"/"drift") AND step 3 of the design chain (after design-check). Followed by polish.
 user-invocable: true
 argument-hint: "[feature (page, route, component...)]"
 ---
