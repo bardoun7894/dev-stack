@@ -20,15 +20,39 @@ Four passes, each runs in parallel when possible:
 ## Pass 1 — secret scan
 
 ```bash
-# Git history secrets
-git log --all --full-history -p | grep -iE "api[_-]?key|secret|password|token|bearer|aws_access|private_key" | head -50
+# Prefer ripgrep (rg) — it auto-respects .gitignore so node_modules/vendor/etc.
+# are excluded for free. Falls back to `find | grep` on systems without rg.
+# BSD grep's --exclude-dir does NOT recurse nested dirs reliably on macOS;
+# do not rely on it.
 
-# Working tree
-grep -rInE "(api[_-]?key|secret|password|token)\s*[:=]\s*[\"'][A-Za-z0-9+/=_-]{20,}" \
-  --include="*.{js,ts,jsx,tsx,py,php,rb,go,rs,java,kt,swift,env*}" .
+SECRET_RE='(api[_-]?key|secret|password|token|bearer|aws_access|private_key)[[:space:]]*[:=][[:space:]]*["\x27][A-Za-z0-9+/=_-]{20,}'
 
-# Unprotected .env files
-find . -name ".env*" -not -path "./node_modules/*" -not -path "./.git/*"
+if command -v rg >/dev/null; then
+  rg -n --no-heading -e "$SECRET_RE" -g '!node_modules/**' -g '!vendor/**' \
+    -g '!.git/**' -g '!dist/**' -g '!build/**' -g '!.next/**' -g '!.venv/**' \
+    -g '!__pycache__/**' -g '!coverage/**' -g '!target/**' \
+    -g '*.{js,ts,jsx,tsx,py,php,rb,go,rs,java,kt,swift}' -g '.env*' | head -50
+else
+  find . -type f \( -name '*.js' -o -name '*.ts' -o -name '*.jsx' -o -name '*.tsx' \
+        -o -name '*.py' -o -name '*.php' -o -name '*.rb' -o -name '*.go' \
+        -o -name '*.rs' -o -name '*.java' -o -name '.env*' \) \
+    -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/vendor/*' \
+    -not -path '*/dist/*' -not -path '*/build/*' -not -path '*/.next/*' \
+    -not -path '*/.venv/*' -not -path '*/__pycache__/*' -not -path '*/coverage/*' \
+    -print0 2>/dev/null | xargs -0 grep -InE "$SECRET_RE" 2>/dev/null | head -50
+fi
+
+# Git history — files historically committed with sensitive extensions
+git log --all --full-history --diff-filter=A --name-only -- "*.env*" "*.key" "*.pem" 2>/dev/null | grep -v '^$' | head -20
+
+# Unprotected .env files in working tree
+find . -type f -name '.env*' \
+  -not -path '*/node_modules/*' -not -path '*/.git/*' \
+  -not -path '*/vendor/*' -not -path '*/.venv/*'
+
+# Heuristics miss entropy-based and format-specific secrets. For a real audit run:
+#   gitleaks detect --source . --no-banner
+#   trufflehog filesystem . --only-verified
 ```
 
 Flag P0: plaintext production credentials in git history. P1: `.env` not in `.gitignore`. P2: placeholder-looking values that might be real.
