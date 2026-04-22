@@ -244,12 +244,22 @@ fi
 # Arabic but keeps the English half case-insensitive. UTF-8 in regex works
 # with grep/ripgrep on macOS as long as LC_ALL/LANG is sane.
 emit_reminder=1
-if [ -n "$user_prompt" ]; then
+# Strong-signal override: when the cwd is inside a project that already has
+# an ai-knowledge-base (scripts/query.py present), the standing rule ALWAYS
+# applies — there is something in the KB worth grounding against. Skip the
+# vocabulary gate entirely. The 150-token cost on a truly trivial prompt
+# inside a KB-enabled project is much cheaper than a missed rule.
+in_kb_project=0
+if [ -n "$root" ] && [ -f "$root/ai-knowledge-base/scripts/query.py" ]; then
+  in_kb_project=1
+fi
+
+if [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 ]; then
   # Trivial-prompt heuristics: short prompts with no engineering vocabulary skip the reminder.
   prompt_len=${#user_prompt}
   if [ "$prompt_len" -lt 200 ]; then
     # English engineering vocabulary
-    en_pattern='feature|bug|fix|implement|build|ship|spec|/speckit|/kb|/grill|history|architect|refactor|deploy|migrat|design|create|add |adding|update |updating|change|modif|how do|how does|why does|what does|where is|what was|how did|prior|previous|exist|current|test|review|merge|branch|workflow|pipeline|orchestr|delegat|skill|hook|kb-dev|kb-spec|kb-query|grill-me|claude\.md|\.md|\.py|\.ts|\.tsx|\.js|\.php|\.go|\.rs|\.java|\.kt|\.swift|\.dart|\.rb|\.cs|database|api|endpoint|service|component|module|package|library|repo|repository|commit|push|pull|pr |/pr|issue|tasks|plan|decision|requirement|integration'
+    en_pattern='feature|bug|fix|implement|build|ship|spec|/speckit|/kb|/grill|history|architect|refactor|deploy|migrat|design|create|add |adding|update |updating|change|modif|how do|how does|why does|what does|where is|what was|how did|prior|previous|exist|current|test|review|merge|branch|workflow|pipeline|orchestr|delegat|skill|hook|kb-dev|kb-spec|kb-query|grill-me|claude\.md|\.md|\.py|\.ts|\.tsx|\.js|\.php|\.go|\.rs|\.java|\.kt|\.swift|\.dart|\.rb|\.cs|database|api|endpoint|service|component|module|package|library|repo|repository|commit|push|pull|pr |/pr|issue|tasks|plan|decision|requirement|integration|permission|role|admin|user|login|logout|auth|session|sidebar|route|controller|middleware|docker|compose|kubectl|k3s|k8s|pod|ssh|http 500|500 error|404|error|broken|blank|crash|fail|not working|doesn.t work|doesn.t apply|not applied|backend|frontend|nextjs|laravel|fastapi|filament|sanctum|tailwind'
 
     # Arabic engineering vocabulary (root forms + common conjugations)
     #   ميزة/خاصية = feature        خطأ/علة/مشكلة = bug         أصلح/صلح/إصلاح = fix
