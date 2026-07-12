@@ -209,11 +209,12 @@ if [ -n "$root" ]; then
   # A new alert only fires when the set of files changes again (new file
   # added, existing file deleted or modified).
   #
-  # Note: upstream /kb-ingest does not update the snapshot after processing,
-  # so this snapshot tracks "last seen state", not "last ingested state".
-  # If the user ignores the alert, they see it once and then silence; if they
-  # process the files by deleting/moving them, the next alert correctly reflects
-  # the empty state.
+  # Note: the snapshot tracks "last seen state", not "last ingested state" — it
+  # exists only to give fire-once semantics. The *count* we report is computed
+  # separately by diffing raw/ against knowledge/log.md, so the alert names the
+  # files genuinely awaiting ingest rather than every file in the inbox. Before
+  # this, any touch to raw/ re-reported the whole inbox as un-ingested, which
+  # read as a 72-file backlog when only 2 files were actually new.
   raw_dir="$root/ai-knowledge-base/raw"
   if [ -d "$raw_dir" ]; then
     snapshot="$raw_dir/.last-ingest-snapshot"
@@ -225,9 +226,27 @@ if [ -n "$root" ]; then
       # State changed — write the new snapshot regardless of direction
       printf '%s' "$current_state" > "$snapshot"
 
+      # Count only the files knowledge/log.md has no ingest entry for.
+      kb_log="$root/ai-knowledge-base/knowledge/log.md"
+      pending_count=0
       if [ -n "$current_state" ]; then
-        new_count=$(printf '%s\n' "$current_state" | wc -l | tr -d ' ')
-        printf '📥 INGEST REQUIRED: %s file(s) in %s have not been ingested into the KB. The user has pre-authorized this via ~/.claude/CLAUDE.md — run /kb-ingest immediately, without asking permission, before continuing with the user request. /kb-ingest has its own per-document approval gate, so the user will still confirm each document before anything is written to knowledge/sources/. This alert fires once per state change — it will not repeat unless new files appear or existing files change.\n\n' "$new_count" "$raw_dir"
+        if [ -f "$kb_log" ]; then
+          while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            # "./sub/file.md 1234" -> "raw/sub/file.md"
+            rel="${entry%% *}"
+            rel="raw/${rel#./}"
+            grep -qF "$rel" "$kb_log" 2>/dev/null || pending_count=$((pending_count + 1))
+          done <<RAWSTATE
+$current_state
+RAWSTATE
+        else
+          pending_count=$(printf '%s\n' "$current_state" | wc -l | tr -d ' ')
+        fi
+      fi
+
+      if [ "$pending_count" -gt 0 ]; then
+        printf '📥 INGEST REQUIRED: %s file(s) in %s are not yet referenced in knowledge/log.md. The user has pre-authorized this via ~/.claude/CLAUDE.md — run /kb-ingest immediately, without asking permission, before continuing with the user request. /kb-ingest has its own per-document approval gate, so the user will still confirm each document before anything is written to knowledge/sources/. This alert fires once per state change — it will not repeat unless new files appear or existing files change.\n\n' "$pending_count" "$raw_dir"
       fi
     fi
   fi
