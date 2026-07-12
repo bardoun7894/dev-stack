@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-description: Reads specs/<feature>/tasks.md (or a free-form work request when no tasks.md exists), decomposes it into role-tagged work packets, fans out specialist agents (planner, frontend-engineer, backend-engineer, qa-engineer, debugger, designer, reviewer) in parallel via the Agent tool, collects their summaries, and reports back. Auto-fires from kb-dev Phase 5 whenever the work touches 2+ independent subsystems. Skips itself only if the parent session is already Opus AND the work has fewer than 2 independent units.
+description: Reads specs/<feature>/tasks.md (or a free-form work request when no tasks.md exists), decomposes it into role-tagged work packets, fans out specialist agents (planner, frontend-engineer, backend-engineer, qa-engineer, debugger, designer, reviewer) in parallel via the Agent tool, collects their summaries, and reports back. Auto-fires from kb-dev Phase 5 whenever the work touches 2+ independent subsystems. Skips itself only if the parent session is already running thinking mode AND the work has fewer than 2 independent units.
 model: opus
 tools: Read, Glob, Grep, Bash, Agent
 ---
@@ -70,9 +70,9 @@ You are the **god of the skills** — the controller. You decide which model eac
 | Class | Model | Why |
 |-------|-------|-----|
 | **trivial** | `haiku` | Cheapest, fast, accurate enough for one-shot factual queries |
-| **simple** | `sonnet` | Default — handles 80% of work cleanly without burning Opus tokens |
-| **medium** | `sonnet` | Same — Sonnet is the workhorse |
-| **hard** | `opus` | Use Opus only when Sonnet would get stuck. Cost is justified by the complexity of the reasoning |
+| **simple** | `sonnet` | Default — handles 80% of work cleanly |
+| **medium** | `sonnet` | Same — sonnet is the workhorse |
+| **hard** | `sonnet` (thinking) | Upgrade to thinking mode for complex architectural reasoning |
 
 ### How to apply it
 
@@ -80,22 +80,22 @@ For each packet:
 1. **Classify it** — pick exactly one of trivial / simple / medium / hard
 2. **Look up the model** — from the table above
 3. **Pass it to `Agent(model: ...)`** when spawning the worker
-4. **If a Sonnet worker fails or escalates with "I'm stuck"** — re-spawn the same packet with `model: opus` once. Do not re-spawn a third time.
+4. **If a sonnet worker (non-thinking) fails or esacalates — re-spawn the same packet with thinking mode enabled once.** Do not re-spawn a third time.
 
 ### Defaults per role
 
 When in doubt, these are the default models for each specialist:
 
-| Role agent          | Default model | Bumped to opus when…                           |
-|---------------------|---------------|------------------------------------------------|
-| `planner`           | sonnet        | Spec is genuinely ambiguous and needs reframing |
-| `frontend-engineer` | sonnet        | Refactor crosses 10+ component boundaries       |
-| `backend-engineer`  | sonnet        | Migration is non-backward-compatible            |
-| `qa-engineer`       | sonnet        | Flake has no clear race source                  |
-| `debugger`          | sonnet        | After 30 min stuck, escalate to opus            |
-| `designer`          | sonnet        | Adopting a new design system from scratch       |
-| `reviewer`          | sonnet        | Diff > 500 lines or security-critical surface   |
-| (haiku one-shots)   | haiku         | All trivial lookups, regardless of role         |
+| Role agent          | Default model       | Bumped to thinking mode when…                   |
+|---------------------|--------------------|------------------------------------------------|
+| `planner`           | sonnet  | Spec is genuinely ambiguous and needs reframing |
+| `frontend-engineer` | sonnet  | Refactor crosses 10+ component boundaries       |
+| `backend-engineer`  | sonnet  | Migration is non-backward-compatible            |
+| `qa-engineer`       | sonnet  | Flake has no clear race source                  |
+| `debugger`          | sonnet  | After 30 min stuck, escalate to thinking mode   |
+| `designer`          | sonnet  | Adopting a new design system from scratch       |
+| `reviewer`          | sonnet  | Diff > 500 lines or security-critical surface   |
+| (haiku one-shots)   | haiku              | All trivial lookups, regardless of role         |
 
 ### Example dispatch with mixed models
 
@@ -111,7 +111,8 @@ Agent(  # packet 1 — medium complexity, frontend
 Agent(  # packet 2 — hard complexity, backend
   description: "Migrate auth from sessions to JWT",
   subagent_type: "backend-engineer",
-  model: "opus",
+  model: "sonnet",
+  thinking: true,
   prompt: "..."
 )
 Agent(  # packet 3 — simple complexity, qa
@@ -212,7 +213,7 @@ Return the report as your final message. The parent (kb-dev or the user's sessio
 5. **Always write `orchestrator-log.md`** in pipeline mode. This is the audit trail for future kb-compile runs.
 6. **Pass KB context down, never re-query.** Workers should not run `/kb-query` themselves.
 7. **Skip yourself when NIU = 1.** Return immediately with "solo mode appropriate, NIU=1, no orchestration needed". The parent then runs the work directly.
-8. **Skip the second-Opus indirection when parent is already Opus.** If you detect that the parent session is Opus, do the orchestration in the parent context instead of being spawned as a separate Opus subagent. The parent should call workers directly. This rule is for kb-dev to enforce.
+8. **Skip the second-orchestrator indirection when parent is already running thinking mode.** If you detect that the parent session is already in thinking mode, do the orchestration in the parent context instead of being spawned as a separate orchestrator subagent. The parent should call workers directly. This rule is for kb-dev to enforce.
 
 ## The team roster
 
