@@ -49,8 +49,8 @@ put_rule() {  # put_rule <file> [create]
   fi
 }
 put_rule "$HOME/.codex/AGENTS.md" create
-put_rule "$HOME/.config/opencode/AGENTS.md"
+put_rule "$HOME/.config/opencode/AGENTS.md" create
 put_rule "$HOME/.pi/agent/AGENTS.md"
 put_rule "$HOME/.gemini/GEMINI.md"
-put_rule "$HOME/.hermes/HERMES.md"
+put_rule "$HOME/.hermes/HERMES.md" create
 put_rule "$HOME/.continue/rules/jev-first.md" create
