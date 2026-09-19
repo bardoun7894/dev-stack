@@ -189,6 +189,20 @@ def estimate(texts, question_tokens):
     return {"requests": len(texts), "input_tokens": tokens, "cost_usd": tokens * 0.042 / 1_000_000}
 
 
+TRANSIENT = ("request failed", "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")
+
+
+def ask_retry(jev, state, questions, tag, timeout=None, pause=1.0):
+    """One retry on a transient network/5xx/429 error; auth and other errors raise immediately (fail closed)."""
+    try:
+        return jev.ask_many(state, questions, tag, timeout)
+    except jev.JevError as e:
+        if not str(e).startswith(TRANSIENT):
+            raise
+        time.sleep(pause)
+        return jev.ask_many(state, questions, tag, timeout)
+
+
 def lint(cands, rules, ask_many, timeout=None):
     def one(c):
         qs = {r["id"]: {"type": "noul", "instructions": r["question"]} for r in rules
@@ -266,7 +280,7 @@ def cmd_diff(args, jev):
     cost = [0.0]
 
     def one(h):
-        a, _, c = jev.ask_many(hunk_state(h, hunks), qs, "review")
+        a, _, c = ask_retry(jev, hunk_state(h, hunks), qs, "review")
         cost[0] += c or 0
         return finding(h, a)
 
@@ -302,7 +316,7 @@ def cmd_lint(args, jev):
         if lines:
             cands += candidates(os.path.relpath(path, repo), lines)
     t = time.time()
-    hits, code = lint(cands, rules, jev.ask_many)
+    hits, code = lint(cands, rules, lambda s, q, t=None, to=None: ask_retry(jev, s, q, t, to))
     if args["json"]:
         print(json.dumps({"candidates": len(cands), "hits": hits}, ensure_ascii=False, indent=1))
         return code
@@ -334,7 +348,7 @@ def cmd_scan(args, jev):
     qs = {k: {"type": "noul", "instructions": v} for k, v in SMELLS.items()}
 
     def one(w):
-        a, _, _ = jev.ask_many({"file": w["file"], "code": w["code"]}, qs, "scan")
+        a, _, _ = ask_retry(jev, {"file": w["file"], "code": w["code"]}, qs, "scan")
         smells = {k: round(a[k]["noul"], 2) for k in SMELLS if a[k]["noul"] >= SMELL_THRESHOLD}
         return {"file": w["file"], "line": w["line"], "smells": smells} if smells else None
 

@@ -87,6 +87,42 @@ class RouteTest(unittest.TestCase):
                                      "severity": {"score": 0.2}})["flagged"], [])
 
 
+class RetryTest(unittest.TestCase):
+    class JevError(Exception):
+        pass
+
+    def fake_jev(self, failures, message):
+        calls = []
+        err = self.JevError
+
+        class J:
+            JevError = err
+
+            @staticmethod
+            def ask_many(state, qs, tag=None, timeout=None):
+                calls.append(1)
+                if len(calls) <= failures:
+                    raise err(message)
+                return ({"q": {"noul": 0.1}}, {}, 0)
+
+        return J, calls
+
+    def test_one_transient_failure_is_retried(self):
+        # Tokyo lint 2026-09-19: one "Remote end closed connection" aborted a 538-candidate run.
+        j, calls = self.fake_jev(1, "request failed: Remote end closed connection without response")
+        self.assertEqual(rv.ask_retry(j, "s", {"q": {}}, "lint", pause=0)[0], {"q": {"noul": 0.1}})
+        self.assertEqual(len(calls), 2)
+
+    def test_persistent_or_auth_failures_are_not_hidden(self):
+        j, _ = self.fake_jev(2, "request failed: timed out")
+        with self.assertRaises(self.JevError):
+            rv.ask_retry(j, "s", {"q": {}}, "lint", pause=0)
+        j, calls = self.fake_jev(1, "HTTP 401: bad key")
+        with self.assertRaises(self.JevError):
+            rv.ask_retry(j, "s", {"q": {}}, "lint", pause=0)
+        self.assertEqual(len(calls), 1)
+
+
 class GitFailClosedTest(unittest.TestCase):
     def test_git_failure_raises_instead_of_empty_diff(self):
         # On MyContabo, "dubious ownership" made git print nothing and the review said "route: none".
