@@ -1,0 +1,89 @@
+// node --test tests/  — policy of the Jev browser agent (no browser, no network)
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { buildStepQuestions, buildStepState, buildJudgeState, decideStep, personaData, judgeFlow, PERSONAS } from '../skills/jev/scripts/browse-core.mjs';
+
+const ELEMENTS = [
+  { id: 0, kind: 'link', label: 'Home', href: '/index.html' },
+  { id: 1, kind: 'button', label: 'Log in' },
+  { id: 2, kind: 'input', label: 'Email', type: 'email', empty: true },
+  { id: 3, kind: 'input', label: 'Password', type: 'password', empty: true },
+  { id: 4, kind: 'input', label: 'Search', type: 'text', empty: false },
+];
+
+test('step questions: one action choice plus a fill choice per empty input when data is given', () => {
+  const q = buildStepQuestions(ELEMENTS, { email: 'a@b.co', password: 'pw' });
+  assert.deepEqual(Object.keys(q.action.criteria).sort(), ['click_0', 'click_1', 'done', 'stuck']);
+  assert.deepEqual(Object.keys(q).filter((k) => k.startsWith('fill_')).sort(), ['fill_2', 'fill_3']);
+  assert.deepEqual(Object.keys(q.fill_2.criteria).sort(), ['email', 'password', 'skip']);
+});
+
+test('step questions: no fill questions without data', () => {
+  const q = buildStepQuestions(ELEMENTS, {});
+  assert.equal(Object.keys(q).filter((k) => k.startsWith('fill_')).length, 0);
+});
+
+test('decide: confident click plus fills', () => {
+  const d = decideStep({
+    action: { choice: 'click_1', confidence: 0.9 },
+    fill_2: { choice: 'email', confidence: 0.95 },
+    fill_3: { choice: 'skip', confidence: 0.9 },
+  });
+  assert.deepEqual(d, { fills: [{ id: 2, key: 'email' }], click: 1, stop: null });
+});
+
+test('decide: low confidence stops as stuck, done stops as done', () => {
+  assert.equal(decideStep({ action: { choice: 'click_1', confidence: 0.3 } }).stop, 'stuck');
+  assert.equal(decideStep({ action: { choice: 'done', confidence: 0.9 } }).stop, 'done');
+  assert.equal(decideStep({ action: { choice: 'stuck', confidence: 0.9 } }).stop, 'stuck');
+});
+
+test('decide: low-confidence fill is not applied', () => {
+  const d = decideStep({ action: { choice: 'click_1', confidence: 0.9 }, fill_2: { choice: 'email', confidence: 0.4 } });
+  assert.deepEqual(d.fills, []);
+});
+
+test('personas replace data values and keep keys', () => {
+  const d = personaData('invalid_input', { email: 'a@b.co', password: 'pw' });
+  assert.deepEqual(Object.keys(d).sort(), ['email', 'password']);
+  assert.notEqual(d.email, 'a@b.co');
+  assert.deepEqual(personaData('double_submit', { email: 'x' }), { email: 'x' });
+  assert.ok(PERSONAS.length >= 4);
+});
+
+test('step state tells Jev which fields will be filled before the click', () => {
+  // Without this, Jev saw an empty form and chose "Log in" at only 0.45 (log, 2026-09-19).
+  const s = buildStepState('log in', '/login.html', 'snap', [], ELEMENTS, { email: 'a@b.co' });
+  assert.deepEqual(s.fields_to_fill, ['Email', 'Password']);
+  assert.equal(buildStepState('g', '/', 's', [], ELEMENTS, {}).fields_to_fill, undefined);
+});
+
+test('judge state keeps the URL but says SPAs may not change it', () => {
+  // With the bare URL "/login.html", a visible dashboard was judged pass at 0.78; with the note, 0.98.
+  const s = buildJudgeState('dashboard visible', '/login.html', 'snap');
+  assert.equal(s.url, '/login.html');
+  assert.match(s.url_note, /may not change/);
+});
+
+test('judge state carries native validation messages and the persona intent', () => {
+  // type=email blocks submit with a native tooltip that is not in the DOM; without these the judge saw an
+  // untouched form and returned pass at 0.10.
+  const s = buildJudgeState('graceful', '/login.html', 'snap', { nativeValidation: ['Email: Please enter an email address.'], persona: 'invalid_input' });
+  assert.deepEqual(s.native_validation, ['Email: Please enter an email address.']);
+  assert.match(s.session, /invalid/);
+  const plain = buildJudgeState('x', '/', 's', { nativeValidation: [], persona: 'normal' });
+  assert.equal(plain.native_validation, undefined);
+  assert.equal(plain.session, undefined);
+});
+
+test('judge: page errors fail the flow even when Jev says pass', () => {
+  assert.equal(judgeFlow({ verdict: { choice: 'pass', confidence: 0.99 } }, ['TypeError: x']).status, 'fail');
+});
+
+test('judge: pass, fail with cause, and fail-closed on missing or low confidence', () => {
+  assert.equal(judgeFlow({ verdict: { choice: 'pass', confidence: 0.9 }, cause: { choice: 'none' } }, []).status, 'pass');
+  const f = judgeFlow({ verdict: { choice: 'fail', confidence: 0.95 }, cause: { choice: 'backend_error', confidence: 0.9 } }, []);
+  assert.deepEqual([f.status, f.cause], ['fail', 'backend_error']);
+  assert.equal(judgeFlow(null, []).status, 'uncertain');
+  assert.equal(judgeFlow({ verdict: { choice: 'pass', confidence: 0.5 } }, []).status, 'uncertain');
+});
