@@ -305,6 +305,15 @@ if [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 ]; then
   fi
 fi
 
+# --- Jev skill suggestion (System 1 screen, see skills/jev/SKILL.md) ---
+# At most one relevant skill out of everything installed, as a <skill_relevance> line.
+# ~0.5-1.1 s; prints nothing on / commands, short prompts, low fit, JEV_SKILL_SUGGEST=0, or any error.
+suggest_bin="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/jev-skill-suggest"
+if [ -n "$user_prompt" ] && [ "${JEV_SKILL_SUGGEST:-1}" != "0" ] && [ -f "$suggest_bin" ]; then
+  jev_timeout=$(command -v timeout || command -v gtimeout)
+  printf '%s' "$user_prompt" | ${jev_timeout:+$jev_timeout 4} /usr/bin/env python3 "$suggest_bin" 2>/dev/null || true
+fi
+
 if [ $emit_reminder -eq 1 ]; then
   printf '%s\n' 'REMINDER (standing rule from ~/.claude/CLAUDE.md): Before answering any question about project history, prior decisions, architecture, past bugs, or existing features, silently run /kb-query first and ground the reply in the cited [[wikilinks]]. Before any /speckit.* phase, run the matching /kb-spec phase first (pre before specify, plan before plan, tasks before tasks, implement before implement). Run /kb-spec post after /speckit.tasks. These are standing bridges — do not wait for explicit invocation.'
 fi
