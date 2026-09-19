@@ -12,6 +12,14 @@ Usage:
   jev route  "<task description>"     which model tier should do this task (T0-T4)
   jev raw    < request.json           full {"state":…,"questions":{…}} body, prints the response
 
+System 2 retraining System 1 (see skills/jev/SKILL.md, "System 1 and System 2"):
+  --log TAG            on any command: append each decision to the decision log under TAG
+                       (the decision id goes to stderr as `jev-id: <id>`)
+  jev outcome ID VALUE record what the answer should have been (choice name, yes/no, score level)
+  jev tune TAG [--n N] disagreements and least-confident decisions for TAG, as JSON, for an LLM
+                       to revise the criteria, options and thresholds
+  Log: $JEV_LOG_DIR/decisions.jsonl (default ~/.local/state/jev/).
+
 State options (the thing being judged):
   -s, --state TEXT     text, or a JSON object/array (parsed if it is valid JSON)
   -f, --state-file P   read state from a file
@@ -26,15 +34,20 @@ Output and exit codes:
 
 Key: $OPENROUTER_API_KEY, else the openrouter key in ~/.local/share/opencode/auth.json.
 Model: $JEV_MODEL (default typesafe/jev-1.13). Endpoint: $JEV_DECISIONS_URL.
+
+Also importable (the other jev-* tools load it): post(), ask(), ask_many(), log_decision(), JevError.
 """
+import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
 URL = os.environ.get("JEV_DECISIONS_URL", "https://openrouter.ai/api/alpha/decisions")
 MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
+PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000
 
 ROUTE_TIERS = {
     "T0": "A label, yes/no, score or routing decision. No text needs to be written.",
@@ -52,6 +65,10 @@ ROUTE_MODELS = {
 }
 
 
+class JevError(Exception):
+    """No key, HTTP error, network failure, or a malformed response. Callers fall back."""
+
+
 def die(msg, code=3):
     print(f"jev: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -67,11 +84,11 @@ def api_key():
     except (OSError, ValueError):
         key = ""
     if not key:
-        die("no key: set OPENROUTER_API_KEY or add an openrouter key to opencode auth.json")
+        raise JevError("no key: set OPENROUTER_API_KEY or add an openrouter key to opencode auth.json")
     return key
 
 
-def post(body):
+def post(body, timeout=None):
     req = urllib.request.Request(
         URL,
         data=json.dumps(body).encode(),
@@ -84,14 +101,109 @@ def post(body):
         },
         method="POST",
     )
+    if timeout is None:
+        timeout = float(os.environ.get("JEV_TIMEOUT", "20"))
     try:
-        with urllib.request.urlopen(req, timeout=float(os.environ.get("JEV_TIMEOUT", "20"))) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
-        die(f"HTTP {e.code}: {e.read().decode()[:300]}")
+        raise JevError(f"HTTP {e.code}: {e.read().decode()[:300]}") from e
     except (OSError, ValueError) as e:
-        die(f"request failed: {e}")
+        raise JevError(f"request failed: {e}") from e
 
+
+# --- decision log (System 2 retrains System 1) -------------------------------------------
+
+def log_path():
+    d = os.environ.get("JEV_LOG_DIR") or os.path.expanduser("~/.local/state/jev")
+    return os.path.join(d, "decisions.jsonl")
+
+
+def _append(rec):
+    p = log_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "a") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _value(answer):
+    kind = answer.get("type")
+    return kind, answer.get(kind) if kind in ("choice", "noul", "score") else None
+
+
+def log_decision(tag, state, question, answer):
+    """Append one decision; returns its id. State is kept as a 600-char preview plus a hash."""
+    s = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, sort_keys=True)
+    kind, value = _value(answer)
+    did = hashlib.sha1(f"{time.time_ns()}{tag}{s}{json.dumps(question, sort_keys=True)}".encode()).hexdigest()[:12]
+    _append({
+        "kind_of_record": "decision", "id": did, "ts": int(time.time()), "tag": tag,
+        "state_hash": hashlib.sha1(s.encode()).hexdigest()[:12], "state_preview": s[:600],
+        "question": question, "kind": kind, "value": value, "confidence": answer.get("confidence"),
+    })
+    return did
+
+
+def log_outcome(did, outcome):
+    _append({"kind_of_record": "outcome", "id": did, "ts": int(time.time()), "outcome": str(outcome)})
+
+
+def uncertainty(rec):
+    """0 = certain, 1 = coin flip / unknown."""
+    if rec.get("kind") == "noul":
+        p = rec.get("value")
+        return 1.0 if p is None else 1.0 - 2.0 * abs(p - 0.5)
+    c = rec.get("confidence")
+    return 1.0 if c is None else 1.0 - c
+
+
+def disagrees(rec, outcome):
+    kind, value = rec.get("kind"), rec.get("value")
+    if kind == "noul":
+        want = str(outcome).lower() in ("yes", "true", "1")
+        return ((value or 0) >= 0.5) != want
+    if kind == "score":
+        try:
+            return round(value or 0) != round(float(outcome))
+        except ValueError:
+            return True
+    return str(value) != str(outcome)
+
+
+def tune_report(tag, n=20):
+    decisions, outcomes = {}, {}
+    try:
+        with open(log_path()) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("kind_of_record") == "outcome":
+                    outcomes[r["id"]] = r["outcome"]
+                elif r.get("tag") == tag:
+                    decisions[r["id"]] = r
+    except OSError:
+        pass
+    rows = []
+    for did, r in decisions.items():
+        row = {k: r.get(k) for k in ("id", "ts", "kind", "value", "confidence", "state_preview", "question")}
+        row["uncertainty"] = round(uncertainty(r), 3)
+        if did in outcomes:
+            row["outcome"] = outcomes[did]
+            row["disagrees"] = disagrees(r, outcomes[did])
+        rows.append(row)
+    dis = [r for r in rows if r.get("disagrees")]
+    unc = sorted((r for r in rows if not r.get("disagrees")), key=lambda r: -r["uncertainty"])
+    return {
+        "tag": tag, "decisions": len(rows), "with_outcome": sum(1 for r in rows if "outcome" in r),
+        "disagreements": dis[:n], "uncertain": unc[:n],
+        "how_to_use": "Revise the criteria/options/instructions/thresholds for this tag so the disagreements "
+                      "would be answered right, then re-run the uncertain states to check.",
+    }
+
+
+# --- asking --------------------------------------------------------------------------------
 
 def parse_state(text):
     try:
@@ -101,15 +213,32 @@ def parse_state(text):
         return text
 
 
+def ask_many(state, questions, tag=None, timeout=None):
+    """Several questions over one state in one request. Returns (answers, ids, cost)."""
+    res = post({"model": MODEL, "state": state, "questions": questions}, timeout)
+    answers = res.get("answers") or {}
+    if not all(k in answers for k in questions):
+        raise JevError(f"unexpected response: {json.dumps(res)[:300]}")
+    ids = {k: log_decision(tag, state, questions[k], answers[k]) for k in questions} if tag else {}
+    return answers, ids, (res.get("usage") or {}).get("cost")
+
+
+def ask(state, question, tag=None, timeout=None):
+    answers, ids, _ = ask_many(state, {"q": question}, tag, timeout)
+    if ids:
+        print(f"jev-id: {ids['q']}", file=sys.stderr)
+    return answers["q"]
+
+
 def take_opts(args):
     """Split flags from positionals. Returns (positionals, opts)."""
-    opts = {"quiet": False, "min": None, "yes": None, "state": None}
+    opts = {"quiet": False, "min": None, "yes": None, "state": None, "log": None, "n": 20}
     pos, i = [], 0
     while i < len(args):
         a = args[i]
         if a in ("-q", "--quiet"):
             opts["quiet"] = True
-        elif a in ("-s", "--state", "-f", "--state-file", "--min", "--yes"):
+        elif a in ("-s", "--state", "-f", "--state-file", "--min", "--yes", "--log", "--n"):
             if i + 1 >= len(args):
                 die(f"{a} needs a value", 64)
             v = args[i + 1]
@@ -122,6 +251,10 @@ def take_opts(args):
                         opts["state"] = parse_state(fh.read())
                 except OSError as e:
                     die(f"cannot read {v}: {e}", 64)
+            elif a == "--log":
+                opts["log"] = v
+            elif a == "--n":
+                opts["n"] = int(v)
             else:
                 opts[a[2:]] = float(v)
         else:
@@ -130,17 +263,14 @@ def take_opts(args):
     return pos, opts
 
 
-def ask(state, question):
+def cli_ask(opts, question):
+    state = opts["state"]
     # stdin only when nothing else supplied the state, so `jev route "task"` never blocks on it.
     if state is None and not sys.stdin.isatty():
         state = parse_state(sys.stdin.read())
     if state is None or state == "":
         die("no state: pass --state, --state-file, or pipe it on stdin", 64)
-    res = post({"model": MODEL, "state": state, "questions": {"q": question}})
-    a = (res.get("answers") or {}).get("q")
-    if not a:
-        die(f"unexpected response: {json.dumps(res)[:300]}")
-    return a
+    return ask(state, question, opts["log"])
 
 
 def emit_choice_or_score(a, key, opts, extra=None):
@@ -158,28 +288,31 @@ def main(argv):
         print(__doc__.strip())
         return
     cmd, rest = argv[0], argv[1:]
+    pos, opts = take_opts(rest)
 
     if cmd == "raw":
         body = json.load(sys.stdin)
         body.setdefault("model", MODEL)
-        print(json.dumps(post(body), ensure_ascii=False))
-        return
-
-    pos, opts = take_opts(rest)
-
-    if cmd == "choice":
+        res = post(body)
+        if opts["log"]:
+            for k, a in (res.get("answers") or {}).items():
+                q = (body.get("questions") or {}).get(k)
+                if q:
+                    print(f"jev-id: {k} {log_decision(opts['log'], body.get('state'), q, a)}", file=sys.stderr)
+        print(json.dumps(res, ensure_ascii=False))
+    elif cmd == "choice":
         if len(pos) < 3:
             die('usage: jev choice "<question>" a="…" b="…" [--state …]', 64)
         criteria = {}
         for p in pos[1:]:
             name, _, desc = p.partition("=")
             criteria[name] = desc or None
-        a = ask(opts["state"], {"type": "choice", "instructions": pos[0], "criteria": criteria})
+        a = cli_ask(opts, {"type": "choice", "instructions": pos[0], "criteria": criteria})
         emit_choice_or_score(a, "choice", opts)
     elif cmd == "noul":
         if len(pos) != 1:
             die('usage: jev noul "<statement>" [--state …] [--yes 0.7]', 64)
-        a = ask(opts["state"], {"type": "noul", "instructions": pos[0]})
+        a = cli_ask(opts, {"type": "noul", "instructions": pos[0]})
         p = a.get("noul")
         print(p if opts["quiet"] else json.dumps({"noul": p}))
         if opts["yes"] is not None:
@@ -187,19 +320,31 @@ def main(argv):
     elif cmd == "score":
         if len(pos) < 3:
             die('usage: jev score "<question>" "level 0" "level 1" … [--state …]', 64)
-        a = ask(opts["state"], {"type": "score", "instructions": pos[0], "criteria": pos[1:]})
+        a = cli_ask(opts, {"type": "score", "instructions": pos[0], "criteria": pos[1:]})
         emit_choice_or_score(a, "score", opts)
     elif cmd == "route":
-        state = " ".join(pos) if pos else opts["state"]
-        a = ask(state, {
+        if pos:
+            opts["state"] = " ".join(pos)
+        a = cli_ask(opts, {
             "type": "choice",
             "instructions": "Which model tier should do this task. Pick the cheapest tier that can do it well.",
             "criteria": ROUTE_TIERS,
         })
         emit_choice_or_score(a, "choice", opts, {"model": ROUTE_MODELS.get(a.get("choice"))})
+    elif cmd == "outcome":
+        if len(pos) != 2:
+            die("usage: jev outcome <id> <value>", 64)
+        log_outcome(pos[0], pos[1])
+    elif cmd == "tune":
+        if len(pos) != 1:
+            die("usage: jev tune <tag> [--n 20]", 64)
+        print(json.dumps(tune_report(pos[0], opts["n"]), ensure_ascii=False, indent=1))
     else:
         die(f"unknown command {cmd!r}; see jev --help", 64)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    try:
+        main(sys.argv[1:])
+    except JevError as e:
+        die(str(e))
