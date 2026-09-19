@@ -24,6 +24,46 @@ Not sure? `jev route "<task>"` answers with the tier (`T0`–`T4`) and a model.
 The pattern that saves the most: **Jev gates, the LLM writes.** Ask Jev first; only call the LLM when there
 is something to write, and send low-confidence cases up a tier. Keep policy (thresholds, weights, rules) in code.
 
+## System 1 and System 2
+
+Jev is the **System 1**: the fast reflex. It is cheap enough to run on every item and every step, always on.
+Claude (Opus / Fable) and GPT-6 Astra are the **System 2**: slow and deliberate. They set goals, write text and
+code, handle the uncertain cases, and **retrain System 1**. Design every Jev integration as one of three
+loops, and usually all three together:
+
+| Loop | System 1 (Jev) | System 2 (LLM) | Escalation signal |
+|---|---|---|---|
+| **Screen** | judges every item: diff hunk, comment, log line, page, message | reads only the shortlist | risk / score above the bar, or confidence below it |
+| **Act** | picks each next step from fresh observations: next click, next task, next skill | sets the goal and the bounded options, re-plans at milestones | `stuck`, `none_fit`, low confidence, a failure, a milestone |
+| **Train** | logs every decision (`jev … --log TAG`) | reviews the log (`jev tune TAG`) and rewrites criteria, options, instructions and thresholds | disagreements, dismissed findings, clusters near the threshold |
+
+Rules for splitting the work:
+
+1. **System 1 owns anything frequent.** If a decision repeats, whether per item, per step or per prompt, and the
+   answer is a label, yes/no, score or pick, it belongs to Jev. System 2 time is for what can't be decided
+   that way.
+2. **System 2 owns goals, prose, code, and the question design itself.** Jev never invents options, so a bad
+   option list is a System 2 bug.
+3. **The handoff up is small.** System 1 passes System 2 the state slice, the question, the answer and its
+   confidence (why it escalated), not the raw pile. The handoff down is a goal, bounded options and thresholds.
+4. **Move work down over time.** When System 2 keeps making the same call, turn that call into a Jev question
+   with the System 2 examples as criteria. That is the "practice moves System 2 into System 1" step.
+5. **Retrain by editing config, not by hoping.** Criteria, options and thresholds live in a question file or
+   constants next to the code. `jev tune` output plus a System 2 pass changes that file, and the change gets a
+   commit like any other code.
+6. **Fail toward System 2.** A Jev error, timeout or low confidence escalates. It never silently passes.
+
+Where the loops run in dev-stack:
+
+| Part | Screen | Act | Train tag |
+|---|---|---|---|
+| Every prompt | `jev-skill-suggest` picks at most one relevant skill | Claude uses it or ignores it | `skill-suggest` |
+| Orchestrator | Step 3b sizes each packet (trivial…hard) | spawns the right model | `orchestrator` |
+| Code review | `jev-review diff` flags risky hunks | reviewer / `/codex` / `/panel` read only those | `review` |
+| Lint / scan | `jev-review lint`, `jev-review scan` | Haiku/Opus fix the shortlist | `lint`, `scan` |
+| Browser / e2e | checkpoint verdict + cause | `jev-browse` picks each action; Claude fixes failures | `browse` |
+| KB, hooks, project code | see [references/use-cases.md](references/use-cases.md) | | per call site |
+
 ## From a shell, hook, skill, pi, opencode, or Claude Code
 
 `jev` is on PATH on the Mac (`~/.local/bin/jev` → `dev-stack/bin/jev`) and on MyContabo (`/usr/local/bin/jev`).
