@@ -77,6 +77,10 @@ You are the **god of the skills** — the controller. You decide which model eac
 ### How to apply it
 
 For each packet:
+0. **Jev first.** If the packet only needs a label, yes/no, score or routing answer, run `jev` and spawn no
+   agent at all. Otherwise classify with Jev, and fall back to your own judgment if it's below the bar (exit 2) or unavailable (exit 3):
+   `jev choice "Complexity of this work packet" trivial="…" simple="…" medium="…" hard="…" -s "$PACKET" --min 0.8 -q`
+   (use the rubric rows below as the option descriptions).
 1. **Classify it** — pick exactly one of trivial / simple / medium / hard
 2. **Look up the model** — from the table above
 3. **Pass it to `Agent(model: ...)`** when spawning the worker
