@@ -8,6 +8,7 @@ description: Use TypeSafe Jev (via OpenRouter) for fast, cheap, typed decisions 
 Jev (TypeSafe "System One", OpenRouter `typesafe/jev-1.13`) takes **state + named questions** and returns
 **typed answers with calibrated confidence**. ~0.5–1 s, ~$0.00002 per call ($0.042/M input, $0 output),
 32k context, text only. It never writes prose — that is the point: no parsing, no hallucinated format.
+(The API itself answers in ~100–300 ms; the 0.5–1 s is the CLI's Python start plus the round trip from here.)
 
 ## When Jev, when an LLM
 
@@ -78,6 +79,16 @@ echo '{"order":{"total":480,"items":3},"note":"arrived broken"}' | jev choice "N
 Exit codes: `--min` → 2 when confidence is below; `--yes` → 1 when below; 3 = API/key error. Always keep a
 fallback path for exit ≠ 0. Run `jev --help` for everything.
 
+### The jev-* tools (dev-stack `bin/`, all fail closed, all log for `jev tune`)
+
+| Tool | What it screens | Use it when | Measured 2026-09-19 |
+|---|---|---|---|
+| `jev-skill-suggest "<prompt>"` | which one of ~170 installed skills fits (TypeSafe cookbook: 2-stage Choice + gate Nouls) | runs automatically in the UserPromptSubmit hook; `JEV_SKILL_SUGGEST=0` turns it off | 9/10 labelled prompts, no wrong picks, 0.5–1.1 s |
+| `jev-review diff [BASE]` | every hunk: 5 risk Nouls + severity Score → `route: none/reviewer/codex/panel` | before any review (reviewer Pass 0, kb-dev Phase 9) | planted bugs → `panel`, clean diff → `none`, ~$0.00003/hunk |
+| `jev-review lint [PATH…]` | secrets / PII in logs, names hiding side effects, useless or wrong comments; `.jev-lint.json` overrides | pre-commit / CI; exit 1 on error-level rules | caught the logged password as an error |
+| `jev-review scan [DIR] [--run]` | code smells + garbage comments per 120-line window, cost estimate first | "find code smells", "clean up comments", codebase audits | dev-stack: 33 windows, $0.0015, 9 shortlisted |
+| `jev-browse` | Jev picks every fill/click, then verdict + cause; `--flows`, `--adversarial N` | kb-dev Phase 8 for UI changes, `dogfood` first sweep | 3 flows right in ~3–5 s for $0.00025 |
+
 ### Claude Code itself
 
 - **Bulk triage without flooding context:** loop `jev` over N items (issues, emails, jobs, log lines, KB files)
@@ -100,6 +111,16 @@ fallback path for exit ≠ 0. Run `jev --help` for everything.
 6. **Thresholds scale with stakes:** auto-reply to a client ≥ 0.85; routing ≥ 0.75; skipping an LLM call
    only when the "nothing to do" answer is confident. Different states can't batch — fan out in parallel.
 7. **Several questions about the same state go in one request** (the `raw` form / `askJev` map) — same latency.
+   Speculative questions are fine too: ask the branch-specific ones up front and use only the relevant answers.
+8. **Tell Jev what it can't see.** Things outside the state (a field about to be filled, a URL an SPA never
+   changes, a native validation tooltip) swing confidence hard. Measured: 0.45 → 0.97 and 0.78 → 0.98 from
+   one sentence of state or instruction. A/B the wording with `jev raw` before changing thresholds.
+
+Limits: Choice ≤ 255 options; Score ≤ 11 levels (0–10); Noul has no `confidence`, and a Noul near 0.5 means
+"undecided", not "medium"; state ≤ 32k tokens, text only. Choice/Score `confidence` is how concentrated the
+distribution is. It is not permission to act; thresholds come from your own data. The official docs index
+is `https://docs.typesafe.ai/llms.txt` (pages serve Markdown with `.md` appended). Read the closest cookbook
+before designing a new integration.
 
 ## E2e tests, browsing, and code tests
 
@@ -112,6 +133,7 @@ Ladder `L0` Playwright/agent-browser → `L1` Jev → `L2` cheap text LLM → `L
 - State = `{expected, url, page: <aria snapshot of one region, ≤ 8000 chars>}`. Never raw HTML or secrets.
 - Fail closed: error / low confidence = `uncertain` → escalate, never `pass`. Cache answers by snapshot hash.
 - Unit tests stub the Jev client and test the `null` fallback; one opt-in live contract test.
+- Need a whole flow checked, not one page? `jev-browse --flows flows.json` runs the System 1 agent.
 
 Questions JSON, thresholds, Playwright/shell helpers, browsing-agent patterns, CI triage:
 [references/e2e-browsing.md](references/e2e-browsing.md).

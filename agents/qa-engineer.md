@@ -49,7 +49,8 @@ Pick the **lowest level that catches the bug**. Higher levels are slower, more f
 writing or fixing one. Exact checks (URL, status, exact text) stay deterministic; fuzzy "did this step work?"
 checks go through one Jev `checkpoint` per step (verdict + cause), and an LLM or screenshot only runs when Jev
 escalates. A Jev error is `uncertain`, never a pass. Unit tests of code that calls Jev stub the client and
-cover the `null` fallback path.
+cover the `null` fallback path. For whole user flows, run `jev-browse --flows <file>` (and
+`--adversarial N` on forms). Put the flows file next to the e2e tests so it runs again on every change.
 
 ### Step 3 — Write tests
 Follow the project's existing test style (file naming, fixture patterns, assertion library). If you're unsure, read 2-3 existing test files in the same area first.
