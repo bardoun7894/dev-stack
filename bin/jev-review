@@ -52,8 +52,13 @@ DIMENSIONS = {
                    "input without handling it.",
     "compatibility": "The change alters a public API, CLI flag, config key, database schema, event or file "
                      "format that existing callers or stored data rely on, without a migration or fallback.",
-    "tests": "The change alters behaviour that no test in the diff covers, or weakens, skips or deletes an "
-             "existing test or assertion.",
+    # Retrained 2026-09-19 (jev tune review): the old "alters behaviour that no test in the diff covers" fired
+    # on 8/8 hunks of shell scripts and docs (A/B: old 1/9 right, scoped wording 9/9). Hunks are judged alone,
+    # so the question names `other_files_in_diff`: tested hunks 0.64-0.85 -> ~0.27, untested planted bug 0.95.
+    "tests": "The change alters the runtime logic of application or library code (not shell setup scripts, "
+             "configuration, docs or prompts) in a way a test should cover, and no test file for it appears in "
+             "`other_files_in_diff` (a changed test file named after this file, e.g. tests/test_<name>, counts "
+             "as covering it); or the change weakens, skips or deletes an existing test or assertion.",
 }
 SEVERITY = [
     "cosmetic: naming, formatting or style only",
@@ -131,6 +136,12 @@ def parse_diff(text):
     return hunks
 
 
+def hunk_state(hunk, hunks):
+    """Each hunk is judged alone, so say which other files the diff touches (e.g. its tests)."""
+    others = sorted({h["file"] for h in hunks} - {hunk["file"]})
+    return {"file": hunk["file"], "hunk": hunk["text"], "other_files_in_diff": others[:50]}
+
+
 def finding(hunk, answers):
     flagged = [d for d in DIMENSIONS if (answers.get(d) or {}).get("noul", 0) >= RISK_THRESHOLD]
     return {"file": hunk["file"], "line": hunk["new_start"], "flagged": flagged,
@@ -144,7 +155,8 @@ def route(findings):
         return "none"
     if any("security" in f["flagged"] and f["severity"] >= 2.5 for f in flagged):
         return "panel"
-    if any(f["severity"] >= 1.5 for f in flagged):
+    # Missing coverage alone is a reviewer ask ("add a test"), never a reason for a second-opinion bug hunt.
+    if any(f["severity"] >= 1.5 and set(f["flagged"]) - {"tests"} for f in flagged):
         return "codex"
     return "reviewer"
 
@@ -244,7 +256,7 @@ def cmd_diff(args, jev):
     cost = [0.0]
 
     def one(h):
-        a, _, c = jev.ask_many({"file": h["file"], "hunk": h["text"]}, qs, "review")
+        a, _, c = jev.ask_many(hunk_state(h, hunks), qs, "review")
         cost[0] += c or 0
         return finding(h, a)
 

@@ -39,6 +39,17 @@ class DiffTest(unittest.TestCase):
         self.assertIn("-    if user.disabled:", hunks[0]["text"])
 
 
+class HunkStateTest(unittest.TestCase):
+    def test_state_lists_other_changed_files(self):
+        # Hunks are judged one at a time; without this, a hunk whose test lives in another file of the same
+        # diff was flagged "no test" at 0.82-0.90 (real dev-stack diff, 2026-09-19).
+        hunks = [{"file": "bin/tool", "text": "+x"}, {"file": "tests/test_tool.py", "text": "+t"},
+                 {"file": "bin/tool", "text": "+y"}]
+        s = rv.hunk_state(hunks[0], hunks)
+        self.assertEqual(s["file"], "bin/tool")
+        self.assertEqual(s["other_files_in_diff"], ["tests/test_tool.py"])
+
+
 class RouteTest(unittest.TestCase):
     def f(self, dims, severity):
         return {"flagged": dims, "severity": severity}
@@ -56,7 +67,13 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(rv.route([self.f(["security"], 2.7)]), "panel")
 
     def test_high_non_security_routes_codex(self):
-        self.assertEqual(rv.route([self.f(["tests"], 2.9)]), "codex")
+        self.assertEqual(rv.route([self.f(["reliability"], 2.9)]), "codex")
+
+    def test_tests_only_findings_never_escalate_past_reviewer(self):
+        # Real dev-stack diff 2026-09-19: 8/8 flags were "tests" only and routed to codex; missing coverage
+        # is a reviewer ask ("add a test"), not a second-opinion bug hunt.
+        self.assertEqual(rv.route([self.f(["tests"], 1.9), self.f(["tests"], 2.6)]), "reviewer")
+        self.assertEqual(rv.route([self.f(["tests"], 2.6), self.f(["reliability"], 1.6)]), "codex")
 
     def test_findings_from_answers(self):
         answers = {d: {"noul": 0.1} for d in rv.DIMENSIONS}
