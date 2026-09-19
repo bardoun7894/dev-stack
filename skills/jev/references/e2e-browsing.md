@@ -142,6 +142,35 @@ jq -n --arg e "order placed, confirmation shows an order number" --arg p "$snap"
 
 Quick one-offs: `jev noul "The page shows an error or a broken state" -s "$snap" --yes 0.7 && take_screenshot`.
 
+## jev-browse: the System 1 browser agent (ready-made)
+
+`bin/jev-browse` (source `skills/jev/scripts/jev-browse.mjs`, policy in `browse-core.mjs`) does all of the
+above in a loop: each step is one Jev request (an action Choice over links and buttons plus a fill Choice per
+empty field), and the flow ends with the verdict + cause checkpoint. Only failures reach Claude.
+
+```bash
+jev-browse --url http://127.0.0.1:3000/login --goal "sign in" --expect "dashboard shows today's sales" \
+  --data '{"email":"qa@example.com","password":"…"}'
+jev-browse --flows e2e/flows.json --json          # [{name,url,goal,expect,data}], all in parallel
+jev-browse --url … --goal … --data … --adversarial 5   # personas: normal, invalid_input, hostile_input,
+                                                        # double_submit, back_button — reports what breaks
+```
+
+Exit 0 all pass, 1 any fail/uncertain, 3 no browser / no Jev. Defaults to Lightpanda at `127.0.0.1:9222`
+(Mac launchd, MyContabo systemd); `--cdp` for another Chromium. Adversarial input only against apps you own.
+
+Lessons baked into it (all from the decision log, `jev tune browse`):
+- **Lightpanda has no layout**, so Playwright's `fill`/`click` visibility checks never pass. Drive the DOM
+  (native value setter + `input`/`change` events, `element.click()`, `goto` for links). It also allows one
+  browser context per CDP connection, so give each parallel session its own connection.
+- **Tell Jev the fields get filled first** (`fields_to_fill` + "ready to submit"): 0.45 → 0.97 on a ready form.
+- **SPAs keep the URL.** A visible dashboard under `/login.html` scored `pass` 0.78; adding a note that the
+  URL may not change → 0.98. The same applies to the Playwright helper above.
+- **Native validation is invisible in the DOM** (`type=email`, `required` show a tooltip). Pass
+  `validationMessage`s in the judge state, or bad-input sessions look like nothing happened.
+- Hostile input echoed back into a textbox still reads as alarming and comes back `uncertain`. That's
+  intended, and it escalates to L3 (screenshot) rather than passing.
+
 ## Browsing agents (Claude driving a browser to get something done)
 
 - **Next action:** state = trimmed interactive snapshot + goal; `choice` over the candidate links/buttons
