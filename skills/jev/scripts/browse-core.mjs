@@ -1,0 +1,126 @@
+// Pure policy for the Jev browser agent (System 1 acts, thresholds live here). Tested in tests/jev_browse.test.mjs.
+
+export const ACTION_MIN = 0.5;
+export const FILL_MIN = 0.6;
+export const VERDICT_MIN = 0.8;
+const MAX_CLICK_OPTIONS = 80;
+const MAX_FILL_FIELDS = 8;
+
+export const CHECKPOINT = {
+  verdict: {
+    type: 'choice', instructions: 'Does the page show the expected outcome of the test step?',
+    criteria: {
+      pass: 'the expected outcome is visible on the page',
+      fail: 'an error, wrong data, or a different page is visible',
+      uncertain: 'the page text is not enough to tell (still loading, empty, ambiguous)',
+    },
+  },
+  cause: {
+    type: 'choice', instructions: 'If the step did not pass, the most likely cause',
+    criteria: {
+      selector_drift: 'the page is fine but the element the test needs was renamed or moved',
+      backend_error: 'a server error, 500, or failed request message is shown',
+      auth: 'logged out, login page, forbidden or 401/403',
+      timeout: 'spinner, skeleton, or loading text still showing',
+      regression: 'the feature itself behaves wrong (wrong total, missing item, wrong state)',
+      none: 'the step passed',
+    },
+  },
+};
+
+export const HEALTH = {
+  verdict: {
+    type: 'choice', instructions: 'Did the app handle this user session gracefully?',
+    criteria: {
+      pass: 'a normal page, a clear validation or error message for bad input, or the task succeeded',
+      fail: 'a server error, stack trace, blank or garbled page, script error, stuck loading, or wrong data shown',
+      uncertain: 'cannot tell from the page text',
+    },
+  },
+  cause: CHECKPOINT.cause,
+};
+
+export const PERSONAS = ['normal', 'invalid_input', 'hostile_input', 'double_submit', 'back_button'];
+
+export function personaData(persona, data) {
+  const out = {};
+  for (const k of Object.keys(data || {})) {
+    if (persona === 'invalid_input') out[k] = k.toLowerCase().includes('mail') ? 'not-an-email' : '';
+    else if (persona === 'hostile_input') out[k] = `<script>alert(1)</script>${'x'.repeat(300)} ' "; --`;
+    else out[k] = data[k];
+  }
+  return out;
+}
+
+export function buildStepQuestions(elements, data) {
+  const criteria = {};
+  for (const e of elements.filter((x) => x.kind === 'link' || x.kind === 'button').slice(0, MAX_CLICK_OPTIONS)) {
+    criteria[`click_${e.id}`] = `${e.kind} "${e.label}"${e.href ? ` -> ${e.href}` : ''}`;
+  }
+  criteria.done = 'the goal is already achieved on the current page; nothing more to do';
+  criteria.stuck = 'none of these moves toward the goal, or the goal is impossible from here';
+  const q = {
+    action: {
+      type: 'choice',
+      // A/B 2026-09-19: the old "Fields … are filled before the click" wording left a ready login form at
+      // 0.40–0.49 (click vs stuck); saying the form is ready to submit gave 0.97–0.98.
+      instructions: 'Which single click moves `goal` forward from the current page? The fields in `fields_to_fill` '
+        + 'are filled with the right values just before this click, so a form that only needs those fields is ready to submit.',
+      criteria,
+    },
+  };
+  const keys = Object.keys(data || {});
+  if (keys.length) {
+    for (const e of elements.filter((x) => x.kind === 'input' && x.empty).slice(0, MAX_FILL_FIELDS)) {
+      const c = Object.fromEntries(keys.map((k) => [k, `the value for "${k}"`]));
+      c.skip = 'none of these values belongs in this field, or it should stay empty for this goal';
+      q[`fill_${e.id}`] = { type: 'choice', instructions: `Which value belongs in the form field "${e.label}" (type ${e.type})?`, criteria: c };
+    }
+  }
+  return q;
+}
+
+export function buildStepState(goal, url, page, history, elements, data) {
+  const s = { goal, url, page, history: history.slice(-5), data_keys: Object.keys(data || {}) };
+  if (s.data_keys.length) {
+    const empty = elements.filter((e) => e.kind === 'input' && e.empty).slice(0, MAX_FILL_FIELDS);
+    if (empty.length) s.fields_to_fill = empty.map((e) => e.label);
+  }
+  return s;
+}
+
+const PERSONA_NOTES = {
+  invalid_input: 'this session deliberately submitted invalid values (bad email, empty fields); rejecting them with a validation message is the correct, graceful outcome',
+  hostile_input: 'this session deliberately submitted hostile values (script tags, very long strings, quotes); rejecting or safely displaying them is graceful, executing or crashing on them is not',
+  double_submit: 'this session clicked the submit button twice quickly',
+  back_button: 'this session pressed the browser back button after the first action',
+};
+
+export function buildJudgeState(expected, url, page, { nativeValidation = [], persona = 'normal' } = {}) {
+  const s = { expected, url, url_note: 'single-page apps may not change the URL after actions; judge by the page content', page };
+  if (nativeValidation.length) s.native_validation = nativeValidation;
+  if (PERSONA_NOTES[persona]) s.session = PERSONA_NOTES[persona];
+  return s;
+}
+
+export function decideStep(answers) {
+  const fills = [];
+  for (const [k, a] of Object.entries(answers || {})) {
+    if (k.startsWith('fill_') && a.choice !== 'skip' && (a.confidence ?? 0) >= FILL_MIN) {
+      fills.push({ id: Number(k.slice(5)), key: a.choice });
+    }
+  }
+  const a = answers?.action;
+  if (!a || (a.confidence ?? 0) < ACTION_MIN || a.choice === 'stuck') return { fills, click: null, stop: 'stuck' };
+  if (a.choice === 'done') return { fills, click: null, stop: 'done' };
+  return { fills, click: Number(String(a.choice).replace('click_', '')), stop: null };
+}
+
+export function judgeFlow(answers, pageErrors) {
+  if (pageErrors && pageErrors.length) return { status: 'fail', cause: 'page_error', detail: pageErrors.slice(0, 3) };
+  const v = answers?.verdict;
+  if (!v || (v.confidence ?? 0) < VERDICT_MIN) return { status: 'uncertain', cause: answers?.cause?.choice ?? 'jev_unavailable' };
+  if (v.choice === 'pass') return { status: 'pass', cause: 'none' };
+  if (v.choice === 'fail') return { status: 'fail', cause: answers.cause?.choice ?? 'unknown' };
+  return { status: 'uncertain', cause: answers.cause?.choice ?? 'unknown' };
+}

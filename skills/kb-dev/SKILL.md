@@ -19,8 +19,8 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 5b. Implement (fan-out)    | `dispatching-parallel-agents` + `subagent-driven-development` (obra)                   | Opus → Sonnet  |
 | 6. Test-first discipline   | `test-driven-development` (obra) inside each worker                                    | Sonnet         |
 | 7. Debug if something fails| `systematic-debugging` (obra)                                                          | Sonnet         |
-| 8. Verify before claiming  | `verification-before-completion` (obra)                                                | Sonnet         |
-| 9. Request review          | `requesting-code-review` (obra)                                                        | Sonnet         |
+| 8. Verify before claiming  | `verification-before-completion` (obra); UI change → `jev-browse --flows` first (Jev System 1 agent, see `skills/jev/references/e2e-browsing.md`) | Sonnet |
+| 9. Request review          | `jev-review diff` first (System 1 screen): its `route` picks the reviewer alone, plus `/codex`, or plus `/panel`; then `requesting-code-review` (obra) | Sonnet |
 | 10. Apply review           | `receiving-code-review` (obra)                                                         | Sonnet         |
 | 11. Finish branch          | `finishing-a-development-branch` (obra) — optional: `using-git-worktrees`              | inline         |
 | 12. Capture knowledge      | `/kb-spec post` → `/kb-docs-sync` → `/kb-compile` → `/kb-lint`                         | inline         |
