@@ -1,7 +1,7 @@
 // node --test tests/  — policy of the Jev browser agent (no browser, no network)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStepQuestions, buildStepState, buildJudgeState, decideStep, personaData, judgeFlow, PERSONAS } from '../skills/jev/scripts/browse-core.mjs';
+import { compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, personaData, judgeFlow, PERSONAS } from '../skills/jev/scripts/browse-core.mjs';
 
 const ELEMENTS = [
   { id: 0, kind: 'link', label: 'Home', href: '/index.html' },
@@ -74,6 +74,18 @@ test('judge state carries native validation messages and the persona intent', ()
   const plain = buildJudgeState('x', '/', 's', { nativeValidation: [], persona: 'normal' });
   assert.equal(plain.native_validation, undefined);
   assert.equal(plain.session, undefined);
+});
+
+test('compact snapshot drops url lines and keeps head and tail (footer) when long', () => {
+  // mbardouni.dev: <main> alone was 20.5k chars; a 6k head cut hid the footer (contact) and the project grid.
+  const snap = ['- banner:', '  - link "Home":', '    - /url: /ar', ...Array.from({ length: 2000 }, (_, i) => `  - paragraph: line ${i}`), '- contentinfo:', '  - link "Email me":', '    - /url: mailto:x@y.z'].join('\n');
+  const c = compactSnapshot(snap, 4000);
+  assert.ok(c.length <= 4100);
+  assert.ok(!c.includes('/url:'));
+  assert.ok(c.startsWith('- banner:'));
+  assert.ok(c.includes('contentinfo') && c.includes('Email me'));
+  assert.match(c, /trimmed/);
+  assert.equal(compactSnapshot('- main:\n  - /url: /x\n  - heading "A"', 4000), '- main:\n  - heading "A"');
 });
 
 test('judge: page errors fail the flow even when Jev says pass', () => {
