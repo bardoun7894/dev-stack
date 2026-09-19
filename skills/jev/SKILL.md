@@ -63,6 +63,7 @@ Where the loops run in dev-stack:
 | Code review | `jev-review diff` flags risky hunks | reviewer / `/codex` / `/panel` read only those | `review` |
 | Lint / scan | `jev-review lint`, `jev-review scan` | Haiku/Opus fix the shortlist | `lint`, `scan` |
 | Browser / e2e | checkpoint verdict + cause | `jev-browse` picks each action; Claude fixes failures | `browse` |
+| Driving an agent (`drive-screen`) | `jev_gate.py` reads a herdr pane: prompt / working / idle / dialog / exited + in-project | `autodrive.py --herdr` approves safe prompts; anything else stops for a human | `drive-screen` |
 | KB, hooks, project code | see [references/use-cases.md](references/use-cases.md) | | per call site |
 
 ## From a shell, hook, skill, pi, opencode, or Claude Code
