@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""jev — typed decisions from TypeSafe Jev (via OpenRouter) for shells, hooks, skills and agents.
+
+Jev is a decisions model, not a chat model: it answers a question about some state with a
+label, a probability or a score, plus a calibrated confidence. ~0.5-1 s, ~$0.00002 per call.
+It never writes text, never sees images/audio, and state is capped at 32k tokens.
+
+Usage:
+  jev choice "<question>" opt="description" opt2="description" ... [state options]
+  jev noul   "<yes/no statement>"                                 [state options]
+  jev score  "<question>" "level 0" "level 1" "level 2" ...       [state options]
+  jev route  "<task description>"     which model tier should do this task (T0-T4)
+  jev raw    < request.json           full {"state":…,"questions":{…}} body, prints the response
+
+State options (the thing being judged):
+  -s, --state TEXT     text, or a JSON object/array (parsed if it is valid JSON)
+  -f, --state-file P   read state from a file
+  (stdin)              used when neither is given and stdin is not a terminal
+
+Output and exit codes:
+  default     JSON: {"choice":…,"confidence":…} / {"noul":…} / {"score":…,"confidence":…}
+  -q          only the answer: the choice, the probability, or the score
+  --min C     choice/score: exit 2 when confidence < C (so `jev … --min 0.8 || fallback`)
+  --yes T     noul: exit 0 when probability >= T, else 1 (so `if jev noul … --yes 0.7`)
+  exit 3      API / key / network error (message on stderr)
+
+Key: $OPENROUTER_API_KEY, else the openrouter key in ~/.local/share/opencode/auth.json.
+Model: $JEV_MODEL (default typesafe/jev-1.13). Endpoint: $JEV_DECISIONS_URL.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+URL = os.environ.get("JEV_DECISIONS_URL", "https://openrouter.ai/api/alpha/decisions")
+MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
+
+ROUTE_TIERS = {
+    "T0": "A label, yes/no, score or routing decision. No text needs to be written.",
+    "T1": "Internal summary, digest, extraction or rewrite that only the owner reads; public or non-sensitive input.",
+    "T2": "Text a client, recruiter or the public reads (replies, proposals, posts, captions), or describing an image.",
+    "T3": "Coding, debugging, refactoring, multi-file changes, a deploy, or planning a feature.",
+    "T4": "Hardest long-horizon work: architecture across systems, security-critical review, or driving a GUI.",
+}
+ROUTE_MODELS = {
+    "T0": "jev (typesafe/jev-1.13)",
+    "T1": "free: openrouter deepseek/deepseek-v4-flash-0731:free (public input only)",
+    "T2": "claude-sonnet-5 (haiku-4-5 for short chat)",
+    "T3": "claude-opus-5",
+    "T4": "claude-fable-5-1, or gpt-6-astra for computer use",
+}
+
+
+def die(msg, code=3):
+    print(f"jev: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def api_key():
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        with open(os.path.expanduser("~/.local/share/opencode/auth.json")) as f:
+            key = (json.load(f).get("openrouter") or {}).get("key", "")
+    except (OSError, ValueError):
+        key = ""
+    if not key:
+        die("no key: set OPENROUTER_API_KEY or add an openrouter key to opencode auth.json")
+    return key
+
+
+def post(body):
+    req = urllib.request.Request(
+        URL,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {api_key()}",
+            "Content-Type": "application/json",
+            # urllib's default User-Agent gets Cloudflare error 1010 on some gateways.
+            "User-Agent": "dev-stack-jev/1.0",
+            "X-Title": "dev-stack jev",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=float(os.environ.get("JEV_TIMEOUT", "20"))) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        die(f"HTTP {e.code}: {e.read().decode()[:300]}")
+    except (OSError, ValueError) as e:
+        die(f"request failed: {e}")
+
+
+def parse_state(text):
+    try:
+        v = json.loads(text)
+        return v if isinstance(v, (dict, list)) else text
+    except ValueError:
+        return text
+
+
+def take_opts(args):
+    """Split flags from positionals. Returns (positionals, opts)."""
+    opts = {"quiet": False, "min": None, "yes": None, "state": None}
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-q", "--quiet"):
+            opts["quiet"] = True
+        elif a in ("-s", "--state", "-f", "--state-file", "--min", "--yes"):
+            if i + 1 >= len(args):
+                die(f"{a} needs a value", 64)
+            v = args[i + 1]
+            i += 1
+            if a in ("-s", "--state"):
+                opts["state"] = parse_state(v)
+            elif a in ("-f", "--state-file"):
+                try:
+                    with open(v) as fh:
+                        opts["state"] = parse_state(fh.read())
+                except OSError as e:
+                    die(f"cannot read {v}: {e}", 64)
+            else:
+                opts[a[2:]] = float(v)
+        else:
+            pos.append(a)
+        i += 1
+    return pos, opts
+
+
+def ask(state, question):
+    # stdin only when nothing else supplied the state, so `jev route "task"` never blocks on it.
+    if state is None and not sys.stdin.isatty():
+        state = parse_state(sys.stdin.read())
+    if state is None or state == "":
+        die("no state: pass --state, --state-file, or pipe it on stdin", 64)
+    res = post({"model": MODEL, "state": state, "questions": {"q": question}})
+    a = (res.get("answers") or {}).get("q")
+    if not a:
+        die(f"unexpected response: {json.dumps(res)[:300]}")
+    return a
+
+
+def emit_choice_or_score(a, key, opts, extra=None):
+    conf = a.get("confidence")
+    out = {key: a.get(key), "confidence": conf}
+    if extra:
+        out.update(extra)
+    print(a.get(key) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
+    if opts["min"] is not None and (conf is None or conf < opts["min"]):
+        sys.exit(2)
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    cmd, rest = argv[0], argv[1:]
+
+    if cmd == "raw":
+        body = json.load(sys.stdin)
+        body.setdefault("model", MODEL)
+        print(json.dumps(post(body), ensure_ascii=False))
+        return
+
+    pos, opts = take_opts(rest)
+
+    if cmd == "choice":
+        if len(pos) < 3:
+            die('usage: jev choice "<question>" a="…" b="…" [--state …]', 64)
+        criteria = {}
+        for p in pos[1:]:
+            name, _, desc = p.partition("=")
+            criteria[name] = desc or None
+        a = ask(opts["state"], {"type": "choice", "instructions": pos[0], "criteria": criteria})
+        emit_choice_or_score(a, "choice", opts)
+    elif cmd == "noul":
+        if len(pos) != 1:
+            die('usage: jev noul "<statement>" [--state …] [--yes 0.7]', 64)
+        a = ask(opts["state"], {"type": "noul", "instructions": pos[0]})
+        p = a.get("noul")
+        print(p if opts["quiet"] else json.dumps({"noul": p}))
+        if opts["yes"] is not None:
+            sys.exit(0 if (p or 0) >= opts["yes"] else 1)
+    elif cmd == "score":
+        if len(pos) < 3:
+            die('usage: jev score "<question>" "level 0" "level 1" … [--state …]', 64)
+        a = ask(opts["state"], {"type": "score", "instructions": pos[0], "criteria": pos[1:]})
+        emit_choice_or_score(a, "score", opts)
+    elif cmd == "route":
+        state = " ".join(pos) if pos else opts["state"]
+        a = ask(state, {
+            "type": "choice",
+            "instructions": "Which model tier should do this task. Pick the cheapest tier that can do it well.",
+            "criteria": ROUTE_TIERS,
+        })
+        emit_choice_or_score(a, "choice", opts, {"model": ROUTE_MODELS.get(a.get("choice"))})
+    else:
+        die(f"unknown command {cmd!r}; see jev --help", 64)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
