@@ -45,6 +45,12 @@ For each task:
 
 Pick the **lowest level that catches the bug**. Higher levels are slower, more flaky, and harder to debug.
 
+**E2E / browser tests use Jev as the judge.** Read `~/.claude/skills/jev/references/e2e-browsing.md` before
+writing or fixing one. Exact checks (URL, status, exact text) stay deterministic; fuzzy "did this step work?"
+checks go through one Jev `checkpoint` per step (verdict + cause), and an LLM or screenshot only runs when Jev
+escalates. A Jev error is `uncertain`, never a pass. Unit tests of code that calls Jev stub the client and
+cover the `null` fallback path.
+
 ### Step 3 — Write tests
 Follow the project's existing test style (file naming, fixture patterns, assertion library). If you're unsure, read 2-3 existing test files in the same area first.
 
@@ -58,6 +64,7 @@ Follow the project's existing test style (file naming, fixture patterns, asserti
 If a test passes inconsistently:
 - Run it 5 times in a row
 - If it ever fails, the test is flaky — fix the test (root cause, not a retry loop), or escalate to `debugger` if the underlying production code is racy
+- For e2e failures, classify each with Jev's `cause` question first (`selector_drift`, `backend_error`, `auth`, `timeout`, `regression`) — only `regression` is a production bug to escalate
 
 ### Step 6 — Verification gate
 Load `verification-before-completion`. Run the full suite one final time. Confirm green.
