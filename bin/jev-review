@@ -187,12 +187,25 @@ def lint(cands, rules, ask_many, timeout=None):
 
 # --- I/O ------------------------------------------------------------------------------------
 
+class GitError(Exception):
+    """git failed. Never treat it as an empty diff: that would report 'route: none' for unreviewed code."""
+
+
 def git(repo, *args):
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True).stdout
+    try:
+        p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    except OSError as e:
+        raise GitError(str(e)) from e
+    if p.returncode != 0:
+        raise GitError(f"git {' '.join(args)} in {repo}: {p.stderr.strip()[:300]}")
+    return p.stdout
 
 
 def repo_root(start):
-    return git(start, "rev-parse", "--show-toplevel").strip() or start
+    try:
+        return git(start, "rev-parse", "--show-toplevel").strip() or start
+    except GitError:
+        return start
 
 
 def read_lines(path):
@@ -210,8 +223,11 @@ def source_files(repo, paths):
     for p in paths:
         full = os.path.join(repo, p) if not os.path.isabs(p) else p
         if os.path.isdir(full):
-            listed = git(full, "ls-files").split("\n")
-            out += [os.path.join(full, f) for f in listed if f]
+            try:
+                listed = [os.path.join(full, f) for f in git(full, "ls-files").split("\n") if f]
+            except GitError:  # not a git checkout: walk it instead
+                listed = [os.path.join(d, f) for d, _, fs in os.walk(full) if "/." not in d for f in fs]
+            out += listed
         elif os.path.isfile(full):
             out.append(full)
     return [f for f in out if os.path.splitext(f)[1] in SOURCE_EXT and not SKIP.search(f)]
@@ -336,7 +352,7 @@ def main(argv):
     args = parse_args(argv[1:])
     try:
         return {"diff": cmd_diff, "lint": cmd_lint, "scan": cmd_scan}[argv[0]](args, jev)
-    except jev.JevError as e:
+    except (jev.JevError, GitError) as e:
         print(f"jev-review: {e}", file=sys.stderr)
         return 3
 

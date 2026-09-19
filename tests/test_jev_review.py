@@ -70,6 +70,13 @@ class RouteTest(unittest.TestCase):
                                      "severity": {"score": 0.2}})["flagged"], [])
 
 
+class GitFailClosedTest(unittest.TestCase):
+    def test_git_failure_raises_instead_of_empty_diff(self):
+        # On MyContabo, "dubious ownership" made git print nothing and the review said "route: none".
+        with self.assertRaises(rv.GitError):
+            rv.git("/nonexistent-dir-for-jev-review-test", "diff", "HEAD")
+
+
 class CandidatesTest(unittest.TestCase):
     SRC = [
         "import logging",
