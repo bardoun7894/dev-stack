@@ -52,12 +52,20 @@ export function personaData(persona, data) {
   return out;
 }
 
-export function buildStepQuestions(elements, data) {
+// Read-only by default: without test data (or --allow-submit) the agent never submits a form, and it never
+// leaves the site under test (off-site links are reported in the state instead of clicked).
+export function clickable(elements, data, { allowSubmit = false } = {}) {
+  const canSubmit = allowSubmit || Object.keys(data || {}).length > 0;
+  return elements.filter((x) => (x.kind === 'link' && !x.external) || (x.kind === 'button' && (canSubmit || !x.inForm)));
+}
+
+export function buildStepQuestions(elements, data, opts = {}) {
   const criteria = {};
-  for (const e of elements.filter((x) => x.kind === 'link' || x.kind === 'button').slice(0, MAX_CLICK_OPTIONS)) {
+  for (const e of clickable(elements, data, opts).slice(0, MAX_CLICK_OPTIONS)) {
     criteria[`click_${e.id}`] = `${e.kind} "${e.label}"${e.href ? ` -> ${e.href}` : ''}`;
   }
-  criteria.done = 'the goal is already achieved on the current page; nothing more to do';
+  criteria.done = 'the goal is already achieved on the current page (including when what it asks for is one of '
+    + 'the `external_links`); nothing more to do';
   criteria.stuck = 'none of these moves toward the goal, or the goal is impossible from here';
   const q = {
     action: {
@@ -92,6 +100,8 @@ export function compactSnapshot(snap, max = 12000) {
 
 export function buildStepState(goal, url, page, history, elements, data) {
   const s = { goal, url, page, history: history.slice(-5), data_keys: Object.keys(data || {}) };
+  const ext = elements.filter((e) => e.kind === 'link' && e.external).slice(0, 20);
+  if (ext.length) s.external_links = ext.map((e) => `${e.label} -> ${e.href}`);
   if (s.data_keys.length) {
     const empty = elements.filter((e) => e.kind === 'input' && e.empty).slice(0, MAX_FILL_FIELDS);
     if (empty.length) s.fields_to_fill = empty.map((e) => e.label);

@@ -6,6 +6,10 @@
 //   jev-browse --url URL --goal … --adversarial N   N parallel sessions over the personas
 //              (normal, invalid_input, hostile_input, double_submit, back_button); reports only broken ones
 //   options: --cdp URL (default $JEV_BROWSE_CDP or http://127.0.0.1:9222, Lightpanda) --max-steps 15 --json
+//            --allow-submit   let a flow without --data press form buttons (off by default)
+//
+// Read-only by default: without --data or --allow-submit it never presses a button inside a form, and it
+// never follows a link off the site under test (they are listed to Jev as external_links instead).
 //
 // Drives the DOM directly (native value setter + input/change events, element.click()) because Lightpanda
 // has no layout, so Playwright's visibility checks never pass there; the same code works on Chromium.
@@ -28,6 +32,7 @@ function args(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--json') o.json = true;
+    else if (a === '--allow-submit') o.allowSubmit = true;
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
   }
   o.maxSteps = Number(o.maxSteps);
@@ -67,7 +72,15 @@ async function elements(page) {
       const tag = e.tagName.toLowerCase();
       const isButton = tag === 'button' || e.getAttribute('role') === 'button' || ['submit', 'button'].includes(e.type);
       const kind = tag === 'a' ? 'link' : isButton ? 'button' : 'input';
-      out.push({ id: i, kind, label: label(e), type: e.type || tag, href: tag === 'a' ? e.getAttribute('href') : undefined, empty: kind === 'input' ? !e.value : undefined });
+      let external = false;
+      if (tag === 'a') {
+        try {
+          const u = new URL(e.getAttribute('href'), location.href);
+          external = !['http:', 'https:'].includes(u.protocol) || u.hostname.replace(/^www\./, '') !== location.hostname.replace(/^www\./, '');
+        } catch { external = true; }
+      }
+      out.push({ id: i, kind, label: label(e), type: e.type || tag, href: tag === 'a' ? e.getAttribute('href') : undefined,
+        external, inForm: isButton && !!e.closest('form'), empty: kind === 'input' ? !e.value : undefined });
     });
     return out;
   });
@@ -119,7 +132,7 @@ async function runFlow(chromium, flow, opt, persona = 'normal') {
     for (let step = 0; step < opt.maxSteps; step++) {
       const els = await elements(page);
       const state = buildStepState(flow.goal, new URL(page.url()).pathname, await snapshot(page), history, els, data);
-      const d = decideStep(await askJev(state, buildStepQuestions(els, data)));
+      const d = decideStep(await askJev(state, buildStepQuestions(els, data, { allowSubmit: opt.allowSubmit })));
       for (const f of d.fills) await fill(page, f.id, data[f.key]);
       if (d.stop) { stop = d.stop; break; }
       const el = els.find((e) => e.id === d.click);

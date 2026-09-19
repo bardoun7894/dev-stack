@@ -88,6 +88,23 @@ test('compact snapshot drops url lines and keeps head and tail (footer) when lon
   assert.equal(compactSnapshot('- main:\n  - /url: /x\n  - heading "A"', 4000), '- main:\n  - heading "A"');
 });
 
+test('read-only by default: no form submits without data, never off-site links', () => {
+  // mbardouni.dev 2026-09-19: a "find how to hire" flow clicked the live contact form's Send button (the
+  // backend rejected the empty POST), and the community flow crashed on tg:// and wandered to t.me.
+  const els = [
+    { id: 0, kind: 'link', label: 'About', href: '/en/about', external: false },
+    { id: 1, kind: 'link', label: 'Telegram', href: 'https://t.me/x', external: true },
+    { id: 2, kind: 'button', label: 'Send message', inForm: true },
+    { id: 3, kind: 'button', label: 'Menu', inForm: false },
+  ];
+  const keys = (q) => Object.keys(q.action.criteria).sort();
+  assert.deepEqual(keys(buildStepQuestions(els, {})), ['click_0', 'click_3', 'done', 'stuck']);
+  assert.deepEqual(keys(buildStepQuestions(els, { email: 'a@b.co' })), ['click_0', 'click_2', 'click_3', 'done', 'stuck']);
+  assert.deepEqual(keys(buildStepQuestions(els, {}, { allowSubmit: true })), ['click_0', 'click_2', 'click_3', 'done', 'stuck']);
+  const s = buildStepState('join', '/en/community', 'snap', [], els, {});
+  assert.deepEqual(s.external_links, ['Telegram -> https://t.me/x']);
+});
+
 test('judge: page errors fail the flow even when Jev says pass', () => {
   assert.equal(judgeFlow({ verdict: { choice: 'pass', confidence: 0.99 } }, ['TypeError: x']).status, 'fail');
 });
