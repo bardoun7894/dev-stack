@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""jev-skill-suggest — Jev picks at most one relevant skill for a prompt (System 1 screen).
+
+Follows TypeSafe's skill-suggestion cookbook (wrong skill loads 16.8% -> 7.3% on Haiku 4.5):
+  1. wide: one Choice over every installed skill (name + short description) plus three gate Nouls
+     (acts on the user's system / follows a documented procedure / prose suffices). Gate mean < 0.30 -> nothing.
+  2. rerank: Choice over the top 3 with full descriptions and the first 700 chars of each SKILL.md, plus
+     one "fits" Noul per candidate. Best fit < 0.30 -> nothing.
+
+Usage:
+  jev-skill-suggest "<prompt>"        prints a <skill_relevance> line, or nothing
+  jev-skill-suggest --name "<prompt>" prints only the skill name
+Env: JEV_SKILL_SUGGEST=0 disables; JEV_TIMEOUT per request (default here 3 s). Decisions log under tag
+`skill-suggest` (see `jev tune skill-suggest`). Any error -> prints nothing, exit 0: never blocks a prompt.
+"""
+import glob
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+GATE_THRESHOLD = 0.30
+FITS_THRESHOLD = 0.30
+# A wide pick this confident skips the gate (the rerank "fits" check still applies). Tuned from the
+# decision log: question-phrased prompts ("should this be a durable workflow") fell just under the gate.
+WIDE_BYPASS_CONFIDENCE = 0.9
+SHORTLIST = 3
+EXCERPT_CHARS = 700
+WIDE_DESC_CHARS = 60
+TAG = "skill-suggest"
+CACHE = os.path.expanduser("~/.cache/jev/skill-roster.json")
+
+
+def load_jev():
+    loader = importlib.machinery.SourceFileLoader("jev", os.path.join(HERE, "jev"))
+    spec = importlib.util.spec_from_loader("jev", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def frontmatter(text):
+    """Minimal YAML frontmatter reader for name/description (plain, quoted, or folded `>` / `|`)."""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*(\n|$)", text, re.S)
+    if not m:
+        return {}
+    out, key, block = {}, None, []
+    for line in m.group(1).split("\n"):
+        top = re.match(r"^([A-Za-z_-]+):\s*(.*)$", line)
+        if top:
+            if key and block:
+                out[key] = " ".join(block)
+            key, val = top.group(1), top.group(2).strip()
+            block = []
+            if val in (">", "|", ">-", "|-"):
+                continue
+            out[key] = val.strip("\"'")
+            key = None
+        elif key and line.strip():
+            block.append(line.strip())
+    if key and block:
+        out[key] = " ".join(block)
+    return {k: v for k, v in out.items() if k in ("name", "description")}
+
+
+def skill_files():
+    """(path, name prefix) for user skills and the newest version of each cached plugin."""
+    files = [(p, "") for p in glob.glob(os.path.expanduser("~/.claude/skills/*/SKILL.md"))]
+    for plugin in glob.glob(os.path.expanduser("~/.claude/plugins/cache/*/*")):
+        versions = sorted(glob.glob(os.path.join(plugin, "*")), key=os.path.getmtime)
+        if versions:
+            prefix = os.path.basename(plugin) + ":"
+            files += [(p, prefix) for p in glob.glob(os.path.join(versions[-1], "skills", "*", "SKILL.md"))]
+    return files
+
+
+def build_roster(roots):
+    """roots: [(dir containing <skill>/SKILL.md, name prefix)] -> {name: {description, excerpt}}."""
+    files = []
+    for d, prefix in roots:
+        files += [(p, prefix) for p in glob.glob(os.path.join(d, "*", "SKILL.md"))]
+    return _roster_from(files)
+
+
+def _roster_from(files):
+    roster = {}
+    for path, prefix in sorted(files):
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        fm = frontmatter(text)
+        if not fm.get("name") or not fm.get("description"):
+            continue
+        body = re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, count=1, flags=re.S)
+        roster[prefix + fm["name"]] = {"description": fm["description"], "excerpt": body[:EXCERPT_CHARS]}
+    return roster
+
+
+def cached_roster():
+    files = skill_files()
+    sig = str(sorted((p, int(os.path.getmtime(p))) for p, _ in files))
+    try:
+        with open(CACHE) as f:
+            c = json.load(f)
+        if c.get("sig") == sig:
+            return c["roster"]
+    except (OSError, ValueError, KeyError):
+        pass
+    roster = _roster_from(files)
+    try:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        with open(CACHE, "w") as f:
+            json.dump({"sig": sig, "roster": roster}, f)
+    except OSError:
+        pass
+    return roster
+
+
+def gate_score(answers):
+    return (answers["acts_on_user_system"]["noul"] + answers["would_follow_documented_procedure"]["noul"]
+            + (1.0 - answers["prose_suffices"]["noul"])) / 3
+
+
+def ranked(choice_answer, k):
+    probs = choice_answer.get("probabilities") or {choice_answer.get("choice"): 1.0}
+    return [name for name, _ in sorted(probs.items(), key=lambda kv: -kv[1])][:k]
+
+
+def suggest(prompt, roster, ask_many, timeout=None):
+    """At most one skill name for a prompt, or None for 'nothing here applies'."""
+    state = {"request": prompt, "recent_context": ""}
+    wide = {
+        "skill": {"type": "choice",
+                  "instructions": "Which installed agent skill is most relevant to carrying out `request`?",
+                  "criteria": {n: s["description"][:WIDE_DESC_CHARS] for n, s in roster.items()}},
+        "acts_on_user_system": {"type": "noul", "instructions":
+                                "`request` asks the agent to act on the user's files, repos, accounts, devices, "
+                                "servers or apps, not only to explain something."},
+        "would_follow_documented_procedure": {"type": "noul", "instructions":
+                                              "Doing `request` well needs a specific documented procedure or tool "
+                                              "workflow rather than general knowledge."},
+        "prose_suffices": {"type": "noul", "instructions":
+                           "A plain written answer alone fully satisfies `request`; no tool, file or procedure is needed."},
+    }
+    a, _, _ = ask_many(state, wide, TAG, timeout)
+    if gate_score(a) < GATE_THRESHOLD and (a["skill"].get("confidence") or 0) < WIDE_BYPASS_CONFIDENCE:
+        return None
+    short = [n for n in ranked(a["skill"], SHORTLIST) if n in roster]
+    if not short:
+        return None
+    rerank = {"winner": {"type": "choice",
+                         "instructions": "Which of these skills does the specific thing `request` asks for?",
+                         "criteria": {n: roster[n]["description"] + "\n\n" + roster[n]["excerpt"] for n in short}}}
+    for i, n in enumerate(short):
+        rerank[f"fits_{i}"] = {"type": "noul", "instructions":
+                               f"The skill `{n}` does the specific thing `request` asks for. "
+                               f"Skill description: {roster[n]['description']}"}
+    b, _, _ = ask_many(state, rerank, TAG, timeout)
+    fits = [b[f"fits_{i}"]["noul"] for i in range(len(short)) if f"fits_{i}" in b]
+    if not fits or max(fits) < FITS_THRESHOLD:
+        return None
+    return b["winner"].get("choice")
+
+
+def main(argv):
+    if os.environ.get("JEV_SKILL_SUGGEST") == "0":
+        return
+    name_only = "--name" in argv
+    prompt = " ".join(a for a in argv if a != "--name").strip()
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read().strip()
+    if len(prompt) < 15 or prompt.startswith("/"):
+        return
+    jev = load_jev()
+    try:
+        name = suggest(prompt[:6000], cached_roster(), jev.ask_many,
+                       float(os.environ.get("JEV_TIMEOUT", "3")))
+    except (jev.JevError, KeyError, TypeError):
+        return
+    if name:
+        print(name if name_only else
+              f"<skill_relevance>Relevant to the current request: {name}. "
+              f"Ignore this if it does not fit what the user actually asked for.</skill_relevance>")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
