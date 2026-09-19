@@ -16,12 +16,12 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { buildStepQuestions, buildStepState, buildJudgeState, decideStep, judgeFlow, personaData, CHECKPOINT, HEALTH, PERSONAS } from './browse-core.mjs';
+import { compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, judgeFlow, personaData, CHECKPOINT, HEALTH, PERSONAS } from './browse-core.mjs';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const JEV = process.env.JEV_BIN || join(HERE, '..', '..', '..', 'bin', 'jev');
 const require = createRequire(join(HERE, 'package.json'));
-const SNAPSHOT_CHARS = 6000;
+const SNAPSHOT_CHARS = 12000;
 
 function args(argv) {
   const o = { cdp: process.env.JEV_BROWSE_CDP || 'http://127.0.0.1:9222', maxSteps: 15, json: false };
@@ -74,12 +74,11 @@ async function elements(page) {
 }
 
 async function snapshot(page) {
-  for (const sel of ['main', 'body']) {
-    try {
-      if (await page.locator(sel).count()) return (await page.locator(sel).first().ariaSnapshot()).slice(0, SNAPSHOT_CHARS);
-    } catch { /* fall through */ }
+  try {
+    return compactSnapshot(await page.locator('body').ariaSnapshot(), SNAPSHOT_CHARS);
+  } catch {
+    return compactSnapshot(await page.evaluate(() => document.body?.innerText || ''), SNAPSHOT_CHARS);
   }
-  return (await page.evaluate(() => document.body?.innerText || '')).slice(0, SNAPSHOT_CHARS);
 }
 
 const fill = (page, id, value) => page.evaluate(({ id, value }) => {
