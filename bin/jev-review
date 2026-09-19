@@ -78,9 +78,14 @@ DEFAULT_RULES = [
     {"id": "log-secret", "level": "error", "applies_to": "log", "threshold": 0.7,
      "question": "The value being logged includes a secret or credential (password, token, API key, cookie, "
                  "private key, session id) or a full payment card or bank account number."},
+    # Retrained 2026-09-19 on 11 labelled Tokyo log lines: Jev sees variable names, not values, so the old
+    # wording scored a contactName + WhatsApp JID leak at 0.51 (6/11 right); naming the fields -> 11/11.
     {"id": "log-pii", "level": "warn", "applies_to": "log", "threshold": 0.7,
-     "question": "The value being logged includes personal data about a real person: email, phone number, "
-                 "street address, national ID, or a full name together with other personal data."},
+     "question": "The value being logged includes personal data about a real person. Judge by the variable and "
+                 "field names as well as literal text: a person's name (e.g. senderName, contactName, userName), "
+                 "a phone number or WhatsApp JID (jid, phone), an email, a street address, a national ID, or the "
+                 "content of their private messages or transcripts all count. Static text, error objects, model "
+                 "names, status codes and event types do not."},
     {"id": "name-hides-side-effect", "level": "warn", "applies_to": "function", "threshold": 0.75,
      "question": "The function's name hides a significant side effect it performs (writes files or a database, "
                  "sends network requests or messages, mutates global state) that a caller would not expect "
@@ -88,8 +93,13 @@ DEFAULT_RULES = [
     {"id": "comment-useless", "level": "warn", "applies_to": "comment", "threshold": 0.8,
      "question": "The comment only restates what the next line of code obviously does, adding no reason, "
                  "context, or warning."},
+    # Retrained 2026-09-19 on 8 labelled Tokyo comments: the old wording flagged 22 of 538 candidates, mostly
+    # comments whose proof was outside the snippet (1/8 right). Requiring a visible contradiction: 7/8, and it
+    # still catches "max 1 reply per 2 minutes" above COOLDOWN_MS = 15 s.
     {"id": "comment-wrong", "level": "warn", "applies_to": "comment", "threshold": 0.7,
-     "question": "The comment describes behaviour that the adjacent code does not actually do."},
+     "question": "The comment makes a concrete claim (a number, a limit, a name, an order of steps, a behaviour) "
+                 "that the code shown in this snippet visibly contradicts. If the code needed to check the claim "
+                 "is not in the snippet, or the comment is history or rationale, answer no."},
 ]
 LOG_RE = re.compile(r"\b(console\.(log|info|warn|error|debug)|logging\.(info|debug|warning|error|exception|critical)"
                     r"|log\.(info|debug|warn|warning|error)|logger\.\w+|Log::\w+|error_log\s*\(|print\s*\("
