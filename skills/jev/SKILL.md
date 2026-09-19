@@ -87,7 +87,7 @@ fallback path for exit ≠ 0. Run `jev --help` for everything.
 | `jev-review diff [BASE]` | every hunk: 5 risk Nouls + severity Score → `route: none/reviewer/codex/panel` | before any review (reviewer Pass 0, kb-dev Phase 9) | planted bugs → `panel`, clean diff → `none`, ~$0.00003/hunk |
 | `jev-review lint [PATH…]` | secrets / PII in logs, names hiding side effects, useless or wrong comments; `.jev-lint.json` overrides | pre-commit / CI; exit 1 on error-level rules | caught the logged password as an error |
 | `jev-review scan [DIR] [--run]` | code smells + garbage comments per 120-line window, cost estimate first | "find code smells", "clean up comments", codebase audits | dev-stack: 33 windows, $0.0015, 9 shortlisted |
-| `jev-browse` | Jev picks every fill/click, then verdict + cause; `--flows`, `--adversarial N` | kb-dev Phase 8 for UI changes, `dogfood` first sweep | 3 flows right in ~3–5 s for $0.00025 |
+| `jev-browse` | Jev picks every fill/click, then verdict + cause; `--flows`, `--adversarial N`, `--headful` to watch, `--screenshots DIR` for the visual (L3) check | kb-dev Phase 8 for UI changes, `dogfood` first sweep | 3 flows right in ~3–5 s for $0.00025 |
 
 ### Claude Code itself
 
