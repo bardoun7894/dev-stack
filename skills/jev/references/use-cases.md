@@ -39,13 +39,21 @@ label/decision, or reads everything to sort it. File refs come from the 2026-09-
 - **beldify**: `noul` prompt-moderation before Kie `gpt-image-2` jobs (saves paid image credits).
 - **godhome**: a workflow "decision" node type that runs `jev` instead of a pi agent for branch conditions.
 
+## Laptop / dev-stack — done (2026-09-19)
+
+| Where | Jev does | Replaces |
+|---|---|---|
+| `hooks/user-prompt-kb-check.sh` | `jev-skill-suggest`: at most one relevant skill per prompt | Claude scanning ~170 skill descriptions |
+| same hook | `noul` "engineering request" when the EN/AR word lists miss (Darija, French) | missed KB reminders |
+| `agents/orchestrator.md` Step 3b | `choice` trivial/simple/medium/hard per packet | Claude sizing every packet |
+| `agents/reviewer.md` Pass 0, kb-dev Phase 9 | `jev-review diff`: risk + severity per hunk, route reviewer / codex / panel | reading the whole diff blind; guessing when to call `/panel` |
+| `jev-review lint` / `scan` | qualitative linters, code smells, garbage comments | regex linters that miss meaning |
+| kb-dev Phase 8, `qa-engineer`, `dogfood` | `jev-browse` flows + adversarial personas; checkpoint verdict + cause | an LLM reading every page |
+| `bin/jev --log` / `jev tune` | decision log, System 2 retrains System 1 | thresholds nobody revisits |
+
 ## Laptop / dev-stack (candidates)
 
-- `hooks/user-prompt-kb-check.sh`: the engineering-vocabulary regex (EN + AR) → `jev noul "an engineering
-  request"` — handles French and phrasing the regex misses. Adds ~0.6 s per prompt and sends the prompt to
-  OpenRouter; only worth it if the regex misfires often.
-- `orchestrator` Step 3b trivial/simple/medium/hard → `jev route` / a `score` rubric per packet.
 - KB: `lint.py` contradiction check (pairwise `noul` on two excerpts, parallel) instead of one pi call;
   hourly sweep: `noul` "this raw file is worth ingesting".
-- Code review gate: `score` risk of a diff summary to decide `/panel` (4 agents) vs `/codex` vs nothing.
-- Browser agents: page snapshot as state, `choice` over the next action (verified: picked the right tweet at 0.99).
+- MyContabo / Tokyo `proactive.ts`: `score` log-line severity (routine … outage) in near real time, page on ≥ 2.5
+  (the video's on-call example).
