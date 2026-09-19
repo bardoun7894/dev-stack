@@ -80,6 +80,16 @@ export function buildStepQuestions(elements, data) {
   return q;
 }
 
+// Whole-page aria snapshot, compacted: link targets are already in the element list, and a long page keeps
+// its start (banner, nav, first content) and end (footer: contact, social links) instead of a head-only cut.
+export function compactSnapshot(snap, max = 12000) {
+  const s = snap.split('\n').filter((l) => !/^\s*- \/url:/.test(l)).join('\n');
+  if (s.length <= max) return s;
+  const tail = Math.floor(max * 0.25);
+  const marker = '\n  … (middle of the page trimmed) …\n';
+  return s.slice(0, max - tail - marker.length) + marker + s.slice(-tail);
+}
+
 export function buildStepState(goal, url, page, history, elements, data) {
   const s = { goal, url, page, history: history.slice(-5), data_keys: Object.keys(data || {}) };
   if (s.data_keys.length) {
