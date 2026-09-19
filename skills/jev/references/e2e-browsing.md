@@ -156,6 +156,11 @@ jev-browse --url … --goal … --data … --adversarial 5   # personas: normal,
                                                         # double_submit, back_button — reports what breaks
 ```
 
+**Read-only by default.** Without `--data` or `--allow-submit` it never presses a button inside a form, and it
+never follows a link off the site under test; off-site links (Telegram, WhatsApp, app stores) are passed to
+Jev as `external_links` so "find how to join" can finish as `done`. Learned on the live mbardouni.dev: a
+"find how to hire" flow pressed the real contact form's Send (the backend rejected the empty POST).
+
 Exit 0 all pass, 1 any fail/uncertain, 3 no browser / no Jev. Defaults to Lightpanda at `127.0.0.1:9222`
 (Mac launchd, MyContabo systemd); `--cdp` for another Chromium. Adversarial input only against apps you own.
 
