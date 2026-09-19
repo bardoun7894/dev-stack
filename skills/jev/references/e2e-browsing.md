@@ -156,6 +156,13 @@ jev-browse --url … --goal … --data … --adversarial 5   # personas: normal,
                                                         # double_submit, back_button — reports what breaks
 ```
 
+**Seeing the UI.** Jev reads text, never pixels. `--headful` opens a real Chrome window (one flow at a time,
+slowed down, a red outline on each element before it is clicked) so a person can watch. `--screenshots DIR`
+(implies `--chrome`, headless Chrome) saves `NN.png` per step plus `final.png` / `final-full.png` per flow;
+layout, styling, overflow and mixed-language checks are then a vision model (Claude reading the PNGs), the L3
+rung. First run on mbardouni.dev caught what the text never showed: an Arabic post listed in the English blog
+index and a truncated title.
+
 **Read-only by default.** Without `--data` or `--allow-submit` it never presses a button inside a form, and it
 never follows a link off the site under test; off-site links (Telegram, WhatsApp, app stores) are passed to
 Jev as `external_links` so "find how to join" can finish as `done`. Learned on the live mbardouni.dev: a

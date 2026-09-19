@@ -7,6 +7,11 @@
 //              (normal, invalid_input, hostile_input, double_submit, back_button); reports only broken ones
 //   options: --cdp URL (default $JEV_BROWSE_CDP or http://127.0.0.1:9222, Lightpanda) --max-steps 15 --json
 //            --allow-submit   let a flow without --data press form buttons (off by default)
+//            --headful        real, visible Chrome window: flows run one at a time, slowed down, and each element
+//                             is outlined before Jev clicks it, so you can watch
+//            --chrome         headless Chrome instead of Lightpanda (needed for screenshots)
+//            --screenshots D  save D/<flow>/NN.png per step plus final.png and final-full.png (implies --chrome);
+//                             Jev is text-only, so layout/visual checks are a vision model reading these (L3)
 //
 // Read-only by default: without --data or --allow-submit it never presses a button inside a form, and it
 // never follows a link off the site under test (they are listed to Jev as external_links instead).
@@ -16,7 +21,7 @@
 // Jev calls go through `bin/jev raw --log browse`, so `jev tune browse` retrains the thresholds.
 // Exit: 0 all pass, 1 any fail/uncertain, 3 Jev or browser unavailable.
 import { spawn } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -33,11 +38,25 @@ function args(argv) {
     const a = argv[i];
     if (a === '--json') o.json = true;
     else if (a === '--allow-submit') o.allowSubmit = true;
+    else if (a === '--headful') o.headful = true;
+    else if (a === '--chrome') o.chrome = true;
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
   }
   o.maxSteps = Number(o.maxSteps);
+  if (o.screenshots || o.headful) o.chrome = true;
   return o;
 }
+
+function findChrome() {
+  if (process.env.JEV_BROWSER && existsSync(process.env.JEV_BROWSER)) return process.env.JEV_BROWSER;
+  const candidates = process.platform === 'darwin'
+    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge', '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser']
+    : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium'];
+  return candidates.find((p) => existsSync(p));
+}
+
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'flow';
 
 let cost = 0;
 function askJev(state, questions) {
@@ -112,14 +131,25 @@ async function click(page, el) {
   await page.waitForTimeout(400);
 }
 
-async function runFlow(chromium, flow, opt, persona = 'normal') {
-  // One CDP connection per session: Lightpanda allows a single browser context per connection.
-  let browser;
-  try { browser = await chromium.connectOverCDP(opt.cdp); } catch (e) {
-    return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'no_browser', detail: String(e.message).slice(0, 200), stop: 'no_browser', steps: [] };
+async function runFlow(chromium, flow, opt, persona = 'normal', shared = null) {
+  // Chrome (--chrome/--headful): one shared browser, a context per flow. Lightpanda: one CDP connection per
+  // session, because it allows a single browser context per connection.
+  let browser = shared;
+  if (!browser) {
+    try { browser = await chromium.connectOverCDP(opt.cdp); } catch (e) {
+      return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'no_browser', detail: String(e.message).slice(0, 200), stop: 'no_browser', steps: [] };
+    }
   }
-  const ctx = await browser.newContext();
+  const ctx = await browser.newContext(shared ? { viewport: { width: 1366, height: 900 } } : {});
   const page = await ctx.newPage();
+  const shots = [];
+  const shotDir = opt.screenshots ? join(opt.screenshots, slug(`${flow.name || flow.goal}-${persona}`)) : null;
+  if (shotDir) mkdirSync(shotDir, { recursive: true });
+  const shot = async (name, fullPage = false) => {
+    if (!shotDir) return;
+    const p = join(shotDir, `${name}.png`);
+    try { await page.screenshot({ path: p, fullPage }); shots.push(p); } catch { /* keep going without it */ }
+  };
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const data = personaData(persona, flow.data || {});
@@ -141,6 +171,14 @@ async function runFlow(chromium, flow, opt, persona = 'normal') {
       if (repeats >= 2) { stop = 'loop'; break; }
       lastClick = d.click;
       history.push(`${d.fills.length ? `filled ${d.fills.map((f) => f.key).join(', ')}; ` : ''}clicked ${el.kind} "${el.label}"`);
+      if (opt.headful) {
+        await page.evaluate((id) => {
+          const t = document.querySelector(`[data-jev="${id}"]`);
+          if (t) { t.scrollIntoView({ block: 'center' }); t.style.outline = '3px solid #e11d48'; t.style.outlineOffset = '2px'; }
+        }, el.id).catch(() => {});
+        await page.waitForTimeout(700);
+      }
+      await shot(String(step + 1).padStart(2, '0'));
       await click(page, el);
       if (persona === 'double_submit' && el.kind === 'button') await click(page, el);
       if (persona === 'back_button' && step === 0) { await page.goBack().catch(() => {}); await page.waitForTimeout(300); }
@@ -153,12 +191,15 @@ async function runFlow(chromium, flow, opt, persona = 'normal') {
     const state = buildJudgeState(flow.expect || 'the app handles the session gracefully', new URL(page.url()).pathname,
       await snapshot(page), { nativeValidation, persona });
     const verdict = judgeFlow(await askJev(state, judge), errors);
-    return { name: flow.name || flow.goal, persona, ...verdict, stop, steps: history, url: page.url() };
+    await shot('final');
+    await shot('final-full', true);
+    return { name: flow.name || flow.goal, persona, ...verdict, stop, steps: history, url: page.url(), screenshots: shots };
   } catch (e) {
-    return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'driver_error', detail: String(e.message || e).slice(0, 200), stop, steps: history };
+    await shot('error');
+    return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'driver_error', detail: String(e.message || e).slice(0, 200), stop, steps: history, screenshots: shots };
   } finally {
     await ctx.close().catch(() => {});
-    await browser.close().catch(() => {});
+    if (!shared) await browser.close().catch(() => {});
   }
 }
 
@@ -170,17 +211,29 @@ async function main() {
   else { console.error('usage: jev-browse --url URL --goal "…" [--expect "…"] [--data JSON] [--adversarial N] | --flows flows.json'); process.exit(64); }
 
   const { chromium } = require('playwright-core');
-  try { await (await chromium.connectOverCDP(opt.cdp)).close(); } catch (e) { console.error(`jev-browse: no browser at ${opt.cdp}: ${e.message}`); process.exit(3); }
+  let shared = null;
+  if (opt.chrome) {
+    const exe = findChrome();
+    if (!exe) { console.error('jev-browse: no Chrome/Chromium found; set JEV_BROWSER=/path/to/chrome'); process.exit(3); }
+    shared = await chromium.launch({ headless: !opt.headful, slowMo: opt.headful ? 250 : 0, executablePath: exe,
+      args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  } else {
+    try { await (await chromium.connectOverCDP(opt.cdp)).close(); } catch (e) { console.error(`jev-browse: no browser at ${opt.cdp}: ${e.message}`); process.exit(3); }
+  }
 
-  const jobs = [];
+  const tasks = [];
   for (const f of flows) {
     if (opt.adversarial) {
       const n = Number(opt.adversarial);
-      for (let i = 0; i < n; i++) jobs.push(runFlow(chromium, f, opt, PERSONAS[i % PERSONAS.length]));
-    } else jobs.push(runFlow(chromium, f, opt));
+      for (let i = 0; i < n; i++) tasks.push(() => runFlow(chromium, f, opt, PERSONAS[i % PERSONAS.length], shared));
+    } else tasks.push(() => runFlow(chromium, f, opt, 'normal', shared));
   }
   const t = Date.now();
-  const results = await Promise.all(jobs);
+  // Headful runs one flow at a time so there is one window to watch; everything else runs in parallel.
+  const results = [];
+  if (opt.headful) for (const task of tasks) results.push(await task());
+  else results.push(...await Promise.all(tasks.map((task) => task())));
+  if (shared) await shared.close().catch(() => {});
   const bad = results.filter((r) => r.status !== 'pass');
   const summary = { runs: results.length, pass: results.length - bad.length, fail: bad.filter((r) => r.status === 'fail').length, uncertain: bad.filter((r) => r.status === 'uncertain').length, seconds: (Date.now() - t) / 1000, cost_usd: Number(cost.toFixed(6)) };
   if (opt.json) console.log(JSON.stringify({ ...summary, results }, null, 1));
