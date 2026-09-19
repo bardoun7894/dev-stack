@@ -38,6 +38,29 @@ class RosterTest(unittest.TestCase):
         self.assertIn("Step one.", roster["alpha"]["excerpt"])
 
 
+class ParkedTest(unittest.TestCase):
+    """Parked skills are not loaded into the session; Jev still ranks them and the hint points at SKILL.md."""
+
+    def test_roster_marks_parked_skills_with_their_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            live, parked = os.path.join(d, "skills"), os.path.join(d, "skills-parked")
+            for root, name in ((live, "tdd"), (parked, "video-use")):
+                os.makedirs(os.path.join(root, name))
+                with open(os.path.join(root, name, "SKILL.md"), "w") as f:
+                    f.write(f"---\nname: {name}\ndescription: Does {name}.\n---\nbody")
+            roster = sug._roster_from(sug.skill_files(live_dir=live, parked_dir=parked, plugins=False))
+        self.assertNotIn("parked", roster["tdd"])
+        self.assertEqual(roster["video-use"]["parked"], os.path.join(parked, "video-use", "SKILL.md"))
+
+    def test_hint_for_parked_skill_says_to_read_the_file(self):
+        roster = {"tdd": {"description": "x", "excerpt": ""},
+                  "video-use": {"description": "y", "excerpt": "", "parked": "/p/video-use/SKILL.md"}}
+        self.assertIn("Relevant to the current request: tdd.", sug.hint("tdd", roster))
+        h = sug.hint("video-use", roster)
+        self.assertIn("/p/video-use/SKILL.md", h)
+        self.assertIn("parked", h)
+
+
 class PolicyTest(unittest.TestCase):
     def test_gate_mean_inverts_prose_suffices(self):
         answers = {"acts_on_user_system": {"noul": 0.9}, "would_follow_documented_procedure": {"noul": 0.6},
