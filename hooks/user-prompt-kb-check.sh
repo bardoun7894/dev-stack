@@ -215,10 +215,12 @@ if [ -n "$root" ]; then
   # files genuinely awaiting ingest rather than every file in the inbox. Before
   # this, any touch to raw/ re-reported the whole inbox as un-ingested, which
   # read as a 72-file backlog when only 2 files were actually new.
+  # Session transcripts (*.jsonl) are skipped: kb-compile owns them, and the live
+  # session's own transcript grows every prompt, which re-fired this alert.
   raw_dir="$root/ai-knowledge-base/raw"
   if [ -d "$raw_dir" ]; then
     snapshot="$raw_dir/.last-ingest-snapshot"
-    current_state=$(cd "$raw_dir" 2>/dev/null && find . -maxdepth 2 -type f -not -name '.gitkeep' -not -name '.last-ingest-snapshot' -exec stat -f '%N %z' {} \; 2>/dev/null | sort)
+    current_state=$(cd "$raw_dir" 2>/dev/null && find . -maxdepth 2 -type f -not -name '.gitkeep' -not -name '.last-ingest-snapshot' -not -name '*.jsonl' -exec stat -f '%N %z' {} \; 2>/dev/null | sort)
     saved_state=""
     [ -f "$snapshot" ] && saved_state=$(cat "$snapshot" 2>/dev/null)
 
