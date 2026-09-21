@@ -41,14 +41,14 @@
 // Jev calls go through `bin/jev raw --log browse`, so `jev tune browse` retrains the thresholds.
 // Exit: 0 all pass, 1 any fail/uncertain, 3 Jev or browser unavailable.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
   compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, stuckFromHistory,
-  judgeFlow, personaData, CHECKPOINT, HEALTH, PERSONAS,
+  judgeFlow, personaData, recordStep, matchRecorded, recordingMatches, CHECKPOINT, HEALTH, PERSONAS,
 } from './browse-core.mjs';
 import { fieldContext, fieldText } from './text-helper.mjs';
 
@@ -75,6 +75,8 @@ function args(argv) {
     else if (a === '--autofill') o.autofill = true;
     else if (a === '--observe') o.observe = true;
     else if (a === '--login') o.login = true;
+    else if (a === '--cache') o.cache = true;
+    else if (a === '--re-record') { o.cache = true; o.reRecord = true; }
     else if (a === '--dom-input') o.domInput = true;
     else if (a === '--headful') o.headful = true;
     else if (a === '--chrome') o.chrome = true;
@@ -103,6 +105,21 @@ function findChrome() {
 }
 
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'flow';
+
+const cachePath = (opt, flow, persona) => (opt.cache
+  ? join(opt.cacheDir || '.jev-browse', `${slug(`${flow.name || flow.goal}-${persona}`)}.json`) : null);
+
+function loadRecording(path) {
+  if (!path || !existsSync(path)) return null;
+  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
+}
+
+function saveRecording(path, recording) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${JSON.stringify(recording, null, 1)}\n`);
+  } catch { /* a suite that cannot cache still runs */ }
+}
 
 let cost = 0;
 function askJev(state, questions) {
@@ -143,7 +160,9 @@ function resolveAction(observation, operation, target) {
     const [index, option] = String(target).split(':');
     const a = observation.actions.find((x) => x.index === index && x.kind === 'select');
     const o = a && a.options[Number(option) - 1];
-    return o ? { ...a, value: o.value, label: `${a.label} → ${o.label}` } : null;
+    // baseLabel keeps the element's own name; `label` is only for humans reading the run. The recording
+    // must store the name the page will still have next run, not "Country → Morocco".
+    return o ? { ...a, value: o.value, baseLabel: a.label, label: `${a.label} → ${o.label}` } : null;
   }
   const kind = operation === 'TYPE_TEXT' ? 'fill' : 'click';
   return observation.actions.find((a) => a.index === target && a.kind === kind) || null;
@@ -234,27 +253,48 @@ async function runFlow(session, flow, opt, persona = 'normal') {
   const history = [];
   let stop = 'max_steps';
   let stale = 0;
+  // A recording replays at L0 with no model call. It is abandoned the moment a recorded step no longer
+  // matches the page — that mismatch IS the "the UI changed" signal — and the rest of the flow falls back
+  // to Jev, which re-records on the way out.
+  const cache = cachePath(opt, flow, persona);
+  const saved = loadRecording(cache);
+  let replaying = !!(saved && recordingMatches(saved, flow, persona) && !opt.reRecord);
+  let jevCalls = 0;
+  const fresh = [];
   try {
     await page.goto(flow.url, { waitUntil: 'load' });
     for (let step = 0; step < opt.maxSteps; step++) {
       const obs = await observe(page);
       if (!obs) { stop = 'no_document'; break; }
-      const questions = buildStepQuestions(obs, data, opt);
-      const state = buildStepState(flow.goal, obs, history, data);
-      const d = decideStep(await askJev(state, questions), questions, data);
-      if (d.stop) { stop = d.stop; break; }
 
-      const action = resolveAction(obs, d.operation, d.target);
-      if (!action) { stop = 'stuck'; break; }
+      let operation = null, action = null, fillKey = null;
+      if (replaying) {
+        const rec = saved.steps[fresh.length];
+        if (!rec) { stop = 'replayed'; break; }           // the recording ran to its end
+        action = matchRecorded(rec, obs.actions);
+        if (action) { operation = rec.operation; fillKey = rec.fillKey ?? null; }
+        else { replaying = false; }                        // the page moved on; Jev takes over from here
+      }
+      if (!action) {
+        const questions = buildStepQuestions(obs, data, opt);
+        const state = buildStepState(flow.goal, obs, history, data);
+        jevCalls++;
+        const d = decideStep(await askJev(state, questions), questions, data);
+        if (d.stop) { stop = d.stop; break; }
+        action = resolveAction(obs, d.operation, d.target);
+        if (!action) { stop = 'stuck'; break; }
+        operation = d.operation;
+        fillKey = d.fills.length ? d.fills[0].key : null;
+      }
 
       let text = null;
-      if (d.operation === 'TYPE_TEXT') {
-        if (d.fills.length) text = d.fills[0].text ?? '';
+      if (operation === 'TYPE_TEXT') {
+        if (fillKey != null && fillKey in data) text = data[fillKey] ?? '';
         else if (opt.autofill) text = await fieldText(fieldContext(flow.goal, action, obs, history), { secret: action.secret });
         // No value for this field is a skipped step, not the end of the flow; three of them in a row is
         // what the stuck detector is for.
         if (text == null) {
-          history.push({ operation: d.operation, action: `TYPE_TEXT "${action.label}" — no value available`, changed: false });
+          history.push({ operation, action: `TYPE_TEXT "${action.label}" — no value available`, changed: false });
           if (stuckFromHistory(history)) { stop = 'no_value'; break; }
           continue;
         }
@@ -277,14 +317,15 @@ async function runFlow(session, flow, opt, persona = 'normal') {
         continue;
       }
       stale = 0;
+      fresh.push(recordStep(operation, action, fillKey));
       if (persona === 'double_submit' && action.kind === 'click') await act(page, obs, action, null, opt);
       if (persona === 'back_button' && step === 0) { await page.goBack().catch(() => {}); await page.waitForTimeout(300); }
 
       const after = await observe(page);
       history.push({
-        operation: d.operation,
-        action: ['wait', 'scroll'].includes(action.kind) ? d.operation
-          : `${d.operation} "${action.label}"${text ? ` = ${action.secret ? '•••' : text}` : ''}`,
+        operation,
+        action: ['wait', 'scroll'].includes(action.kind) ? operation
+          : `${operation} "${action.label}"${text ? ` = ${action.secret ? '•••' : text}` : ''}`,
         changed: after ? after.marker !== before : true,
       });
       if (stuckFromHistory(history)) { stop = 'loop'; break; }
@@ -298,10 +339,18 @@ async function runFlow(session, flow, opt, persona = 'normal') {
       await fullPageText(page),
       { nativeValidation: final?.nativeValidation || [], persona },
     );
+    // The judge is NEVER replayed from cache. It is the assertion — caching it would make a green run mean
+    // "it was green once", which is how a suite quietly stops testing anything.
+    jevCalls++;
     const verdict = judgeFlow(await askJev(state, judge), errors);
     await shot('final');
     await shot('final-full', true);
-    return { name: flow.name || flow.goal, persona, ...verdict, stop, steps: history.map((h) => h.action), url: page.url(), screenshots: shots };
+    if (cache && verdict.status === 'pass' && fresh.length) {
+      saveRecording(cache, { version: 1, persona, url: flow.url, goal: flow.goal, expect: flow.expect ?? null,
+        recorded_at: new Date().toISOString(), steps: fresh });
+    }
+    return { name: flow.name || flow.goal, persona, ...verdict, stop, steps: history.map((h) => h.action),
+      url: page.url(), screenshots: shots, jev_calls: jevCalls, replayed: replaying };
   } catch (e) {
     await shot('error');
     return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'driver_error', detail: String(e.message || e).slice(0, 200), stop, steps: history.map((h) => h.action), screenshots: shots };
@@ -376,8 +425,8 @@ async function main() {
   const summary = { runs: results.length, pass: results.length - bad.length, fail: bad.filter((r) => r.status === 'fail').length, uncertain: bad.filter((r) => r.status === 'uncertain').length, seconds: (Date.now() - t) / 1000, cost_usd: Number(cost.toFixed(6)) };
   if (opt.json) console.log(JSON.stringify({ ...summary, results }, null, 1));
   else {
-    for (const r of results) console.log(`${r.status.toUpperCase().padEnd(9)} ${r.persona.padEnd(13)} ${r.name}  cause=${r.cause} stop=${r.stop} steps=${r.steps.length}${r.detail ? `  ${JSON.stringify(r.detail)}` : ''}`);
-    console.log(`runs ${summary.runs}  pass ${summary.pass}  fail ${summary.fail}  uncertain ${summary.uncertain}  ${summary.seconds}s  $${summary.cost_usd}`);
+    for (const r of results) console.log(`${r.status.toUpperCase().padEnd(9)} ${r.persona.padEnd(13)} ${r.name}  cause=${r.cause} stop=${r.stop} steps=${r.steps.length}${r.jev_calls != null ? ` jev=${r.jev_calls}${r.replayed ? ' (replayed)' : ''}` : ''}${r.detail ? `  ${JSON.stringify(r.detail)}` : ''}`);
+    console.log(`runs ${summary.runs}  pass ${summary.pass}  fail ${summary.fail}  uncertain ${summary.uncertain}  jev calls ${results.reduce((n, r) => n + (r.jev_calls || 0), 0)}  ${summary.seconds}s  $${summary.cost_usd}`);
   }
   if (results.every((r) => r.cause === 'jev_unavailable')) process.exit(3);
   process.exit(bad.length ? 1 : 0);

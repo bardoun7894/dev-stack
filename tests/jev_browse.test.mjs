@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, validateAnswer,
-  stuckFromHistory, actionSpace, personaData, judgeFlow, PERSONAS,
+  stuckFromHistory, actionSpace, personaData, judgeFlow, recordStep, matchRecorded, recordingMatches, PERSONAS,
 } from '../skills/jev/scripts/browse-core.mjs';
 import { parseText, fieldText } from '../skills/jev/scripts/text-helper.mjs';
 
@@ -228,6 +228,54 @@ test('text helper: only {"text": "…"} is ever typed', () => {
 
 test('text helper never writes into a secret field', async () => {
   assert.equal(await fieldText({ goal: 'log in' }, { secret: true }), null);
+});
+
+test('replay: a step is recorded by meaning, not by element index', () => {
+  const click = recordStep('CLICK', ACTIONS[3]);
+  assert.deepEqual(click, { operation: 'CLICK', kind: 'click', role: 'button', label: 'Menu' });
+  assert.equal(recordStep('TYPE_TEXT', ACTIONS[4], 'email').fillKey, 'email');
+  // A resolved SELECT carries a human label ("Country → France") that the page will never have again.
+  // Recording that instead of the element's own name silently killed replay at the select step.
+  const resolved = { ...ACTIONS[6], value: 'fr', baseLabel: ACTIONS[6].label, label: 'Country → France' };
+  assert.deepEqual(recordStep('SELECT', resolved),
+    { operation: 'SELECT', kind: 'select', role: 'combobox', label: 'Country', option: 'fr' });
+  assert.ok(matchRecorded(recordStep('SELECT', resolved), ACTIONS), 'must match the page it came from');
+  // No index anywhere: an element that moves down the page must still replay.
+  assert.ok(!('index' in click) && !('node' in click));
+});
+
+test('replay: a recorded step matches the same element after it moves', () => {
+  const step = recordStep('CLICK', ACTIONS[3]);
+  const shifted = [{ index: '99', kind: 'click', role: 'button', label: 'Menu', inForm: false }];
+  assert.equal(matchRecorded(step, shifted).index, '99');
+});
+
+test('replay: a renamed, removed or retyped element does NOT match', () => {
+  const step = recordStep('CLICK', ACTIONS[3]);
+  assert.equal(matchRecorded(step, [{ index: '1', kind: 'click', role: 'button', label: 'Main menu' }]), null, 'renamed');
+  assert.equal(matchRecorded(step, [{ index: '1', kind: 'click', role: 'link', label: 'Menu' }]), null, 'role changed');
+  assert.equal(matchRecorded(step, []), null, 'gone');
+  // A link must still point where it did, or it is a different link with the same words.
+  const link = recordStep('CLICK', ACTIONS[0]);
+  assert.equal(matchRecorded(link, [{ index: '1', kind: 'click', role: 'link', label: 'Home', href: '/elsewhere' }]), null);
+});
+
+test('replay: a select replays its recorded option, not its position', () => {
+  const step = recordStep('SELECT', { ...ACTIONS[6], baseLabel: 'Country', value: 'fr' });
+  const reordered = [{ ...ACTIONS[6], options: [{ value: 'fr', label: 'France' }, { value: 'ma', label: 'Morocco' }] }];
+  assert.equal(matchRecorded(step, reordered).value, 'fr');
+  assert.equal(matchRecorded(step, [{ ...ACTIONS[6], options: [{ value: 'ma', label: 'Morocco' }] }]), null, 'option gone');
+});
+
+test('replay: a recording is only reused for the same flow', () => {
+  const rec = { version: 1, persona: 'normal', url: 'u', goal: 'g', expect: 'e', steps: [] };
+  const flow = { url: 'u', goal: 'g', expect: 'e' };
+  assert.equal(recordingMatches(rec, flow, 'normal'), true);
+  assert.equal(recordingMatches(rec, flow, 'invalid_input'), false, 'different persona');
+  assert.equal(recordingMatches(rec, { ...flow, goal: 'other' }, 'normal'), false, 'different goal');
+  assert.equal(recordingMatches(rec, { ...flow, expect: 'other' }, 'normal'), false, 'different assertion');
+  assert.equal(recordingMatches({ ...rec, version: 2 }, flow, 'normal'), false, 'unknown format');
+  assert.equal(recordingMatches(null, flow, 'normal'), false);
 });
 
 test('action space caps targets and keeps the option index stable', () => {
