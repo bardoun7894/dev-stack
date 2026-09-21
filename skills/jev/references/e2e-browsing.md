@@ -159,6 +159,31 @@ jev-browse --url … --goal … --observe             # print the page exactly a
 jev-browse --url … --goal … --autofill            # let a small LLM write values --data does not cover
 ```
 
+### The replay cache — pay once per UI change, not per run
+
+`--cache` records what a **passing** flow did into `.jev-browse/<flow>-<persona>.json` and replays it at L0
+next time. Measured on the fixture login (4 steps), 2026-09-21:
+
+| | Jev calls | wall clock |
+|---|---|---|
+| cold (records) | 6 | 6.8 s |
+| warm (replays) | **1** | **1.3 s** |
+| warm, after the submit button was renamed | 3 | 3.1 s |
+
+Steps are recorded **by meaning** — operation + role + accessible name (+ href, + option value) — never by
+element index, which shifts the moment anything above it renders. A recorded step that no longer matches
+abandons the replay *from that point*: Jev takes over for the rest of the flow and the recording is
+rewritten. So renaming a button costs one step's worth of decisions, not a red suite.
+
+Two properties that keep this honest, both verified:
+
+- **The judge is never cached.** It is the assertion. With the flow fully replayed (`jev=1`), breaking the
+  app still returned `fail / auth` — a cached run that cannot go red is a suite that has stopped testing.
+- **A failing run never records.** After that failure the previous good recording was still on disk.
+
+`--re-record` forces a fresh recording; `--cache-dir DIR` moves the store. Commit the store to get the
+L0 replay in CI, or leave it ignored to have CI always pay full price.
+
 ### Testing pages behind a login
 
 `--profile NAME` runs in a persistent Chrome profile of its own under `~/.cache/jev-browse/profiles/`.

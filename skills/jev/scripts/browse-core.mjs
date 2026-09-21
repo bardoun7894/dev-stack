@@ -258,6 +258,43 @@ export function decideStep(answers, questions, data) {
   return { operation: choice, target: target.choice, fills, stop: null };
 }
 
+// --- replay cache ------------------------------------------------------------------------------------
+// "Pay once per UI change, not per run." A passing flow records what it did; later runs replay that at L0
+// with no model call, and fall back to Jev only for the step where the recording no longer matches — which
+// is exactly the signal that the UI changed.
+//
+// A step is recorded by MEANING (operation + role + accessible name + href / option value), never by the
+// element index, which shifts the moment anything above it renders. Replay still runs every execution guard,
+// so a recorded element that is now missing, renamed or covered is detected rather than mis-clicked.
+
+export function recordStep(operation, action, fillKey) {
+  const step = { operation, kind: action.kind, role: action.role, label: action.baseLabel ?? action.label };
+  if (action.href) step.href = action.href;
+  if (action.kind === 'select') step.option = action.value;
+  if (fillKey != null) step.fillKey = fillKey;
+  return step;
+}
+
+export function matchRecorded(step, actions) {
+  if (step.kind === 'wait') return { kind: 'wait', label: 'wait' };
+  if (step.kind === 'scroll') return (actions || []).find((a) => a.kind === 'scroll' && a.id === step.operation) || null;
+  const same = (a) => a.kind === step.kind && a.role === step.role && a.label === step.label
+    && (step.href === undefined || a.href === step.href);
+  const hit = (actions || []).find(same);
+  if (!hit) return null;
+  if (step.kind === 'select') {
+    const o = (hit.options || []).find((x) => x.value === step.option);
+    return o ? { ...hit, value: o.value, baseLabel: hit.label, label: `${hit.label} → ${o.label}` } : null;
+  }
+  return hit;
+}
+
+// A recording is only reused for the same flow: a changed goal or expectation is a different test.
+export function recordingMatches(recording, flow, persona) {
+  return !!recording && recording.version === 1 && recording.persona === persona
+    && recording.url === flow.url && recording.goal === flow.goal && (recording.expect ?? null) === (flow.expect ?? null);
+}
+
 // Three executed actions in a row that changed nothing means the agent is circling; upstream's rule, and
 // stricter than "the same element twice" because it also catches clicking different useless things.
 export function stuckFromHistory(history) {
