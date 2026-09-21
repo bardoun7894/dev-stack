@@ -85,7 +85,9 @@ Never send raw HTML, full-page dumps, cookies, tokens, or screenshots. Scope to 
 | claude-in-chrome | `get_page_text` or `read_page` on the tab, then pipe the relevant part to `jev` via Bash |
 | Lightpanda (CDP `127.0.0.1:9222`) | Playwright `chromium.connectOverCDP("http://127.0.0.1:9222")`, then `ariaSnapshot()` as above |
 
-Lightpanda for L0/L1 speed and parallel runs; real Chromium only for L3 (it renders, Lightpanda doesn't paint).
+Real Chrome is the default: it lays pages out, so visibility, viewport, occlusion and scrolling are real
+checks rather than assumptions, and L3 screenshots come from the same run. Lightpanda stays an option for
+very wide parallel L0/L1 sweeps where none of those guards matter (`--cdp http://127.0.0.1:9222`).
 
 ## Playwright helper (TypeScript)
 
@@ -145,8 +147,7 @@ Quick one-offs: `jev noul "The page shows an error or a broken state" -s "$snap"
 ## jev-browse: the System 1 browser agent (ready-made)
 
 `bin/jev-browse` (source `skills/jev/scripts/jev-browse.mjs`, policy in `browse-core.mjs`) does all of the
-above in a loop: each step is one Jev request (an action Choice over links and buttons plus a fill Choice per
-empty field), and the flow ends with the verdict + cause checkpoint. Only failures reach Claude.
+above in a loop, and the flow ends with the verdict + cause checkpoint. Only failures reach Claude.
 
 ```bash
 jev-browse --url http://127.0.0.1:3000/login --goal "sign in" --expect "dashboard shows today's sales" \
@@ -154,7 +155,69 @@ jev-browse --url http://127.0.0.1:3000/login --goal "sign in" --expect "dashboar
 jev-browse --flows e2e/flows.json --json          # [{name,url,goal,expect,data}], all in parallel
 jev-browse --url … --goal … --data … --adversarial 5   # personas: normal, invalid_input, hostile_input,
                                                         # double_submit, back_button — reports what breaks
+jev-browse --url … --goal … --observe             # print the page exactly as Jev is offered it, decide nothing
+jev-browse --url … --goal … --autofill            # let a small LLM write values --data does not cover
 ```
+
+### Testing pages behind a login
+
+`--profile NAME` runs in a persistent Chrome profile of its own under `~/.cache/jev-browse/profiles/`.
+Sign in **once, by hand**, and every later run with that profile carries the session:
+
+```bash
+jev-browse --login --profile tokyo --url https://dash.example/login   # you log in; close the window to save
+jev-browse --profile tokyo --flows e2e/dashboard.json                 # already signed in, no credentials anywhere
+```
+
+No credential passes through the agent, Jev or any model — `--login` just hands you the keyboard. It is
+never your everyday profile: Chrome 136+ refuses remote debugging on the default user-data-dir, and a test
+run has no business acting inside a live browsing session.
+
+Verified 2026-09-21 with a negative control: run 2 on the signed-in profile passed in **0 steps** (nothing
+to do, already authenticated) while the same check on a fresh profile returned `fail / auth`.
+
+Flows sharing a profile share one browser context (that is what carries the cookies) and run as parallel
+tabs; without `--profile` each flow gets an isolated context instead.
+
+### One request per step, two decisions (speculative fan-out)
+
+Ported from [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) on 2026-09-21. Each
+step sends **one** Jev request carrying the operation question *and* one target head per operation:
+
+```text
+operation        CLICK | TYPE_TEXT | SELECT | SCROLL_DOWN | SCROLL_UP | WAIT | DONE | BLOCKED
+click_target     [1] link "About" · [6] button "Sign in"
+type_text_target [3] textbox "Email" · [4] textbox "Password"
+select_target    [5:1] Country → Morocco · [5:2] Country → France
+value_3          email | password | skip        ← only when --data is given
+```
+
+The operation answer decides which head may execute; every other head is discarded unexecuted, so
+"which operation" and "which element" cost one round trip. Each head contains only compatible elements,
+and `SELECT` enumerates the observed options, so a dropdown value is *picked*, never written.
+
+### What the agent will not do
+
+- **Act on an inconsistent answer.** `validateAnswer` requires the choice to be one we offered, the
+  distribution to cover exactly those ids, sum to 1 and peak on the chosen one. Anything else is `null`.
+- **Click something it cannot see.** Elements hidden by `aria-hidden`, `inert`, `hidden`, zero size, CSS
+  or opacity are never offered — the `.reveal`/opacity class of false positive.
+- **Click through an overlay.** Immediately before input the target is re-resolved and hit-tested
+  (`e.contains(document.elementFromPoint(x,y))`); a covered control is rejected and the page re-observed.
+- **Click the wrong element after a re-render.** Node identity is a `WeakMap` on the page, so an id
+  survives a React re-render and a vanished or renamed node is *detected* rather than re-matched by index.
+  Nothing is written to the DOM under test (the old `data-jev` attribute is gone).
+- **Turn model output into code.** A choice is only ever an index into a table this process built; it never
+  becomes a selector, a coordinate, a shell command or JavaScript.
+- **Leak a password.** Password fields are filled from `--data` but their value never reaches Jev or the
+  text helper — the state and the run log carry `••• (n)`.
+
+### Cost of the port
+
+Measured on the local fixture (`--chrome`, real Chrome), 2026-09-21: a 4-step login (type email → type
+password → select country → submit) runs in ~5 s and passes; the same fixture with a 1-second overlay stops
+at `stale` instead of clicking through it; a below-the-fold goal that the old agent could not reach at all
+now finishes in 2 `SCROLL_DOWN`s.
 
 **Seeing the UI.** Jev reads text, never pixels. `--headful` opens a real Chrome window (one flow at a time,
 slowed down, a red outline on each element before it is clicked) so a person can watch. `--screenshots DIR`
@@ -168,14 +231,22 @@ never follows a link off the site under test; off-site links (Telegram, WhatsApp
 Jev as `external_links` so "find how to join" can finish as `done`. Learned on the live mbardouni.dev: a
 "find how to hire" flow pressed the real contact form's Send (the backend rejected the empty POST).
 
-Exit 0 all pass, 1 any fail/uncertain, 3 no browser / no Jev. Defaults to Lightpanda at `127.0.0.1:9222`
-(Mac launchd, MyContabo systemd); `--cdp` for another Chromium. Adversarial input only against apps you own.
+Exit 0 all pass, 1 any fail/uncertain, 3 no browser / no Jev. **Runs real Chrome by default** — every
+geometric guard above needs a browser that lays the page out. `--cdp URL` drives an already-running browser
+instead; one that reports no layout (Lightpanda does not) degrades to DOM-only visibility with no scrolling
+and no occlusion check, which is weaker, not equivalent. Adversarial input only against apps you own.
 
 Lessons baked into it (all from the decision log, `jev tune browse`):
-- **Lightpanda has no layout**, so Playwright's `fill`/`click` visibility checks never pass. Drive the DOM
-  (native value setter + `input`/`change` events, `element.click()`, `goto` for links). It also allows one
-  browser context per CDP connection, so give each parallel session its own connection.
-- **Tell Jev the fields get filled first** (`fields_to_fill` + "ready to submit"): 0.45 → 0.97 on a ready form.
+- **No layout means no guards.** Lightpanda parses but never lays out: rects are 0×0, `elementFromPoint` and
+  `checkVisibility` are missing. The snapshot detects this (`hasLayout: false`) and drives the DOM directly
+  (native value setter + `input`/`change`, `element.click()`). It also allows one browser context per CDP
+  connection, so give each parallel session its own connection.
+- **`fields_to_fill` means "still empty", not "about to be filled".** Under the old speculative-fill loop the
+  wording "filled just before this operation" took a ready form from 0.45 → 0.97. Once each step became one
+  operation that sentence was false, and Jev submitted an empty fixture form instead of typing into it.
+- **Only offer a target you can execute.** TYPE_TEXT was offered on already-filled fields while `--data`
+  supplies values for empty ones only; Jev picked one, nothing could execute, and the flow ended at
+  `no_value` — non-deterministically, depending on which field it picked.
 - **SPAs keep the URL.** A visible dashboard under `/login.html` scored `pass` 0.78; adding a note that the
   URL may not change → 0.98. The same applies to the Playwright helper above.
 - **Native validation is invisible in the DOM** (`type=email`, `required` show a tooltip). Pass
