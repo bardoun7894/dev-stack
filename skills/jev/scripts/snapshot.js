@@ -109,12 +109,16 @@
 
   // Re-checked immediately before every input. Meaning and identity, never geometry: geometry is resolved
   // and hit-tested at execution time, so an animation alone does not invalidate a decision.
+  // Identity and meaning of the ELEMENT only. Upstream also hashed the surrounding container's text, which
+  // works on a static page and makes a live app untestable: a dashboard with a clock, a counter or a sync
+  // badge rewrites that text between the decision and the click, so every target reads as "changed" and
+  // nothing can ever execute (EDUNEX: stop=stale, 0 steps). What actually protects a click is this identity
+  // plus the viewport and occlusion checks execute.js runs immediately before input.
   cache.guard = (e) => {
     if (!e || !e.isConnected || !visible(e)) return null;
-    const scope = (e.closest && e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]')) || e.parentElement;
     return [cache.ids.get(e), roleOf(e), name(e), shown(e), e.checked ?? null, e.selectedIndex ?? null,
       e.readOnly ?? null, disabled(e), attr(e, 'aria-expanded'), attr(e, 'aria-checked'),
-      attr(e, 'aria-selected'), attr(e, 'href'), String((scope && scope.innerText) || '').slice(0, 2000)];
+      attr(e, 'aria-selected'), attr(e, 'href')];
   };
   cache.pageKey = () => [location.href, hasLayout ? [scrollX, scrollY, innerWidth, innerHeight] : 0,
     [...document.querySelectorAll('input,textarea,select')]
