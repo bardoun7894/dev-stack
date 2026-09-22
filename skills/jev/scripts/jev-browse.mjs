@@ -74,6 +74,7 @@ function args(argv) {
     else if (a === '--allow-submit') o.allowSubmit = true;
     else if (a === '--autofill') o.autofill = true;
     else if (a === '--observe') o.observe = true;
+    else if (a === '--parallel') o.parallel = true;
     else if (a === '--strict-freshness') o.strictFreshness = true;
     else if (a === '--login') o.login = true;
     else if (a === '--cache') o.cache = true;
@@ -249,7 +250,8 @@ async function openSession(chromium, opt) {
         + '  Another Chrome is probably already using it — close that window, or use a different --profile.');
       process.exit(3);
     });
-    return { dir, newPage: async () => { const p = await ctx.newPage(); return { page: p, dispose: () => p.close().catch(() => {}) }; },
+    return { dir, sharedSession: true,
+      newPage: async () => { const p = await ctx.newPage(); return { page: p, dispose: () => p.close().catch(() => {}) }; },
       close: () => ctx.close().catch(() => {}) };
   }
   if (opt.chrome) {
@@ -260,10 +262,18 @@ async function openSession(chromium, opt) {
     return { newPage: async () => { const c = await browser.newContext({ viewport }); return { page: await c.newPage(), dispose: () => c.close().catch(() => {}) }; },
       close: () => browser.close().catch(() => {}) };
   }
-  try { await (await chromium.connectOverCDP(opt.cdp)).close(); } catch (e) {
+  const shared = {};
+  try {
+    const probe = await chromium.connectOverCDP(opt.cdp);
+    // A browser that already has a context (any real Chrome) shares cookies and localStorage across every
+    // tab we open in it, so flows that touch the session cannot run concurrently — see main().
+    shared.sharedSession = probe.contexts().length > 0;
+    await probe.close();
+  } catch (e) {
     console.error(`jev-browse: no browser at ${opt.cdp}: ${e.message}`); process.exit(3);
   }
-  return { newPage: async () => {
+  shared.close = () => {};
+  shared.newPage = async () => {
     const b = await chromium.connectOverCDP(opt.cdp);
     // A real Chrome reached over CDP already has a context holding the profile's cookies — open a TAB in it.
     // Calling newContext() there would hand back an empty, logged-out one, which is how a shared browser
@@ -271,12 +281,14 @@ async function openSession(chromium, opt) {
     // through to newContext(); closing the connection never kills a browser we did not start.
     const existing = b.contexts()[0];
     if (existing) {
+      shared.sharedSession = true;
       const page = await existing.newPage();
       return { page, dispose: async () => { await page.close().catch(() => {}); await b.close().catch(() => {}); } };
     }
     const c = await b.newContext();
     return { page: await c.newPage(), dispose: async () => { await c.close().catch(() => {}); await b.close().catch(() => {}); } };
-  }, close: () => {} };
+  };
+  return shared;
 }
 
 async function runFlow(session, flow, opt, persona = 'normal') {
@@ -461,9 +473,13 @@ async function main() {
     } else tasks.push(() => runFlow(session, f, opt, 'normal'));
   }
   const t = Date.now();
-  // Headful runs one flow at a time so there is one window to watch; everything else runs in parallel.
+  // Headful runs one flow at a time so there is one window to watch. So does any SHARED session: a
+  // persistent profile or an attached Chrome gives every tab the same cookies and localStorage, so a login
+  // flow racing six others logs them out mid-run — the same suite swung between 5/6 and 3/7 passing purely
+  // on ordering. Isolated contexts (the bundled Chrome) have no shared state and still run in parallel.
+  const serial = opt.headful || (session.sharedSession && !opt.parallel);
   const results = [];
-  if (opt.headful) for (const task of tasks) results.push(await task());
+  if (serial) for (const task of tasks) results.push(await task());
   else results.push(...await Promise.all(tasks.map((task) => task())));
   await session.close();
   const bad = results.filter((r) => r.status !== 'pass');
