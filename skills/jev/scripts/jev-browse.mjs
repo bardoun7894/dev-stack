@@ -229,6 +229,15 @@ async function openSession(chromium, opt) {
   }
   return { newPage: async () => {
     const b = await chromium.connectOverCDP(opt.cdp);
+    // A real Chrome reached over CDP already has a context holding the profile's cookies — open a TAB in it.
+    // Calling newContext() there would hand back an empty, logged-out one, which is how a shared browser
+    // silently stops being the signed-in browser you pointed at. Lightpanda exposes no context, so it falls
+    // through to newContext(); closing the connection never kills a browser we did not start.
+    const existing = b.contexts()[0];
+    if (existing) {
+      const page = await existing.newPage();
+      return { page, dispose: async () => { await page.close().catch(() => {}); await b.close().catch(() => {}); } };
+    }
     const c = await b.newContext();
     return { page: await c.newPage(), dispose: async () => { await c.close().catch(() => {}); await b.close().catch(() => {}); } };
   }, close: () => {} };
