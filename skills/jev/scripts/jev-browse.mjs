@@ -74,6 +74,7 @@ function args(argv) {
     else if (a === '--allow-submit') o.allowSubmit = true;
     else if (a === '--autofill') o.autofill = true;
     else if (a === '--observe') o.observe = true;
+    else if (a === '--strict-freshness') o.strictFreshness = true;
     else if (a === '--login') o.login = true;
     else if (a === '--cache') o.cache = true;
     else if (a === '--re-record') { o.cache = true; o.reRecord = true; }
@@ -142,15 +143,25 @@ function askJev(state, questions) {
 }
 
 // One atomic read of the page. Returns null while the document is navigating, so retry briefly.
-async function observe(page) {
-  for (let i = 0; i < 10; i++) {
+//
+// `settle` additionally waits for the page to have something to act on. `load` fires long before a React
+// or Vue app has painted anything, so the first observation of an SPA saw an empty action table and the
+// flow had nothing to choose from — EDUNEX's dashboard reported zero elements and simply could not start.
+// An empty table means "not ready yet", which is a wait, not a decision, so it costs no Jev call.
+async function observe(page, { settle = false } = {}) {
+  let last = null;
+  const tries = settle ? 20 : 10;
+  for (let i = 0; i < tries; i++) {
     try {
       const o = await page.evaluate(SNAPSHOT);
-      if (o) return o;
+      if (o) {
+        last = o;
+        if (!settle || o.actions.length) return o;
+      }
     } catch { /* navigating mid-evaluate */ }
-    await page.waitForTimeout(40);
+    await page.waitForTimeout(settle ? 400 : 40);
   }
-  return null;
+  return last;
 }
 
 // Resolves the operation + target Jev chose back onto an observed action. Model output is only ever an
@@ -174,7 +185,11 @@ async function act(page, observation, action, text, opt) {
   const req = {
     node: action.node, kind: action.kind, value: action.value, text, delta: action.delta,
     guard: action.node != null ? observation.guards[action.node] : undefined,
-    pageKey: observation.pageKey,
+    // Whole-page freshness is opt-in. A React app that re-renders its inputs mints new node ids, so the
+    // page key differs on every poll and no decision survives to execute. The per-element guard below is
+    // the property that keeps a click honest; --strict-freshness adds the page-wide check back for a
+    // static page where any change at all should invalidate a decision.
+    pageKey: opt.strictFreshness ? observation.pageKey : undefined,
     realInput: observation.hasLayout && !opt.domInput,
   };
   const r = await page.evaluate(callWith(EXECUTE, req)).catch(() => null);
@@ -275,7 +290,7 @@ async function runFlow(session, flow, opt, persona = 'normal') {
   try {
     await page.goto(flow.url, { waitUntil: 'load' });
     for (let step = 0; step < opt.maxSteps; step++) {
-      const obs = await observe(page);
+      const obs = await observe(page, { settle: true });
       if (!obs) { stop = 'no_document'; break; }
 
       let operation = null, action = null, fillKey = null;
@@ -343,7 +358,7 @@ async function runFlow(session, flow, opt, persona = 'normal') {
     }
 
     const judge = persona === 'normal' && flow.expect ? CHECKPOINT : HEALTH;
-    const final = await observe(page);
+    const final = await observe(page, { settle: true });
     const state = buildJudgeState(
       flow.expect || 'the app handles the session gracefully',
       new URL(page.url()).pathname,
@@ -408,7 +423,7 @@ async function main() {
   if (opt.observe) {
     const { page } = await session.newPage();
     await page.goto(flows[0].url, { waitUntil: 'load' });
-    const obs = await observe(page);
+    const obs = await observe(page, { settle: true });
     const data = flows[0].data || {};
     console.log(JSON.stringify({
       url: obs?.url, hasLayout: obs?.hasLayout, scroll: obs?.scroll, omitted: obs?.omitted,
