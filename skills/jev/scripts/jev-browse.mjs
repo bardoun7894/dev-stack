@@ -164,6 +164,25 @@ async function observe(page, { settle = false } = {}) {
   return last;
 }
 
+// Wait for the page to stop changing before judging it. `settle` only waits for SOMETHING actionable, which
+// a login form already has, so the verdict was being taken mid-transition: EDUNEX swaps the login screen for
+// its dashboard 4–10s after submit, and the judge saw the login form and called it `auth` on a login that
+// had in fact succeeded. A page with a live region never fully stabilises, so this is best-effort and
+// bounded — it buys a settled view where one exists and costs a few hundred ms where it does not.
+async function quiesce(page, budgetMs = 10000) {
+  const deadline = Date.now() + budgetMs;
+  let previous = null;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await observe(page, { settle: true });
+    if (!last) return null;
+    if (previous === last.marker) return last;
+    previous = last.marker;
+    await page.waitForTimeout(500);
+  }
+  return last;
+}
+
 // Resolves the operation + target Jev chose back onto an observed action. Model output is only ever an
 // index into a table this process built; it never becomes a selector, a coordinate or a snippet.
 function resolveAction(observation, operation, target) {
@@ -358,7 +377,7 @@ async function runFlow(session, flow, opt, persona = 'normal') {
     }
 
     const judge = persona === 'normal' && flow.expect ? CHECKPOINT : HEALTH;
-    const final = await observe(page, { settle: true });
+    const final = await quiesce(page);
     const state = buildJudgeState(
       flow.expect || 'the app handles the session gracefully',
       new URL(page.url()).pathname,
