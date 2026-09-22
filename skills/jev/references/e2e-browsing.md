@@ -159,6 +159,36 @@ jev-browse --url … --goal … --observe             # print the page exactly a
 jev-browse --url … --goal … --autofill            # let a small LLM write values --data does not cover
 ```
 
+### One Chrome, two drivers (jev-browse + chrome-devtools-mcp)
+
+Both speak CDP, so they share a browser instead of competing for one. Jev runs the flows in it; Claude
+attaches to the *same tabs* through `chrome-devtools-mcp` to read console, network and performance when
+something goes red. One browser, one profile, one set of logins.
+
+```bash
+jev-chrome                                                   # start it (visible), prints http://127.0.0.1:9333
+jev-browse --login --profile shared --url https://app/login  # sign in once, by hand
+jev-browse --cdp http://127.0.0.1:9333 --flows e2e/flows.json
+```
+
+Registered globally as the `chrome-devtools` MCP server:
+`npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9333`. It only connects while
+`jev-chrome` is up; start the browser first, or the server reports as failed.
+
+Port **9333**, not 9222 — 9222 is Lightpanda, and pointing either tool at the wrong browser is a confusing
+failure rather than a loud one.
+
+Two things this fixed, both found by trying it:
+
+- **`claude-in-chrome` cannot carry a page state.** Its JS-eval result is truncated around 1 000 characters
+  and a 4 KB string comes back as `[BLOCKED: Base64 encoded data]`. A real app's action table is 5–15 KB,
+  so the extension can never hand one to Jev. `chrome-devtools-mcp` has no such cap because it is a CDP
+  server, not an extension channel. The extension stays useful for *looking* at a page, not for feeding one
+  to a decision model.
+- **`--cdp` used to open a logged-out context.** Playwright's `newContext()` on a CDP-attached Chrome
+  returns an empty one, so a shared, signed-in browser silently stopped being signed in. It now opens a tab
+  in the browser's existing context and only falls back to `newContext()` for Lightpanda, which exposes none.
+
 ### The replay cache — pay once per UI change, not per run
 
 `--cache` records what a **passing** flow did into `.jev-browse/<flow>-<persona>.json` and replays it at L0
