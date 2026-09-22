@@ -83,8 +83,10 @@ function args(argv) {
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
   }
   o.maxSteps = Number(o.maxSteps);
+  // --screenshots and --headful need a browser that paints, but an explicit --cdp already names one;
+  // silently launching a second Chrome there would screenshot the wrong browser.
+  if ((o.screenshots || o.headful) && !o.cdp) o.chrome = true;
   if (o.cdp) o.chrome = false;
-  if (o.screenshots || o.headful) o.chrome = true;
   if (o.login) { o.profile = o.profile || 'default'; o.headful = true; }
   if (o.profile) o.chrome = true;
   return o;
