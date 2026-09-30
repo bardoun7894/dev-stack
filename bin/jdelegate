@@ -1,0 +1,316 @@
+#!/usr/bin/env node
+/**
+ * jdelegate — hand one self-contained job to a worker CLI on the model Jev picks,
+ * in its own herdr tab, and print the worker's final answer.
+ *
+ *   jdelegate "<brief>"                 route, run in a new herdr tab, wait, print result
+ *   jdelegate --print "<brief>"         show the routing decision only
+ *   options: --cwd DIR  --name LABEL  --harness claude|codex|opencode|pi|agy  --timeout MIN (default 30)
+ *            --no-tab (run inline)  --keep-tab (leave the worker tab open when it finishes)
+ *            --brief-file FILE  --help
+ *
+ * The Claude Code counterpart of pi's model-router + subagents (2026-09-30):
+ * Opus orchestrates, Jev decides, workers do the work. Same brain as pi:
+ *   - the question is route-body.mjs (tier T0-T4, kind, thinker/doer, arabic)
+ *     plus one extra noul here: is this UI work?
+ *   - the model is the first live entry of the SAME tiers.json chains the pi
+ *     router uses (kinds[kind][tier] then tiers[tier]), skipping dead-models.json
+ *     and exhausted.json, subscription providers first, metered last;
+ *   - the provider decides the worker: cliproxy -> `claude`, openai-codex ->
+ *     `codex exec`, opencode-go -> `opencode run`, everything else (commandcode,
+ *     openrouter) -> bare `pi`; UI work -> `agy` (owner rule: all
+ *     UI implementation goes through agy).
+ * Inside herdr the worker runs in a new tab (label "name · model") so the owner
+ * can watch it; outside herdr it runs inline. The worker never inherits
+ * CLAUDE_ORCH, so a Claude worker is not blocked from editing.
+ * Decisions are logged under jev tag `router-delegate`.
+ */
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+
+const HOME = homedir();
+const { buildRouteBody, buildOutputBody, parseRoute, parseIds } = await import(`${HOME}/.pi/agent/extensions/model-router/route-body.mjs`);
+const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; } };
+const CONFIG = readJson(process.env.JEV_ROUTER_CONFIG ?? `${HOME}/.config/jev-router/tiers.json`) ?? {};
+const DEAD = readJson(`${HOME}/.config/jev-router/dead-models.json`) ?? {};
+const EXHAUSTED = readJson(`${HOME}/.config/jev-router/exhausted.json`) ?? {};
+const JEV = [`${HOME}/.local/bin/jev`, "/usr/local/bin/jev"].find(existsSync) ?? "jev";
+const AGY_RELAY = `${HOME}/.claude/skills/agy-delegate/scripts/relay.mjs`;
+const TIERS = ["T0", "T1", "T2", "T3", "T4"];
+const THINK = ["off", "minimal", "low", "medium", "high"];
+
+// ── args ────────────────────────────────────────────────────────────────
+const argv = process.argv.slice(2);
+const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--print] "<brief>"';
+const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, gc: false, older: 60, brief: "" };
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === "--cwd") opt.cwd = resolve(argv[++i]);
+  else if (a === "--name") opt.name = argv[++i];
+  else if (a === "--harness") opt.harness = argv[++i];
+  else if (a === "--timeout") opt.timeout = Number(argv[++i]);
+  else if (a === "--no-tab") opt.tab = false;
+  else if (a === "--keep-tab") opt.keepTab = true;
+  else if (a === "--help" || a === "-h") { console.log(USAGE); process.exit(0); }
+  else if (a === "--no-escalate") opt.noEscalate = true;
+  else if (a === "--gc") opt.gc = true;
+  else if (a === "--older") opt.older = Number(argv[++i]);
+  else if (a === "--print") opt.print = true;
+  else if (a === "--brief-file") opt.brief = readFileSync(argv[++i], "utf8");
+  else opt.brief = opt.brief ? `${opt.brief} ${a}` : a;
+}
+if (opt.gc) {
+  const root = join(HOME, ".cache", "jdelegate");
+  let closed = 0;
+  const runs = [];
+  const findRuns = (dir) => {
+    for (const name of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, name.name);
+      if (name.isDirectory()) findRuns(path);
+      else if (name.name === "tab") runs.push(dir);
+    }
+  };
+  if (existsSync(root)) findRuns(root);
+  for (const run of runs) {
+    const exitFile = join(run, "exit"), tabFile = join(run, "tab");
+    try {
+      if (!existsSync(tabFile) || !existsSync(exitFile)) continue;
+      if (Date.now() - statSync(exitFile).mtimeMs < opt.older * 60_000) continue;
+      const tab = readFileSync(tabFile, "utf8").trim();
+      if (!tab) continue;
+      const result = spawnSync("herdr", ["tab", "close", tab], { encoding: "utf8", timeout: 8000 });
+      if (result.status !== 0) continue;
+      unlinkSync(tabFile);
+      closed++;
+    } catch { /* stale or incomplete run directory */ }
+  }
+  console.log(`Closed ${closed} herdr tab${closed === 1 ? "" : "s"}.`);
+  process.exit(0);
+}
+if (!opt.brief.trim()) {
+  console.error(USAGE);
+  process.exit(2);
+}
+opt.name ||= opt.brief.replace(/\s+/g, " ").trim().split(" ").slice(0, 4).join("-").replace(/[^\w.-]/g, "").slice(0, 24) || "job";
+
+// ── 1. jev decides ──────────────────────────────────────────────────────
+function decide(brief) {
+  const body = buildRouteBody({ prompt: brief });
+  body.questions.ui = {
+    type: "noul",
+    instructions:
+      "The work builds or changes a user interface: pages, components, layout, styling, visual design " +
+      "or animation — frontend code whose main outcome is how it looks or feels.",
+  };
+  const started = Date.now();
+  const r = spawnSync(JEV, ["raw", "--log", "router-delegate"], { input: JSON.stringify(body), encoding: "utf8", timeout: 8000 });
+  const id = parseIds(r.stderr).tier;
+  const ms = Date.now() - started;
+  try {
+    if (r.status !== 0) throw new Error(`jev exit ${r.status}`);
+    const a = parseRoute(r.stdout);
+    const answers = JSON.parse(r.stdout).answers ?? {};
+    const ui = Number(answers.ui?.noul ?? 0) || 0;
+    let tier = TIERS.includes(a.tier) ? a.tier : "T3";
+    if (a.tierConf < 0.4) tier = TIERS[Math.min(3, TIERS.indexOf(tier) + 1)];
+    // Long multi-requirement briefs were rated T2 ("one file") and went to the cheapest model (2026-09-30).
+    if (brief.length > 1500 && ["T0", "T1", "T2"].includes(tier)) tier = "T3";
+    let kind = ["general", "code", "reasoning", "agentic", "vision", "language"].includes(a.kind) ? a.kind : "general";
+    if ((Number(a.arabic) || 0) >= 0.6 && !["code", "agentic", "vision"].includes(kind)) kind = "language";
+    const role = a.role === "thinker" ? "thinker" : "doer";
+    if (role === "thinker" && (kind === "general" || kind === "code")) kind = "reasoning";
+    return { tier, kind, role, conf: a.tierConf, ui, ms, failed: false, id };
+  } catch (e) {
+    return { tier: "T3", kind: "code", role: "doer", conf: 0, ui: 0, ms, failed: true, id, error: String(e.message ?? e) };
+  }
+}
+
+// ── 2. same chains as the pi router ─────────────────────────────────────
+const METERED = new Set(CONFIG.metered_providers ?? ["openrouter"]);
+const PRIORITY = CONFIG.provider_priority ?? { cliproxy: 0, "openai-codex": 0, "opencode-go": 1, commandcode: 2, openrouter: 3 };
+const provider = (ref) => ref.slice(0, ref.indexOf("/"));
+const alive = (ref) => {
+  const now = Date.now();
+  return !(DEAD[ref] > now) && !(EXHAUSTED[provider(ref)] > now);
+};
+/** Provider -> worker CLI. Small OpenCode Go models run in opencode itself; pi takes the rest. */
+const harnessFor = (ref) =>
+  ({ cliproxy: "claude", "openai-codex": "codex", "opencode-go": "opencode" })[provider(ref)] ?? "pi";
+
+function pick(d) {
+  const thinkIdx = Math.max(0, THINK.indexOf(CONFIG.thinking?.[d.tier] ?? "medium"));
+  const thinking = THINK[Math.min(THINK.length - 1, d.role === "thinker" ? Math.max(thinkIdx + 1, 2) : thinkIdx)];
+  if (opt.harness === "agy" || (!opt.harness && d.ui >= 0.7 && (d.kind === "code" || d.kind === "general"))) {
+    return { harness: "agy", ref: `agy/${CONFIG.agy_model ?? "gemini-3.8-flash-high"}`, thinking, why: `UI work (ui ${d.ui.toFixed(2)}) → agy` };
+  }
+  const chain = [...new Set([...(CONFIG.kinds?.[d.kind]?.[d.tier] ?? []), ...(CONFIG.tiers?.[d.tier] ?? [])])];
+  const ranked = chain
+    .filter(alive)
+    .map((ref, i) => ({ ref, i, rank: (METERED.has(provider(ref)) ? 3 : (PRIORITY[provider(ref)] ?? 2)) }))
+    .sort((x, y) => x.rank - y.rank || x.i - y.i)
+    .map((x) => x.ref)
+    .filter((ref) => !opt.harness || harnessFor(ref) === opt.harness);
+  const ref = ranked[0];
+  if (!ref) return undefined;
+  return { harness: harnessFor(ref), ref, thinking, why: `${d.kind}·${d.tier} chain, first live` };
+}
+
+// ── 3. worker command ───────────────────────────────────────────────────
+const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+function workerScript(p, run, briefFile) {
+  const id = p.ref.slice(p.ref.indexOf("/") + 1);
+  const effortClaude = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
+  const effortCodex = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
+  switch (p.harness) {
+    case "claude":
+      return `claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+    case "codex":
+      return `codex exec -m ${q(id)} -C ${q(opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+    case "agy":
+      return `node ${q(AGY_RELAY)} --brief ${q(briefFile)} --cd ${q(opt.cwd)} --model ${q(id)} --out-dir ${q(join(run, "agy"))} 2>&1 | tee ${q(join(run, "out.log"))}`;
+    case "opencode": {
+      // JSON events to a file for the answer; a readable stream in the tab.
+      const show =
+        'if .type == "text" then "🤖 " + (.part.text // "") ' +
+        'elif .type == "tool_use" then "🔧 " + (.part.tool // "tool") + " " + ((.part.state.input // {}) | tostring | .[0:140]) ' +
+        'elif .type == "error" then "✗ " + (.error | tostring | .[0:200]) else empty end';
+      return `opencode run -m ${q(p.ref)} --dir ${q(opt.cwd)} --auto --format json "$(cat ${q(briefFile)})" </dev/null 2>${q(join(run, "err.log"))} | tee ${q(join(run, "out.jsonl"))} | jq --unbuffered -rR ${q(`fromjson? | ${show}`)}`;
+    }
+    default: {
+      // Bare pi, like software-factory's lib/agent.py: with extensions loaded the
+      // router took over the worker (switched it to Opus) and pi never exited;
+      // the global AGENTS.md also tells every model it is the orchestrator.
+      const view = `${HOME}/.local/bin/pi-sub-view`;
+      return [
+        `pi --mode json -p --no-extensions --no-context-files --no-skills --model ${q(p.ref)} --thinking ${p.thinking} --session-dir ${q(join(run, "sessions"))} "$(cat ${q(briefFile)})" </dev/null > ${q(join(run, "out.jsonl"))} 2>${q(join(run, "err.log"))} & PI=$!`,
+        `until ls ${q(join(run, "sessions"))}/*.jsonl >/dev/null 2>&1 || ! kill -0 $PI 2>/dev/null; do sleep 0.5; done`,
+        `S=$(ls ${q(join(run, "sessions"))}/*.jsonl 2>/dev/null | head -1); [ -n "$S" ] && { ${q(view)} "$S" ${q(opt.name)} & V=$!; }`,
+        `wait $PI; RC=$?; sleep 1; [ -n "$V" ] && kill $V 2>/dev/null; exit $RC`,
+      ].join("\n");
+    }
+  }
+}
+
+function finalAnswer(p, run) {
+  const read = (f) => { try { return readFileSync(join(run, f), "utf8"); } catch { return ""; } };
+  if (p.harness === "codex") return read("final.txt").trim() || read("out.log").trim().slice(-4000);
+  if (p.harness === "claude") return read("out.log").trim();
+  if (p.harness === "agy") {
+    const res = readJson(join(run, "agy", "result.json"));
+    return res ? JSON.stringify(res, null, 2).slice(0, 6000) : read("out.log").trim().slice(-4000);
+  }
+  if (p.harness === "opencode") {
+    // the answer is the text of the last step
+    const events = read("out.jsonl").split("\n").map((l) => { try { return JSON.parse(l); } catch { return undefined; } }).filter(Boolean);
+    const lastStart = events.map((e) => e.type).lastIndexOf("step_start");
+    const text = events.slice(Math.max(0, lastStart)).filter((e) => e.type === "text").map((e) => e.part?.text ?? "").join("").trim();
+    return text || read("err.log").trim().slice(-2000);
+  }
+  for (const line of read("out.jsonl").split("\n").reverse()) {
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type !== "agent_end") continue;
+      const last = [...(ev.messages ?? [])].reverse().find((m) => m.role === "assistant");
+      return (last?.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n").trim();
+    } catch { /* not json */ }
+  }
+  return read("err.log").trim().slice(-2000);
+}
+
+// ── 4. run ──────────────────────────────────────────────────────────────
+const d = decide(opt.brief);
+const p = pick(d);
+const head =
+  `[jdelegate] ${d.tier} ${d.kind}·${d.role} (jev @${(d.conf ?? 0).toFixed(2)}, ui ${d.ui.toFixed(2)}, ${d.ms}ms` +
+  `${d.failed ? `, jev failed: ${d.error} → safe default` : ""}) → ${p ? `${p.harness} · ${p.ref} · thinking ${p.thinking} (${p.why})` : "no live model"}`;
+if (opt.print || !p) {
+  console.log(head);
+  process.exit(p ? 0 : 1);
+}
+
+function makeRun(attemptBrief, attemptP, attemptTier) {
+  const run = join(HOME, ".cache", "jdelegate", `${new Date().toISOString().replace(/[:.]/g, "-")}-${opt.name}-${attemptTier}-${Math.random().toString(36).slice(2, 7)}`);
+  mkdirSync(run, { recursive: true });
+  const briefFile = join(run, "brief.md");
+  writeFileSync(briefFile, attemptBrief);
+  const label = `${opt.name} · ${attemptP.ref.split("/").pop()}`;
+  writeFileSync(join(run, "run.sh"),
+    `#!/bin/bash\n# jdelegate worker: ${label}\nset -o pipefail\ncd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
+    `printf '\\e]2;%s\\a' ${q(label)}\necho "▶ ${label}  (${attemptTier} ${d.kind}·${d.role})"\n` +
+    `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit"))}\n` +
+    `echo; echo "■ done (exit $RC) — result: ${run}"\n`, { mode: 0o755 });
+  return { run, label };
+}
+
+async function execute(attemptBrief, attemptP, attemptTier) {
+  const { run, label } = makeRun(attemptBrief, attemptP, attemptTier);
+  const started = Date.now();
+  const inHerdr = opt.tab && process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID;
+  let where = "inline";
+  if (inHerdr) {
+    const herdr = (args) => spawnSync("herdr", args, { encoding: "utf8", timeout: 8000 }).stdout ?? "";
+    const field = (s, k) => s.match(new RegExp(`"${k}"\\s*:\\s*"([^"]+)"`))?.[1];
+    const ws = field(herdr(["pane", "get", process.env.HERDR_PANE_ID]), "workspace_id");
+    const out = herdr(["tab", "create", "--no-focus", "--label", label, "--cwd", opt.cwd, ...(ws ? ["--workspace", ws] : [])]);
+    const pane = field(out, "pane_id"), tab = field(out, "tab_id");
+    if (tab) writeFileSync(join(run, "tab"), tab);
+    if (pane) {
+      herdr(["pane", "run", pane, `bash ${q(join(run, "run.sh"))}`]);
+      where = `herdr tab "${label}"`;
+    }
+  }
+  if (where === "inline") spawnSync("bash", [join(run, "run.sh")], { stdio: ["ignore", "ignore", "ignore"], timeout: opt.timeout * 60_000 });
+  while (!existsSync(join(run, "exit"))) {
+    if (Date.now() - started > opt.timeout * 60_000) {
+      console.log(`${head}\n[jdelegate] still running after ${opt.timeout} min in ${where}; result will be in ${run}`);
+      process.exit(124);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
+  const answer = finalAnswer(attemptP, run);
+  const tabFile = join(run, "tab");
+  if (!opt.keepTab && existsSync(tabFile)) {
+    try {
+      const tab = readFileSync(tabFile, "utf8").trim();
+      if (tab && spawnSync("herdr", ["tab", "close", tab], { encoding: "utf8", timeout: 8000 }).status === 0) unlinkSync(tabFile);
+    } catch { /* a tab that will not close must not fail the job */ }
+  }
+  return { run, where, started, rc, answer };
+}
+
+const initialTier = d.tier;
+let tier = initialTier, currentP = p, brief = opt.brief;
+let result = await execute(brief, currentP, tier);
+let escalationReason = "";
+let verdict;
+if (result.rc !== 0) verdict = { choice: "failed_needs_stronger", confidence: 1 };
+else {
+  try {
+    const judged = spawnSync(JEV, ["raw", "--log", "router-delegate-output"], {
+      input: JSON.stringify(buildOutputBody({ goal: brief, tier, final_text: result.answer.slice(0, 4000), tool_errors: 0, turns: 1 })),
+      encoding: "utf8", timeout: 8000,
+    });
+    verdict = JSON.parse(judged.stdout).answers.outcome;
+  } catch { verdict = undefined; }
+}
+if (!opt.noEscalate && TIERS.indexOf(tier) < 4 && verdict?.choice === "failed_needs_stronger" && Number(verdict.confidence) >= 0.6) {
+  const previousAnswer = result.answer.slice(0, 2000);
+  const oldTier = tier;
+  tier = TIERS[TIERS.indexOf(tier) + 1];
+  currentP = pick({ ...d, tier });
+  escalationReason = result.rc !== 0 ? `worker exited ${result.rc}` : `jev confidence ${Number(verdict.confidence).toFixed(2)}`;
+  if (currentP) {
+    brief = `${opt.brief}\n\nA previous attempt on a weaker model did not finish the job. Its final report:\n${previousAnswer}\nFinish the job.`;
+    result = await execute(brief, currentP, tier);
+  } else {
+    tier = oldTier;
+    currentP = p;
+    escalationReason = "no live model at next tier";
+  }
+}
+if (d.id) spawnSync(JEV, ["outcome", d.id, tier], { encoding: "utf8", timeout: 8000 });
+console.log(`${head}\n${escalationReason ? `[jdelegate] escalated ${initialTier} → ${tier}: ${escalationReason}\n` : ""}[jdelegate] ${result.where} · ${Math.round((Date.now() - result.started) / 1000)}s · exit ${result.rc} · ${result.run}\n--- result ---\n${result.answer}`);
+process.exit(result.rc);
