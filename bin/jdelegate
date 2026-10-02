@@ -8,6 +8,21 @@
  *   options: --cwd DIR  --name LABEL  --harness claude|codex|opencode|pi|agy  --timeout MIN (default 30)
  *            --no-tab (run inline)  --keep-tab (leave the worker tab open when it finishes)
  *            --brief-file FILE  --help
+ *            --full (claude worker: all MCP servers + skills; also JDELEGATE_FULL=1)
+ *            --mcp NAME (claude worker, repeatable: load only that MCP server from ~/.claude.json or <cwd>/.mcp.json)
+ *            --skill NAME (claude worker, repeatable: inline that skill; looked up in ~/.claude/skills and skills-parked)
+ *            --no-auto-skill (do not let Jev pick a skill; also JDELEGATE_AUTO_SKILL=0)  --dry-run (write the run dir, print run.sh, launch nothing)
+ *            --role NAME (inline that agent definition from ~/.claude/agents or agents-parked under "## Role: NAME", capped 8000 chars)
+ *            --no-auto-role (do not let Jev pick a role from config/worker-roles.json; also JDELEGATE_AUTO_ROLE=0)
+ *            --no-auto-mcp (do not let Jev pick MCP servers when no --mcp is given; also JDELEGATE_AUTO_MCP=0)
+ *
+ * Lean claude workers (default; --full restores the plain `claude -p`): ~10k first-turn tokens instead of ~29k.
+ * No user/project hooks, no auto-memory, no CLAUDE.md auto-discovery (~/.claude/CLAUDE.md is the orchestrator's rulebook),
+ * settings from project+local only, no MCP, 6 core tools. In their place <run>/worker-prompt.md goes in via
+ * --append-system-prompt-file: a short worker contract, the git-root repo's own CLAUDE.md/AGENTS.md (never $HOME's),
+ * an optional role (--role, or the one `jev choice` picks from config/worker-roles.json), and any skills (--skill, or the one
+ * jev-skill-suggest picks when it is in config/worker-skills.json). With no --mcp, each configured MCP server is judged by
+ * `jev noul` against the brief; at most 2 at >= 0.7 are loaded. --settings also switches commit/PR attribution off.
  *
  * The Claude Code counterpart of pi's model-router + subagents (2026-09-30):
  * Opus orchestrates, Jev decides, workers do the work. Same brain as pi:
@@ -26,9 +41,10 @@
  * Decisions are logged under jev tag `router-delegate`.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const HOME = homedir();
 const { buildRouteBody, buildOutputBody, parseRoute, parseIds } = await import(`${HOME}/.pi/agent/extensions/model-router/route-body.mjs`);
@@ -36,15 +52,40 @@ const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } ca
 const CONFIG = readJson(process.env.JEV_ROUTER_CONFIG ?? `${HOME}/.config/jev-router/tiers.json`) ?? {};
 const DEAD = readJson(`${HOME}/.config/jev-router/dead-models.json`) ?? {};
 const EXHAUSTED = readJson(`${HOME}/.config/jev-router/exhausted.json`) ?? {};
-const JEV = [`${HOME}/.local/bin/jev`, "/usr/local/bin/jev"].find(existsSync) ?? "jev";
+const JEV = process.env.JDELEGATE_JEV || ([`${HOME}/.local/bin/jev`, "/usr/local/bin/jev"].find(existsSync) ?? "jev");
+const CACHE = process.env.JDELEGATE_CACHE || join(HOME, ".cache", "jdelegate");
+const SKILL_DIRS = (process.env.JDELEGATE_SKILL_DIRS || `${HOME}/.claude/skills:${HOME}/.claude/skills-parked`).split(":").filter(Boolean);
+const WORKER_SKILLS = process.env.JDELEGATE_WORKER_SKILLS || join(dirname(realpathSync(process.argv[1])), "..", "config", "worker-skills.json");
+const AGENT_DIRS = (process.env.JDELEGATE_AGENT_DIRS || `${HOME}/.claude/agents:${HOME}/.claude/agents-parked`).split(":").filter(Boolean);
+const WORKER_ROLES = process.env.JDELEGATE_WORKER_ROLES || join(dirname(realpathSync(process.argv[1])), "..", "config", "worker-roles.json");
+const CLAUDE_JSON = process.env.JDELEGATE_CLAUDE_JSON || `${HOME}/.claude.json`;
+const DEBUG = process.env.JDELEGATE_DEBUG === "1";
+/** JDELEGATE_DEBUG=1: print how long a selection step took, on stderr. */
+const timed = (label, fn) => { const t = Date.now(); const out = fn(); const done = () => DEBUG && console.error(`[jdelegate:timing] ${label} ${Date.now() - t}ms`); return out instanceof Promise ? out.finally(done) : (done(), out); };
+/** Async spawn with a kill timeout. Never rejects; resolves {status, stdout, stderr} like spawnSync (status null on timeout or spawn error). */
+const runCmd = (cmd, args, { input, timeout = 8000 } = {}) => new Promise((done) => {
+  let out = "", err = "", settled = false, timer;
+  const finish = (status) => { if (settled) return; settled = true; clearTimeout(timer); done({ status, stdout: out, stderr: err }); };
+  let c;
+  try { c = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] }); } catch { return finish(null); }
+  timer = setTimeout(() => { c.kill("SIGKILL"); finish(null); }, timeout);
+  c.stdout.on("data", (b) => { out += b; });
+  c.stderr.on("data", (b) => { err += b; });
+  c.on("error", () => finish(null));
+  c.on("close", (code) => finish(code));
+  c.stdin.on("error", () => {});
+  c.stdin.end(input ?? "");
+});
+const SECTION_CAP = 12000;
+const ROLE_CAP = 8000;
 const AGY_RELAY = `${HOME}/.claude/skills/agy-delegate/scripts/relay.mjs`;
 const TIERS = ["T0", "T1", "T2", "T3", "T4"];
 const THINK = ["off", "minimal", "low", "medium", "high"];
 
 // ── args ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
-const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--print] "<brief>"';
-const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, gc: false, older: 60, brief: "" };
+const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, no skills, 6 core tools (~10k vs ~43k first-turn tokens).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
+const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", dryRun: false, gc: false, older: 60, brief: "" };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--cwd") opt.cwd = resolve(argv[++i]);
@@ -54,6 +95,14 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--no-tab") opt.tab = false;
   else if (a === "--keep-tab") opt.keepTab = true;
   else if (a === "--help" || a === "-h") { console.log(USAGE); process.exit(0); }
+  else if (a === "--full") opt.full = true;
+  else if (a === "--mcp") opt.mcp.push(argv[++i]);
+  else if (a === "--skill") opt.skills.push(argv[++i]);
+  else if (a === "--no-auto-skill") opt.autoSkill = false;
+  else if (a === "--role") opt.role = argv[++i] ?? "";
+  else if (a === "--no-auto-role") opt.autoRole = false;
+  else if (a === "--no-auto-mcp") opt.autoMcp = false;
+  else if (a === "--dry-run") opt.dryRun = true;
   else if (a === "--no-escalate") opt.noEscalate = true;
   else if (a === "--gc") opt.gc = true;
   else if (a === "--older") opt.older = Number(argv[++i]);
@@ -62,7 +111,7 @@ for (let i = 0; i < argv.length; i++) {
   else opt.brief = opt.brief ? `${opt.brief} ${a}` : a;
 }
 if (opt.gc) {
-  const root = join(HOME, ".cache", "jdelegate");
+  const root = CACHE;
   let closed = 0;
   const runs = [];
   const findRuns = (dir) => {
@@ -93,10 +142,100 @@ if (!opt.brief.trim()) {
   console.error(USAGE);
   process.exit(2);
 }
-opt.name ||= opt.brief.replace(/\s+/g, " ").trim().split(" ").slice(0, 4).join("-").replace(/[^\w.-]/g, "").slice(0, 24) || "job";
+
+// ── skills and repo instructions for the lean claude worker ─────────────
+const cap = (text, what) => (text.length > SECTION_CAP ? `${text.slice(0, SECTION_CAP)}\n[... ${what} truncated at ${SECTION_CAP} chars]` : text);
+function readSkill(name) {
+  for (const dir of SKILL_DIRS) {
+    try { return readFileSync(join(dir, name, "SKILL.md"), "utf8").replace(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(\r?\n|$)/, "").trim(); } catch { /* next root */ }
+  }
+  return undefined;
+}
+const explicitSkills = opt.skills.map((name) => {
+  const body = /^[\w.-]+$/.test(name ?? "") ? readSkill(name) : undefined;
+  if (body === undefined) { console.error(`jdelegate: skill "${name}" not found in ${SKILL_DIRS.join(", ")}`); process.exit(2); }
+  return { name, body, auto: false };
+});
+/** Jev's suggestion for the brief (the raw name). ok is false when the suggester failed. Never throws, never blocks past 8 s. */
+async function suggestSkill(brief) {
+  const r = await runCmd("jev-skill-suggest", ["--name", brief.slice(0, 2000)]);
+  return { ok: r.status === 0, name: r.status === 0 ? r.stdout.trim() : "" };
+}
+/** The suggested skill, only if it is on the worker allowlist. */
+function skillFor(name) {
+  try {
+    if (!name || !/^[\w.-]+$/.test(name)) return [];
+    if (!(readJson(WORKER_SKILLS)?.worker ?? []).includes(name)) return [];
+    const body = readSkill(name);
+    return body === undefined ? [] : [{ name, body, auto: true }];
+  } catch { return []; }
+}
+const stripFrontmatter = (t) => t.replace(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(\r?\n|$)/, "").trim();
+function readAgent(name) {
+  if (!/^[\w.-]+$/.test(name ?? "")) return undefined;
+  for (const dir of AGENT_DIRS) {
+    try { const raw = readFileSync(join(dir, `${name}.md`), "utf8"); return { body: stripFrontmatter(raw), description: raw.match(/^description:[ \t]*(.*)$/m)?.[1]?.trim() ?? "" }; } catch { /* next root */ }
+  }
+  return undefined;
+}
+let explicitRole;
+if (opt.role) {
+  const a = readAgent(opt.role);
+  if (!a) { console.error(`jdelegate: role "${opt.role}" not found in ${AGENT_DIRS.join(", ")}`); process.exit(2); }
+  explicitRole = { name: opt.role, body: a.body, auto: false };
+}
+/** The role question over config/worker-roles.json plus "none", or undefined when no role is eligible. Never throws. */
+function roleQuestion() {
+  try {
+    const eligible = (readJson(WORKER_ROLES)?.worker ?? []).filter((n) => /^[\w.-]+$/.test(n));
+    const found = eligible.map((name) => ({ name, agent: readAgent(name) })).filter((r) => r.agent);
+    if (!found.length) return undefined;
+    const criteria = Object.fromEntries([...found.map((r) => [r.name, r.agent.description.replace(/\s+/g, " ").slice(0, 200) || null]), ["none", "No specialist role; a generic worker fits."]]);
+    return { found, question: { type: "choice", instructions: "Which specialist role, if any, fits the worker doing this coding brief? Pick none for a generic worker.", criteria } };
+  } catch { return undefined; }
+}
+const roleOf = (found, name) => { const hit = found.find((f) => f.name === name); return hit ? { name, body: hit.agent.body, auto: true } : undefined; };
+/** jev choice --min 0.6: a missing or lower confidence means no role. Returns undefined for a malformed answer, {name} otherwise (name null = none). */
+function parseRole(a, found) {
+  if (typeof a?.choice !== "string") return undefined;
+  const name = typeof a.confidence === "number" && a.confidence >= 0.6 && roleOf(found, a.choice) ? a.choice : null;
+  return { name };
+}
+const SPAWNS = /\b(spawn\w*|delegat\w*|orchestrat\w*|sub-?agents?)\b|\b(Agent|Task) tool\b/i;
+function roleSection(role) {
+  const body = role.body.length > ROLE_CAP ? `${role.body.slice(0, ROLE_CAP)}\n[... role ${role.name} truncated at ${ROLE_CAP} chars]` : role.body;
+  const override = SPAWNS.test(body) ? "\nYou are running as a single worker: ignore any instruction above to spawn agents or delegate." : "";
+  return `## Role: ${role.name}\n${body}${override}`;
+}
+function repoInstructions() {
+  const top = spawnSync("git", ["-C", opt.cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 5000 }).stdout?.trim();
+  if (!top) return "";
+  try { if (realpathSync(top) === realpathSync(HOME)) return ""; } catch { return ""; }
+  const parts = ["CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md"].flatMap((f) => {
+    try { return [`### ${f}\n${readFileSync(join(top, f), "utf8").trim()}`]; } catch { return []; }
+  });
+  return parts.length ? cap(parts.join("\n\n"), "repo instructions") : "";
+}
+const CONTRACT = `You are a worker. An orchestrator already did the KB research, spec, task logging and delegation for this job.
+- Do not run kb-*, speckit or deploy pipelines, do not spawn agents, do not look for MCP tools.
+- Stay inside the scope of the brief.
+- When you change behaviour, write the failing test first.
+- Never add Co-Authored-By or "Generated with" lines to a commit. Commit only if the brief says so.
+- Your final answer is: what changed, pasted command output as evidence, and what you could not do.
+Plain direct prose, no emoji.`;
+function workerPrompt(skills, role) {
+  const repo = repoInstructions();
+  return [CONTRACT, repo && `## Repo instructions\n${repo}`, role && roleSection(role), ...skills.map((s) => `## Skill: ${s.name}\n${cap(s.body, `skill ${s.name}`)}`)].filter(Boolean).join("\n\n") + "\n";
+}
+
+// The human label (herdr tab title, echo lines) may be anything; the slug is what lands in a directory name.
+const slugOf = (s) => String(s).replace(/[^\w.-]/g, "").slice(0, 24) || "job";
+opt.name ||= opt.brief.replace(/\s+/g, " ").trim().split(" ").slice(0, 4).join("-");
+const nameLabel = opt.name.replace(/[\x00-\x1f\x7f]+/g, " ").trim() || "job";
+const nameSlug = slugOf(opt.name);
 
 // ── 1. jev decides ──────────────────────────────────────────────────────
-function decide(brief) {
+async function decide(brief) {
   const body = buildRouteBody({ prompt: brief });
   body.questions.ui = {
     type: "noul",
@@ -105,7 +244,7 @@ function decide(brief) {
       "or animation — frontend code whose main outcome is how it looks or feels.",
   };
   const started = Date.now();
-  const r = spawnSync(JEV, ["raw", "--log", "router-delegate"], { input: JSON.stringify(body), encoding: "utf8", timeout: 8000 });
+  const r = await runCmd(JEV, ["raw", "--log", "router-delegate"], { input: JSON.stringify(body) });
   const id = parseIds(r.stderr).tier;
   const ms = Date.now() - started;
   try {
@@ -159,13 +298,80 @@ function pick(d) {
 
 // ── 3. worker command ───────────────────────────────────────────────────
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+/** Every MCP server the worker could load: ~/.claude.json, this cwd's project entry, <cwd>/.mcp.json (on a name clash ~/.claude.json wins). */
+function configuredMcp() {
+  const user = readJson(CLAUDE_JSON);
+  return { ...readJson(join(opt.cwd, ".mcp.json"))?.mcpServers, ...user?.projects?.[opt.cwd]?.mcpServers, ...user?.mcpServers };
+}
+/**
+ * Servers auto-selection may consider: {name: {def, trusted}}. ~/.claude.json and this cwd's project entry are the user's own;
+ * a <cwd>/.mcp.json server counts only when the project entry lists it in enabledMcpjsonServers (and not in disabledMcpjsonServers).
+ */
+function autoMcpServers() {
+  const user = readJson(CLAUDE_JSON), proj = user?.projects?.[opt.cwd];
+  const out = {};
+  const enabled = Array.isArray(proj?.enabledMcpjsonServers) ? proj.enabledMcpjsonServers : [];
+  const disabled = Array.isArray(proj?.disabledMcpjsonServers) ? proj.disabledMcpjsonServers : [];
+  const fromFile = readJson(join(opt.cwd, ".mcp.json"))?.mcpServers;
+  for (const [name, def] of Object.entries(fromFile && typeof fromFile === "object" ? fromFile : {}))
+    if (enabled.includes(name) && !disabled.includes(name)) out[name] = { def, trusted: false };
+  for (const [name, def] of Object.entries({ ...proj?.mcpServers, ...user?.mcpServers })) out[name] = { def, trusted: true };
+  return out;
+}
+/** The MCP questions, one noul per auto-selectable server: {name: question}. Untrusted (.mcp.json) servers: name + command only. */
+function mcpQuestions() {
+  const qs = {};
+  try {
+    for (const [name, { def, trusted }] of Object.entries(autoMcpServers())) {
+      const what = trusted ? def?.description || [def?.command ?? def?.url, ...(def?.args ?? [])].filter(Boolean).join(" ") : String(def?.command ?? def?.url ?? "").slice(0, 200);
+      qs[`mcp:${name}`] = { type: "noul", instructions: `This coding brief needs the ${name} MCP server (${what})` };
+    }
+  } catch { /* none */ }
+  return qs;
+}
+/** Servers whose probability is >= 0.7, best first, at most 2. A malformed answer drops only that server. */
+function parseMcp(answers, qs) {
+  const scored = [];
+  for (const key of Object.keys(qs)) {
+    const prob = typeof answers?.[key]?.noul === "number" ? answers[key].noul : NaN;
+    if (prob >= 0.7) scored.push({ name: key.slice(4), prob });
+  }
+  return scored.sort((x, y) => y.prob - x.prob).slice(0, 2).map((x) => x.name);
+}
+/** One `jev raw` request for several questions over the same state (the brief, parsed like `jev -s`). Undefined on any failure. */
+async function askFolded(brief, questions) {
+  if (!Object.keys(questions).length) return undefined;
+  const text = brief.slice(0, 2000);
+  let state = text;
+  try { const v = JSON.parse(text); if (v && typeof v === "object") state = v; } catch { /* plain text */ }
+  const r = await runCmd(JEV, ["raw"], { input: JSON.stringify({ state, questions }) });
+  if (r.status !== 0) return undefined;
+  try { const a = JSON.parse(r.stdout).answers; return a && typeof a === "object" ? a : undefined; } catch { return undefined; }
+}
+let mcpNames = opt.mcp;
+function leanMcpConfig() {
+  const servers = {};
+  for (const name of mcpNames) {
+    const def = configuredMcp()[name];
+    if (!def) { console.error(`jdelegate: MCP server "${name}" not found in ${CLAUDE_JSON} or ${opt.cwd}/.mcp.json`); process.exit(2); }
+    servers[name] = def;
+  }
+  return JSON.stringify({ mcpServers: servers });
+}
+const isLean = () => !(opt.full && !opt.mcp.length);
+let workerSkills = [];
+let workerRole;
 function workerScript(p, run, briefFile) {
   const id = p.ref.slice(p.ref.indexOf("/") + 1);
   const effortClaude = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   const effortCodex = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   switch (p.harness) {
     case "claude":
-      return `claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+      if (!isLean())
+        return `claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+      // lean: brief on stdin (variadic --tools would swallow a trailing prompt argument). No CLAUDE.md files, no user
+      // settings, no hooks, no auto-memory; the worker's context is <run>/worker-prompt.md. (--bare would break OAuth login.)
+      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""}}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --disable-slash-commands --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "codex":
       return `codex exec -m ${q(id)} -C ${q(opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "agy":
@@ -219,10 +425,97 @@ function finalAnswer(p, run) {
   return read("err.log").trim().slice(-2000);
 }
 
+// ── selection: concurrent, folded, cached ───────────────────────────────
+const SELECT_FILE = join(CACHE, "select-cache.json");
+const SELECT_TTL = 10 * 60_000, SELECT_MAX = 100;
+const SELECT_KEY = createHash("sha1").update(`${opt.brief}\0${opt.cwd}`).digest("hex");
+const selectDb = () => { const db = process.env.JDELEGATE_SELECT_CACHE === "0" ? undefined : readJson(SELECT_FILE); return db && typeof db === "object" && !Array.isArray(db) ? db : {}; };
+const cachedEntry = (() => { const e = selectDb()[SELECT_KEY]; return e && Date.now() - e.t < SELECT_TTL ? e : undefined; })();
+let cachedAny = false;
+/** Merge freshly computed pieces into this brief's entry (the entry keeps its first write time), prune, cap at 100. */
+function saveSelect(pieces) {
+  if (process.env.JDELEGATE_SELECT_CACHE === "0" || !Object.keys(pieces).length) return;
+  try {
+    const now = Date.now(), db = selectDb();
+    const live = Object.entries(db).filter(([, e]) => now - e.t < SELECT_TTL);
+    const merged = Object.fromEntries(live);
+    merged[SELECT_KEY] = { ...(merged[SELECT_KEY] ?? { t: now }), ...pieces };
+    const kept = Object.entries(merged).sort((x, y) => y[1].t - x[1].t).slice(0, SELECT_MAX);
+    mkdirSync(CACHE, { recursive: true });
+    const tmpFile = `${SELECT_FILE}.${process.pid}.tmp`;
+    writeFileSync(tmpFile, JSON.stringify(Object.fromEntries(kept)));
+    renameSync(tmpFile, SELECT_FILE);
+  } catch { /* the cache is an optimisation */ }
+}
+async function routeDecision() {
+  const c = cachedEntry?.route;
+  if (c) { cachedAny = true; return { ...c, ms: 0, failed: false, id: undefined }; }
+  const decision = await timed("route", () => decide(opt.brief));
+  if (!decision.failed) saveSelect({ route: { tier: decision.tier, kind: decision.kind, role: decision.role, conf: decision.conf, ui: decision.ui } });
+  return decision;
+}
+/**
+ * Skill, role and MCP selection for a harness. They do not depend on each other: skill is its own call, role and every MCP
+ * server ride in ONE raw request, and both run at the same time. Every failure drops just that selection.
+ * Resolves {skills, role, mcp}; mcp is undefined when MCP selection did not apply.
+ */
+async function selectWorker(harness) {
+  const leanClaude = harness === "claude" && isLean();
+  const base = harness !== "claude" || leanClaude;
+  const wantSkill = base && !(explicitSkills.length || !opt.autoSkill);
+  const wantRole = base && !explicitRole && opt.autoRole;
+  const mcpOn = leanClaude && !opt.mcp.length && !opt.full && opt.autoMcp && Object.keys(autoMcpServers()).length > 0;
+  const fresh = {};
+  const hit = () => { cachedAny = true; };
+
+  const skillTask = async () => {
+    if (!wantSkill) return explicitSkills;
+    if (typeof cachedEntry?.skill?.name === "string") { hit(); return skillFor(cachedEntry.skill.name); }
+    const r = await timed("skill", () => suggestSkill(opt.brief));
+    if (r.ok) fresh.skill = { name: r.name };
+    return skillFor(r.name);
+  };
+
+  const rq = wantRole ? roleQuestion() : undefined;
+  const roleSig = rq && JSON.stringify(rq.question);
+  const mq = mcpOn ? mcpQuestions() : undefined;
+  const mcpSig = mq && JSON.stringify(mq);
+  const roleHit = rq && cachedEntry?.role?.sig === roleSig;
+  const mcpHit = mq && cachedEntry?.mcp?.sig === mcpSig;
+  const questions = { ...(rq && !roleHit ? { role: rq.question } : {}), ...(mq && !mcpHit ? mq : {}) };
+
+  const jevTask = async () => {
+    const answers = await timed("role+mcp", () => askFolded(opt.brief, questions));
+    let role, mcp;
+    if (rq) {
+      if (roleHit) { hit(); role = cachedEntry.role.name ? roleOf(rq.found, cachedEntry.role.name) : undefined; }
+      else {
+        const parsed = answers ? parseRole(answers.role, rq.found) : undefined;
+        role = parsed?.name ? roleOf(rq.found, parsed.name) : undefined;
+        if (parsed) fresh.role = { sig: roleSig, name: parsed.name };
+      }
+    }
+    if (mq) {
+      if (mcpHit) { hit(); mcp = cachedEntry.mcp.names; }
+      else {
+        mcp = answers ? parseMcp(answers, mq) : [];
+        if (answers) fresh.mcp = { sig: mcpSig, names: mcp };
+      }
+    }
+    return { role, mcp };
+  };
+
+  const [skills, { role, mcp }] = await timed("selection", () => Promise.all([skillTask(), jevTask()]));
+  saveSelect(fresh);
+  return { skills, role, mcp };
+}
+
 // ── 4. run ──────────────────────────────────────────────────────────────
-const d = decide(opt.brief);
+// With an explicit --harness the selections do not depend on the route: start them now, alongside it.
+const earlySelection = opt.harness && !opt.print ? selectWorker(opt.harness) : undefined;
+const d = await routeDecision();
 const p = pick(d);
-const head =
+let head =
   `[jdelegate] ${d.tier} ${d.kind}·${d.role} (jev @${(d.conf ?? 0).toFixed(2)}, ui ${d.ui.toFixed(2)}, ${d.ms}ms` +
   `${d.failed ? `, jev failed: ${d.error} → safe default` : ""}) → ${p ? `${p.harness} · ${p.ref} · thinking ${p.thinking} (${p.why})` : "no live model"}`;
 if (opt.print || !p) {
@@ -230,18 +523,61 @@ if (opt.print || !p) {
   process.exit(p ? 0 : 1);
 }
 
+if (p.harness === "claude" && !isLean() && (opt.role || opt.skills.length)) {
+  console.error("jdelegate: --role/--skill are not applied with --full (the plain claude takes no worker prompt); drop --full or the flag");
+  process.exit(2);
+}
+// Role and skill selection is harness-independent; only the claude harness also gets MCP selection.
+const leanClaude = p.harness === "claude" && isLean();
+if (p.harness !== "claude" || leanClaude) {
+  const sel = await (earlySelection && p.harness === opt.harness ? earlySelection : selectWorker(p.harness));
+  workerSkills = sel.skills;
+  workerRole = explicitRole ?? sel.role;
+  if (workerRole) head += ` · role: ${workerRole.name}${workerRole.auto ? " (auto)" : ""}`;
+  if (leanClaude) {
+    if (sel.mcp) {
+      mcpNames = sel.mcp;
+      if (mcpNames.length) head += ` · mcp: ${mcpNames.join(",")} (auto)`;
+    }
+    if (workerSkills.length) head += ` · skills: ${workerSkills.map((s) => s.name + (s.auto ? " (auto)" : "")).join(", ")}`;
+  }
+}
+if (cachedAny) head += " · (cached)";
+
 function makeRun(attemptBrief, attemptP, attemptTier) {
-  const run = join(HOME, ".cache", "jdelegate", `${new Date().toISOString().replace(/[:.]/g, "-")}-${opt.name}-${attemptTier}-${Math.random().toString(36).slice(2, 7)}`);
-  mkdirSync(run, { recursive: true });
+  const run = join(CACHE, `${new Date().toISOString().replace(/[:.]/g, "-")}-${nameSlug}-${attemptTier}-${Math.random().toString(36).slice(2, 7)}`);
+  mkdirSync(run, { recursive: true, mode: 0o700 });
   const briefFile = join(run, "brief.md");
-  writeFileSync(briefFile, attemptBrief);
-  const label = `${opt.name} · ${attemptP.ref.split("/").pop()}`;
+  if (attemptP.harness === "claude") {
+    writeFileSync(briefFile, attemptBrief);
+    if (isLean()) {
+      writeFileSync(join(run, "worker-prompt.md"), workerPrompt(workerSkills, workerRole));
+      writeFileSync(join(run, "mcp.json"), leanMcpConfig(), { mode: 0o600 });
+    }
+  } else {
+    // No system-prompt file on these harnesses: the worker prompt rides in front of the brief.
+    writeFileSync(briefFile, `${workerPrompt(workerSkills, workerRole)}\n--- TASK ---\n${attemptBrief}`);
+  }
+  const label = `${nameLabel} · ${attemptP.ref.split("/").pop()}`;
   writeFileSync(join(run, "run.sh"),
-    `#!/bin/bash\n# jdelegate worker: ${label}\nset -o pipefail\ncd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
-    `printf '\\e]2;%s\\a' ${q(label)}\necho "▶ ${label}  (${attemptTier} ${d.kind}·${d.role})"\n` +
+    `#!/bin/bash\n# jdelegate worker: ${label.replace(/[\r\n]+/g, " ")}\nset -o pipefail\ncd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
+    `printf '\\e]2;%s\\a' ${q(label)}\necho ${q(`▶ ${label}  (${attemptTier} ${d.kind}·${d.role})`)}\n` +
     `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit"))}\n` +
-    `echo; echo "■ done (exit $RC) — result: ${run}"\n`, { mode: 0o755 });
+    `echo; echo "■ done (exit $RC) — result: "${q(run)}\n`, { mode: 0o755 });
   return { run, label };
+}
+
+if (opt.dryRun) {
+  const { run } = makeRun(opt.brief, p, d.tier);
+  let mcpShown = "";
+  try {
+    const cfg = JSON.parse(readFileSync(join(run, "mcp.json"), "utf8"));
+    for (const def of Object.values(cfg.mcpServers ?? {}))
+      for (const k of ["env", "headers"]) if (def && typeof def[k] === "object" && def[k]) def[k] = Object.fromEntries(Object.keys(def[k]).map((n) => [n, "***"]));
+    mcpShown = `# mcp.json (secrets redacted): ${JSON.stringify(cfg)}\n`;
+  } catch { /* no MCP config in this mode */ }
+  console.log(`${head}\n[jdelegate] dry-run ${run}\n${mcpShown}${readFileSync(join(run, "run.sh"), "utf8")}`);
+  process.exit(0);
 }
 
 async function execute(attemptBrief, attemptP, attemptTier) {
