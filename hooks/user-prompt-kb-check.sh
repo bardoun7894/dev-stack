@@ -48,11 +48,15 @@ find_project_root() {
 # fails we fall back to "always emit the reminder" so we never under-inject.
 hook_input="$(cat 2>/dev/null || true)"
 user_prompt=""
+session_id=""
 if [ -n "$hook_input" ]; then
-  user_prompt="$(printf '%s' "$hook_input" | /usr/bin/python3 -c '
-import json, sys
+  # First line: session_id (sanitised, may be empty). Remainder: the prompt.
+  parsed="$(printf '%s' "$hook_input" | /usr/bin/python3 -c '
+import json, re, sys
 try:
     d = json.load(sys.stdin)
+    sid = d.get("session_id")
+    print(re.sub(r"[^A-Za-z0-9._-]", "_", sid)[:100] if isinstance(sid, str) else "")
     # Try several known field names across Claude Code versions
     for k in ("prompt", "user_prompt", "user_message", "message", "input"):
         v = d.get(k)
@@ -62,6 +66,55 @@ try:
 except Exception:
     pass
 ' 2>/dev/null || true)"
+  session_id="${parsed%%$'\n'*}"
+  case "$parsed" in
+    *$'\n'*) user_prompt="${parsed#*$'\n'}" ;;
+  esac
+fi
+
+# --- Once-per-session state ---
+# The REMINDER and the RULE OUT OF DATE nag print once per session, and only a print uses them up: the marker
+# file (also read by bin/jev-skill-suggest, which appends `hint:<skill>` lines) is keyed by session_id and gets
+# a `reminded` / `nagged` line when that block is actually printed, so a trivial first prompt costs nothing.
+# Without a session_id we cannot tell, so every prompt counts as the first (never under-inject).
+remind_pending=1
+nag_pending=1
+seen_file=""
+if [ -n "$session_id" ]; then
+  seen_dir="$HOME/.cache/dev-stack/hook-seen"
+  seen_file="$seen_dir/$session_id"
+  if [ ! -e "$seen_file" ]; then
+    mkdir -p "$seen_dir" 2>/dev/null
+    : > "$seen_file" 2>/dev/null
+    find "$seen_dir" -type f -mtime +2 -delete 2>/dev/null
+  fi
+  grep -qx reminded "$seen_file" 2>/dev/null && remind_pending=0
+  grep -qx nagged "$seen_file" 2>/dev/null && nag_pending=0
+fi
+mark_seen() { [ -n "$seen_file" ] && printf "%s\n" "$1" >> "$seen_file" 2>/dev/null; return 0; }
+
+# --- Jev skill suggestion, started now so it overlaps the checks below (joined at the end) ---
+# At most one skill as a <skill_relevance> line. Skipped here for "/" commands and prompts under 4 words;
+# jev-skill-suggest also skips ack/continue prompts and caches. Hard timeout 2.5 s; any error -> no hint.
+suggest_bin="${DEVSTACK_SUGGEST_BIN:-$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/jev-skill-suggest}"
+suggest_out=""
+suggest_pid=""
+if [ -n "$user_prompt" ] && [ "${JEV_SKILL_SUGGEST:-1}" != "0" ] && [ -f "$suggest_bin" ]; then
+  case "$user_prompt" in
+    /*) ;;
+    *)
+      set -f; set -- $user_prompt; set +f
+      if [ $# -ge 4 ]; then
+        suggest_out=$(mktemp "${TMPDIR:-/tmp}/jev-suggest.XXXXXX" 2>/dev/null) || suggest_out=""
+        if [ -n "$suggest_out" ]; then
+          jev_timeout=$(command -v timeout || command -v gtimeout)
+          printf '%s' "$user_prompt" | ${jev_timeout:+$jev_timeout 2.5} /usr/bin/env python3 "$suggest_bin" \
+            ${session_id:+--session "$session_id"} >"$suggest_out" 2>/dev/null &
+          suggest_pid=$!
+        fi
+      fi
+      ;;
+  esac
 fi
 
 root=$(find_project_root) || root=""
@@ -77,7 +130,7 @@ needs_dev_stack_install=0
 cache_valid=0
 if [ -f "$dev_stack_health_cache" ]; then
   now_epoch=$(date +%s)
-  cache_epoch=$(stat -f '%m' "$dev_stack_health_cache" 2>/dev/null || echo 0)
+  cache_epoch=$(stat -c '%Y' "$dev_stack_health_cache" 2>/dev/null || stat -f '%m' "$dev_stack_health_cache" 2>/dev/null || echo 0)
   age=$((now_epoch - cache_epoch))
   if [ "$age" -lt 3600 ]; then
     cache_valid=1
@@ -86,14 +139,16 @@ if [ -f "$dev_stack_health_cache" ]; then
 fi
 if [ $cache_valid -eq 0 ]; then
   missing_canaries=""
+  # A parked skill (~/.claude/skills-parked) counts as installed: it is on disk and Jev surfaces it by path.
+  skill_present() { [ -e "$HOME/.claude/skills/$1/SKILL.md" ] || [ -e "$HOME/.claude/skills-parked/$1/SKILL.md" ]; }
   # Canary 1: first-party skill
-  [ -f "$HOME/.claude/skills/kb-dev/SKILL.md" ] || missing_canaries="$missing_canaries kb-dev"
+  skill_present kb-dev || missing_canaries="$missing_canaries kb-dev"
   # Canary 2: kb-skill vendor (via symlink resolution)
-  [ -e "$HOME/.claude/skills/kb-query/SKILL.md" ] || missing_canaries="$missing_canaries kb-query"
+  skill_present kb-query || missing_canaries="$missing_canaries kb-query"
   # Canary 3: obra/superpowers vendor
-  [ -e "$HOME/.claude/skills/dispatching-parallel-agents/SKILL.md" ] || missing_canaries="$missing_canaries dispatching-parallel-agents"
+  skill_present dispatching-parallel-agents || missing_canaries="$missing_canaries dispatching-parallel-agents"
   # Canary 4: vendor/local
-  [ -e "$HOME/.claude/skills/frontend-design/SKILL.md" ] || missing_canaries="$missing_canaries frontend-design"
+  skill_present frontend-design || missing_canaries="$missing_canaries frontend-design"
   # Canary 5: universal bin
   [ -x "$HOME/.local/bin/kb-capture" ] || missing_canaries="$missing_canaries kb-capture"
 
@@ -125,9 +180,12 @@ fi
 rule_drift_cache="$HOME/.claude/.rule-drift-cache"
 rule_drift_recheck=1
 drift_msg=""
-if [ -f "$rule_drift_cache" ]; then
+# The nag prints once per session, so once it has been shown later prompts skip the check entirely.
+if [ $nag_pending -eq 0 ]; then
+  rule_drift_recheck=0
+elif [ -f "$rule_drift_cache" ]; then
   now_epoch=$(date +%s)
-  cache_epoch=$(stat -f '%m' "$rule_drift_cache" 2>/dev/null || echo 0)
+  cache_epoch=$(stat -c '%Y' "$rule_drift_cache" 2>/dev/null || stat -f '%m' "$rule_drift_cache" 2>/dev/null || echo 0)
   age=$((now_epoch - cache_epoch))
   if [ "$age" -lt 300 ]; then
     rule_drift_recheck=0
@@ -148,6 +206,7 @@ fi
 if [ -n "$drift_msg" ]; then
   printf '📋 RULE OUT OF DATE: %s\n' "$drift_msg"
   printf '  The auto-generated dev-stack-state section in ~/.claude/CLAUDE.md is stale. Run `bash ~/code/dev-stack/scripts/refresh-rule.sh --dry-run` to see what changed, then ASK THE USER before applying with `bash ~/code/dev-stack/scripts/refresh-rule.sh`. Never apply without explicit confirmation.\n\n'
+  mark_seen nagged
 fi
 
 # --- Auto git init for unmarked user-project candidates ---
@@ -220,7 +279,7 @@ if [ -n "$root" ]; then
   raw_dir="$root/ai-knowledge-base/raw"
   if [ -d "$raw_dir" ]; then
     snapshot="$raw_dir/.last-ingest-snapshot"
-    current_state=$(cd "$raw_dir" 2>/dev/null && find . -maxdepth 2 -type f -not -name '.gitkeep' -not -name '.last-ingest-snapshot' -not -name '*.jsonl' -exec stat -f '%N %z' {} \; 2>/dev/null | sort)
+    current_state=$(cd "$raw_dir" 2>/dev/null && find . -maxdepth 2 -type f -not -name '.gitkeep' -not -name '.last-ingest-snapshot' -not -name '*.jsonl' -exec sh -c 'for f; do printf "%s %s\n" "$f" "$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)"; done' sh {} + 2>/dev/null | sort)
     saved_state=""
     [ -f "$snapshot" ] && saved_state=$(cat "$snapshot" 2>/dev/null)
 
@@ -264,7 +323,7 @@ fi
 # Bilingual: English + Arabic. Arabic doesn't have case, so -i is a no-op for
 # Arabic but keeps the English half case-insensitive. UTF-8 in regex works
 # with grep/ripgrep on macOS as long as LC_ALL/LANG is sane.
-emit_reminder=1
+emit_reminder=$remind_pending
 # Strong-signal override: when the cwd is inside a project that already has
 # an ai-knowledge-base (scripts/query.py present), the standing rule ALWAYS
 # applies — there is something in the KB worth grounding against. Skip the
@@ -275,7 +334,7 @@ if [ -n "$root" ] && [ -f "$root/ai-knowledge-base/scripts/query.py" ]; then
   in_kb_project=1
 fi
 
-if [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 ]; then
+if [ $remind_pending -eq 1 ] && [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 ]; then
   # Trivial-prompt heuristics: short prompts with no engineering vocabulary skip the reminder.
   prompt_len=${#user_prompt}
   if [ "$prompt_len" -lt 200 ]; then
@@ -301,19 +360,29 @@ if [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 ]; then
 
     if ! printf '%s' "$user_prompt" | grep -qiE "$en_pattern|$ar_pattern"; then
       emit_reminder=0
+      # The word lists miss Darija ("zid lia button f page dyal login", "حل التانية").
+      # Only when they miss, ask Jev (~0.5 s). exit 0 = engineering → remind;
+      # exit 1 = not engineering → skip; timeout / exit 3 (no key, network) → remind,
+      # since a missed rule costs more than 150 tokens.
+      if command -v jev >/dev/null 2>&1; then
+        jev_timeout=$(command -v timeout || command -v gtimeout)
+        ${jev_timeout:+$jev_timeout 2} jev noul \
+          "This prompt asks for software engineering work, or asks about a software project's code, bugs, history or decisions." \
+          -s "$user_prompt" --yes 0.5 >/dev/null 2>&1
+        [ $? -ne 1 ] && emit_reminder=1
+      fi
     fi
   fi
 fi
 
-# --- Jev skill suggestion (System 1 screen, see skills/jev/SKILL.md) ---
-# At most one relevant skill out of everything installed, as a <skill_relevance> line.
-# ~0.5-1.1 s; prints nothing on / commands, short prompts, low fit, JEV_SKILL_SUGGEST=0, or any error.
-suggest_bin="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/jev-skill-suggest"
-if [ -n "$user_prompt" ] && [ "${JEV_SKILL_SUGGEST:-1}" != "0" ] && [ -f "$suggest_bin" ]; then
-  jev_timeout=$(command -v timeout || command -v gtimeout)
-  printf '%s' "$user_prompt" | ${jev_timeout:+$jev_timeout 4} /usr/bin/env python3 "$suggest_bin" 2>/dev/null || true
+# --- Join the Jev skill suggestion started above ---
+if [ -n "$suggest_pid" ]; then
+  wait "$suggest_pid" 2>/dev/null || true
+  cat "$suggest_out" 2>/dev/null || true
 fi
+[ -n "$suggest_out" ] && rm -f "$suggest_out"
 
 if [ $emit_reminder -eq 1 ]; then
   printf '%s\n' 'REMINDER (standing rule from ~/.claude/CLAUDE.md): Before answering any question about project history, prior decisions, architecture, past bugs, or existing features, silently run /kb-query first and ground the reply in the cited [[wikilinks]]. Before any /speckit.* phase, run the matching /kb-spec phase first (pre before specify, plan before plan, tasks before tasks, implement before implement). Run /kb-spec post after /speckit.tasks. These are standing bridges — do not wait for explicit invocation.'
+  mark_seen reminded
 fi

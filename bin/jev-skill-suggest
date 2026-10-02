@@ -10,7 +10,10 @@ Follows TypeSafe's skill-suggestion cookbook (wrong skill loads 16.8% -> 7.3% on
 Usage:
   jev-skill-suggest "<prompt>"        prints a <skill_relevance> line, or nothing
   jev-skill-suggest --name "<prompt>" prints only the skill name
-Env: JEV_SKILL_SUGGEST=0 disables; JEV_TIMEOUT per request (default here 3 s). Decisions log under tag
+  --session ID: never hint the same skill twice in one session.
+Skips follow-ups (< 4 words, ack/continue in EN/AR/FR, "/" commands) and reuses a result for the same normalized
+prompt for 10 min (~/.cache/dev-stack/suggest-cache.json, 200 entries) without calling Jev.
+Env: JEV_SKILL_SUGGEST=0 disables; JEV_TIMEOUT per request (default here 2 s). Decisions log under tag
 `skill-suggest` (see `jev tune skill-suggest`). Any error -> prints nothing, exit 0: never blocks a prompt.
 """
 import glob
@@ -20,13 +23,27 @@ import json
 import os
 import re
 import sys
+import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-GATE_THRESHOLD = 0.30
-FITS_THRESHOLD = 0.30
-# A wide pick this confident skips the gate (the rerank "fits" check still applies). Tuned from the
-# decision log: question-phrased prompts ("should this be a durable workflow") fell just under the gate.
-WIDE_BYPASS_CONFIDENCE = 0.9
+# Fitted 2026-10-02 on the 738 labelled outcomes in decisions.jsonl (tag skill-suggest; 12 followed, 1.6% precision
+# at the old 0.30/0.30/0.9). Gate 0.6 + fits 0.8 + bypass 0.99: 42 shown, 7 followed (16.7%), keeping 7 of the 12
+# followed cases. Fits 0.9 alone is 13 shown / 4 followed (30.8%) but loses too many of them; the sample is small.
+GATE_THRESHOLD = 0.60
+FITS_THRESHOLD = 0.80
+# A wide pick this confident skips the gate (the rerank "fits" check still applies). 0.9 let 49 picks through
+# at 12% precision; 0.99 is 10 picks at 20%.
+WIDE_BYPASS_CONFIDENCE = 0.99
+CACHE_TTL = 600
+CACHE_MAX = 200
+SUGGEST_CACHE = os.path.expanduser("~/.cache/dev-stack/suggest-cache.json")
+# Per-session marker files written by hooks/user-prompt-kb-check.sh; this script appends `hint:<skill>` lines.
+HOOK_SEEN = os.path.expanduser("~/.cache/dev-stack/hook-seen")
+MIN_WORDS = 4
+ACK_WORDS = set("""ok okay yes yeah yep yup no nope nah continue go on ahead proceed next sure thanks thank you please
+now done k kk fine cool good great right and then
+نعم ايوه أيوه لا كمل كمّل تابع استمر يلا تمام حسنا حسناً طيب ok
+oui non d'accord dac continue continuer vas-y vasy allez ok merci bien parfait ouais""".split())
 SHORTLIST = 3
 EXCERPT_CHARS = 700
 WIDE_DESC_CHARS = 60
@@ -70,6 +87,8 @@ LIVE_DIR = os.path.expanduser("~/.claude/skills")
 # Parked skills are kept out of ~/.claude/skills so their descriptions stop loading into every session;
 # Jev still ranks them, and the hint tells the agent to read the SKILL.md directly.
 PARKED_DIR = os.path.expanduser("~/.claude/skills-parked")
+# Parked agents are ranked in the same Choice under an `agent:<name>` key.
+AGENTS_PARKED_DIR = os.environ.get("JEV_AGENTS_PARKED_DIR") or os.path.expanduser("~/.claude/agents-parked")
 
 
 def skill_files(live_dir=LIVE_DIR, parked_dir=PARKED_DIR, plugins=True):
@@ -85,7 +104,18 @@ def skill_files(live_dir=LIVE_DIR, parked_dir=PARKED_DIR, plugins=True):
     return files
 
 
+def agent_files(parked_dir=AGENTS_PARKED_DIR):
+    """Parked agent definitions: ~/.claude/agents-parked/<name>.md."""
+    return sorted(glob.glob(os.path.join(parked_dir, "*.md")))
+
+
 def hint(name, roster):
+    agent = roster.get(name, {}).get("agent")
+    if agent:
+        short = name.split(":", 1)[1]
+        return (f"<skill_relevance>Relevant agent: {short}. It is parked: delegate with "
+                f"`jdelegate --role {short} ...` (or read ~/.claude/agents-parked/{short}.md and follow it)."
+                f"</skill_relevance>")
     parked = roster.get(name, {}).get("parked")
     if parked:
         return (f"<skill_relevance>Relevant to the current request: {name}. It is a parked skill (not loaded as a "
@@ -103,7 +133,7 @@ def build_roster(roots):
     return _roster_from(files)
 
 
-def _roster_from(files):
+def _roster_from(files, agents=()):
     roster = {}
     for path, prefix, parked in sorted(files):
         try:
@@ -119,12 +149,25 @@ def _roster_from(files):
         if parked:
             entry["parked"] = path
         roster.setdefault(prefix + fm["name"], entry)  # a live copy wins over a parked one
+    for path in agents:
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        fm = frontmatter(text)
+        if not fm.get("name") or not fm.get("description"):
+            continue
+        body = re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, count=1, flags=re.S)
+        roster.setdefault("agent:" + fm["name"],
+                          {"description": fm["description"], "excerpt": body[:EXCERPT_CHARS], "agent": path})
     return roster
 
 
 def cached_roster():
-    files = skill_files()
-    sig = str(sorted((p, int(os.path.getmtime(p))) for p, _, _ in files))
+    files, agents = skill_files(), agent_files()
+    sig = str(sorted((p, int(os.path.getmtime(p))) for p, _, _ in files) +
+              sorted((p, int(os.path.getmtime(p))) for p in agents))
     try:
         with open(CACHE) as f:
             c = json.load(f)
@@ -132,7 +175,7 @@ def cached_roster():
             return c["roster"]
     except (OSError, ValueError, KeyError):
         pass
-    roster = _roster_from(files)
+    roster = _roster_from(files, agents)
     try:
         os.makedirs(os.path.dirname(CACHE), exist_ok=True)
         with open(CACHE, "w") as f:
@@ -142,22 +185,60 @@ def cached_roster():
     return roster
 
 
+def load_usage():
+    """{roster name: registry item} from capabilities.json (capability-registry.py); {} when missing or corrupt."""
+    path = os.path.join(os.environ.get("DEVSTACK_STATE") or os.path.expanduser("~/.local/state/dev-stack"),
+                        "capabilities.json")
+    try:
+        with open(path) as f:
+            items = json.load(f)["items"]
+        out = {}
+        for it in items.values():
+            if it["kind"] == "skill":
+                out[it["name"]] = it
+            elif it["kind"] == "agent":
+                out["agent:" + it["name"]] = it
+        return out
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def boost(name, usage):
+    """Wide-stage prior from real use: up to +10% for a capability used in the last 30 days. Anything with no
+    use in 30 days (a stale live skill included) or no registry entry gets none."""
+    it = (usage or {}).get(name)
+    if not it or not it.get("uses_30d"):
+        return 1.0
+    return 1.0 + 0.1 * min(it["uses_30d"], 10) / 10
+
+
+def usage_state(short, usage):
+    out = {}
+    for n in short:
+        it = usage.get(n)
+        if it:
+            out[n] = {"uses_30d": it.get("uses_30d", 0), "last_used": it.get("last_used"),
+                      "precision": it.get("precision"),
+                      "past prompts that used it": (it.get("examples") or [])[:3]}
+    return out
+
+
 def gate_score(answers):
     return (answers["acts_on_user_system"]["noul"] + answers["would_follow_documented_procedure"]["noul"]
             + (1.0 - answers["prose_suffices"]["noul"])) / 3
 
 
-def ranked(choice_answer, k):
+def ranked(choice_answer, k, usage=None):
     probs = choice_answer.get("probabilities") or {choice_answer.get("choice"): 1.0}
-    return [name for name, _ in sorted(probs.items(), key=lambda kv: -kv[1])][:k]
+    return [name for name, _ in sorted(probs.items(), key=lambda kv: -(kv[1] * boost(kv[0], usage)))][:k]
 
 
-def suggest(prompt, roster, ask_many, timeout=None):
+def suggest(prompt, roster, ask_many, timeout=None, usage=None):
     """At most one skill name for a prompt, or None for 'nothing here applies'."""
     state = {"request": prompt, "recent_context": ""}
     wide = {
         "skill": {"type": "choice",
-                  "instructions": "Which installed agent skill is most relevant to carrying out `request`?",
+                  "instructions": "Which installed agent skill (or parked `agent:` subagent) is most relevant to carrying out `request`?",
                   "criteria": {n: s["description"][:WIDE_DESC_CHARS] for n, s in roster.items()}},
         "acts_on_user_system": {"type": "noul", "instructions":
                                 "`request` asks the agent to act on the user's files, repos, accounts, devices, "
@@ -171,40 +252,136 @@ def suggest(prompt, roster, ask_many, timeout=None):
     a, _, _ = ask_many(state, wide, TAG, timeout)
     if gate_score(a) < GATE_THRESHOLD and (a["skill"].get("confidence") or 0) < WIDE_BYPASS_CONFIDENCE:
         return None
-    short = [n for n in ranked(a["skill"], SHORTLIST) if n in roster]
+    short = [n for n in ranked(a["skill"], SHORTLIST, usage) if n in roster]
     if not short:
         return None
+    rerank_state = state
+    if usage:
+        shown = usage_state(short, usage)
+        if shown:
+            rerank_state = {**state, "usage": shown}
     rerank = {"winner": {"type": "choice",
-                         "instructions": "Which of these skills does the specific thing `request` asks for?",
+                         "instructions": "Which of these skills or agents does the specific thing `request` asks for?",
                          "criteria": {n: roster[n]["description"] + "\n\n" + roster[n]["excerpt"] for n in short}}}
     for i, n in enumerate(short):
         rerank[f"fits_{i}"] = {"type": "noul", "instructions":
                                f"The skill `{n}` does the specific thing `request` asks for. "
                                f"Skill description: {roster[n]['description']}"}
-    b, _, _ = ask_many(state, rerank, TAG, timeout)
-    fits = [b[f"fits_{i}"]["noul"] for i in range(len(short)) if f"fits_{i}" in b]
-    if not fits or max(fits) < FITS_THRESHOLD:
+    b, _, _ = ask_many(rerank_state, rerank, TAG, timeout)
+    winner = b["winner"].get("choice")
+    if winner not in short:
         return None
-    return b["winner"].get("choice")
+    own = b.get(f"fits_{short.index(winner)}")
+    if not own or (own.get("noul") or 0) < FITS_THRESHOLD:  # the winner's OWN score, not another candidate's
+        return None
+    return winner
+
+
+def normalize(prompt):
+    return re.sub(r"\s+", " ", prompt).strip().lower()
+
+
+def is_follow_up(prompt):
+    """Short prompts, slash commands and pure acknowledgements ("ok continue", "نعم", "d'accord") carry no new task."""
+    p = prompt.strip()
+    if p.startswith("/"):
+        return True
+    words = re.findall(r"[\w'’-]+", normalize(p))
+    return len(words) < MIN_WORDS or all(w in ACK_WORDS for w in words)
+
+
+def cache_get(key):
+    """(hit, name) for a normalized prompt seen within CACHE_TTL; a cached 'nothing' is a hit with name None."""
+    try:
+        with open(SUGGEST_CACHE) as f:
+            e = json.load(f).get(key)
+        if e and time.time() - e["ts"] < CACHE_TTL:
+            return True, e["name"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return False, None
+
+
+def cache_put(key, name):
+    try:
+        with open(SUGGEST_CACHE) as f:
+            c = json.load(f)
+        if not isinstance(c, dict):
+            c = {}
+    except (OSError, ValueError):
+        c = {}
+    c[key] = {"ts": time.time(), "name": name}
+    if len(c) > CACHE_MAX:
+        for k in sorted(c, key=lambda k: c[k].get("ts", 0))[:len(c) - CACHE_MAX]:
+            del c[k]
+    try:
+        os.makedirs(os.path.dirname(SUGGEST_CACHE), exist_ok=True)
+        tmp = f"{SUGGEST_CACHE}.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(c, f)
+        os.replace(tmp, SUGGEST_CACHE)
+    except OSError:
+        pass
+
+
+def session_marker(session):
+    return os.path.join(HOOK_SEEN, re.sub(r"[^\w.-]", "_", session)[:100])
+
+
+def already_hinted(session, name):
+    try:
+        with open(session_marker(session)) as f:
+            return f"hint:{name}" in f.read().split("\n")
+    except OSError:
+        return False
+
+
+def mark_hinted(session, name):
+    try:
+        os.makedirs(HOOK_SEEN, exist_ok=True)
+        with open(session_marker(session), "a") as f:
+            f.write(f"hint:{name}\n")
+    except OSError:
+        pass
 
 
 def main(argv):
     if os.environ.get("JEV_SKILL_SUGGEST") == "0":
         return
     name_only = "--name" in argv
-    prompt = " ".join(a for a in argv if a != "--name").strip()
+    session = None
+    rest = []
+    it = iter(argv)
+    for a in it:
+        if a == "--session":
+            session = next(it, None)
+        elif a != "--name":
+            rest.append(a)
+    prompt = " ".join(rest).strip()
     if not prompt and not sys.stdin.isatty():
         prompt = sys.stdin.read().strip()
-    if len(prompt) < 15 or prompt.startswith("/"):
+    if len(prompt) < 15 or is_follow_up(prompt):
         return
-    jev = load_jev()
-    try:
+    key = normalize(prompt)[:2000]
+    hit, name = cache_get(key)
+    jev = None
+    roster = None
+    if not hit:
+        jev = load_jev()
+        try:
+            roster = cached_roster()
+            name = suggest(prompt[:6000], roster, jev.ask_many, float(os.environ.get("JEV_TIMEOUT", "2")),
+                           usage=load_usage())
+        except (jev.JevError, KeyError, TypeError):
+            return
+        cache_put(key, name)
+    if not name or (session and already_hinted(session, name)):
+        return
+    if roster is None:
         roster = cached_roster()
-        name = suggest(prompt[:6000], roster, jev.ask_many, float(os.environ.get("JEV_TIMEOUT", "3")))
-    except (jev.JevError, KeyError, TypeError):
-        return
-    if name:
-        print(name if name_only else hint(name, roster))
+    if session:
+        mark_hinted(session, name)
+    print(name if name_only else hint(name, roster))
 
 
 if __name__ == "__main__":
