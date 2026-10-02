@@ -15,15 +15,80 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
 | 3. Architectural plan      | `/kb-spec plan` → `/speckit.plan` → `writing-plans` (obra)                             | inline         |
 | 4. Task breakdown          | `/kb-spec tasks` → `/speckit.tasks`                                                    | inline         |
+| 4b. **Branch (MANDATORY)** | **`git checkout -b <NNN-short-name>` — branch must match the spec dir. Never implement on `main`.** | inline |
 | 5a. Implement (solo)       | `executing-plans` (obra) in current session                                            | Sonnet         |
 | 5b. Implement (fan-out)    | `dispatching-parallel-agents` + `subagent-driven-development` (obra)                   | Opus → Sonnet  |
 | 6. Test-first discipline   | `test-driven-development` (obra) inside each worker                                    | Sonnet         |
+| 6a. Approve + lock checks | list checks in plain words → wait for user OK → `lock-checks approve <tests>` → loops/workers call `lock-checks verify` after each round; a failing verify = round undone | inline |
 | 7. Debug if something fails| `systematic-debugging` (obra)                                                          | Sonnet         |
 | 8. Verify before claiming  | `verification-before-completion` (obra); UI change → `jev-browse --flows` first (Jev System 1 agent, see `skills/jev/references/e2e-browsing.md`) | Sonnet |
 | 9. Request review          | `jev-review diff` first (System 1 screen): its `route` picks the reviewer alone, plus `/codex`, or plus `/panel`; then `requesting-code-review` (obra) | Sonnet |
 | 10. Apply review           | `receiving-code-review` (obra)                                                         | Sonnet         |
-| 11. Finish branch          | `finishing-a-development-branch` (obra) — optional: `using-git-worktrees`              | inline         |
+| 11. Finish branch          | `finishing-a-development-branch` (obra) — **always ends in a PR** — optional: `using-git-worktrees` | inline |
 | 12. Capture knowledge      | `/kb-spec post` → `/kb-docs-sync` → `/kb-compile` → `/kb-lint`                         | inline         |
+
+## Phase 4b: branch before you implement (non-negotiable)
+
+**One spec = one branch = one PR.** The branch name must equal the spec directory name, because `kb-spec` resolves the active feature via `$SPECIFY_FEATURE` → current git branch `NNN-short-name` → *else* highest `NNN` under `specs/`. If the branch does not exist, that resolution silently falls through to the last case and every feature collapses onto whatever branch is checked out — in practice, `main`.
+
+```bash
+# specs/012-adw-quality-gates  →  branch 012-adw-quality-gates
+git checkout -b "$(basename specs/012-adw-quality-gates)"
+```
+
+`/speckit.specify` already does this (`create-new-feature.sh` runs `git checkout -b` and exports `SPECIFY_FEATURE`). When a spec dir is created by hand or by `/kb-spec` without going through `/speckit.specify`, **you must create the branch yourself** before Phase 5.
+
+Enforcement is mechanical, not advisory: `~/.githooks/pre-commit` (global `core.hooksPath`) refuses commits on `main`/`master`/`production`. Merges, rebases, cherry-picks and reverts are allowed, so PRs still land normally. If you genuinely need to bypass it:
+
+```bash
+ALLOW_MAIN_COMMIT=1 git commit ...          # once
+git config devstack.allowMainCommit true    # this repo, permanently
+```
+
+Never reach for the override to route around a missing branch — create the branch instead.
+
+## Phase 6a: lock the checks before building
+
+The scorer must be untouchable by the builder, or a loop can pass by weakening the tests.
+
+1. Write the checks before the code (Phase 6).
+2. Run `lock-checks list <tests>` and show the user each check in plain words. Wait for an explicit OK.
+3. `lock-checks approve <tests>` moves them to `tests/locked/` (override with `LOCKED_DIR`), adds an `Edit(...)` deny rule (covers all file-editing tools) to `.claude/settings.json`, commits (rolling everything back if the commit fails), records the approved tree hash in `$(git rev-parse --git-common-dir)/lock-checks/manifest`, and installs a git pre-commit hook in the common git dir (so linked worktrees are covered) that rejects any later commit touching a locked dir.
+4. The builder may never edit the locked dir. Loops and workers run `lock-checks verify` after every round; `verify` compares the locked dir against the recorded tree, so committed (even `--no-verify`) and uncommitted tampering both exit 1, which means the round is undone.
+5. Only a human runs `lock-checks unlock` (it refuses to overwrite an existing `tests/<sub>`) and commits the result with the human-only env bypass (see `lock-checks -h`). An agent that needs a check changed stops and asks.
+
+## Phase 11 gate: prove the branch and the PR exist
+
+Do not report a feature as finished on assertion. Run these and paste the output — evidence, not claims:
+
+```bash
+# 1. Not on a protected branch
+BR=$(git rev-parse --abbrev-ref HEAD)
+case "$BR" in main|master|production)
+  echo "FAIL: still on $BR — the work was never branched"; exit 1 ;;
+esac
+echo "OK branch: $BR"
+
+# 2. Branch matches the spec dir (one spec = one branch = one PR)
+[ -d "specs/$BR" ] && echo "OK spec: specs/$BR" || echo "WARN: no specs/$BR"
+
+# 3. A PR exists for this branch
+gh pr view --json url,state --jq '"OK pr: \(.url) [\(.state)]"' \
+  || echo "FAIL: no PR — run: gh pr create"
+
+# 4. The spec carries the PR back (loop closed, both directions)
+grep -q "^\*\*PR\*\*:" "specs/$BR/spec.md" 2>/dev/null \
+  && echo "OK spec stamped with PR" \
+  || echo "FAIL: specs/$BR/spec.md has no **PR**: line — run: /kb-spec post"
+
+# 5. Repo can actually receive a PR
+git remote get-url origin >/dev/null 2>&1 \
+  || echo "BLOCKED: no git remote — no PR is possible until one exists"
+```
+
+Check 5 is not hypothetical: several local projects (`tokyo`, `up`, `vrcd`, `xavork-saas`, `law`, `software-factory`) have **no remote**, so every PR step silently cannot run there. Report that as blocked rather than claiming success.
+
+For a large change, split it with `gh stack` instead of one giant PR — the `gh-stack` skill is installed.
 
 ## Decision: solo vs fan-out (NIU-based, threshold = 2)
 
@@ -57,14 +122,15 @@ Examples:
 
 ## Who is the controller?
 
-**You (the current Claude session) are the controller of all skills and the god of dispatch.** The orchestrator is a *role*, not necessarily a separate subagent. You decide how it gets spawned:
+**You (the current Claude session) are the controller of all skills and the god of dispatch.** The orchestrator is a *role*, and the main session always plays it: decompose in this session, whatever your model. All 11 dev-stack agents (`orchestrator`, `planner`, the specialists, ...) are parked in `~/.claude/agents-parked`, so `Agent(subagent_type: "orchestrator" | "<specialist>")` does not resolve. Dispatch workers like this:
 
-| Current session model | Spawn pattern                                                    |
-|-----------------------|------------------------------------------------------------------|
-| **Opus**              | YOU are the orchestrator. Do the decomposition in this session, spawn Sonnet/Haiku workers directly via the `Agent` tool. Do NOT spawn a separate Opus orchestrator subagent — that's wasted indirection. |
-| **Sonnet** or **Haiku** | Spawn the dedicated `orchestrator` subagent (Opus) via `Agent(subagent_type: "orchestrator", ...)`. Let it do the decomposition, then it spawns workers. |
+| Need | How |
+|------|-----|
+| One worker | `jdelegate --cwd <repo> --name <label> [--role <specialist>] "<brief>"`. Jev routes the model and, when omitted, picks the role, skills and MCP servers. |
+| Independent units (NIU ≥ 2) | One `jdelegate` call per unit, each started in the background in the same turn; collect the results when they finish. |
+| A parked agent through the `Agent` tool | Only after `bash scripts/park-skills.sh unpark-agent <name>`; park it again when done. |
 
-When in doubt, check the model name in your environment and apply the rule.
+When in doubt about the worker's model, let `jdelegate` route it.
 
 ### Model selection per worker
 
@@ -87,11 +153,11 @@ The full classifier and per-role defaults live in `~/code/dev-stack/agents/orche
 2. **Never skip phase 8** — `verification-before-completion` runs the full test suite and the user's definition of done. Saying "done" without it is the most common failure mode.
 3. **Capture knowledge in phase 12** — without `/kb-spec post` + `/kb-compile`, the next feature will not benefit from what you just learned.
 4. **Fan-out guardrail** — never spawn more than 4 parallel workers without user confirmation. Cost and debugging difficulty grow non-linearly past that.
-5. **Fan-out tripwire** — if NIU ≥ 2, you MUST spawn parallel workers via the `Agent` tool BEFORE doing any edits yourself. Doing the work serially in the parent session when fan-out is appropriate is the second most common failure mode.
+5. **Fan-out tripwire** — if NIU ≥ 2, you MUST start parallel workers (`jdelegate` calls in the background) BEFORE doing any edits yourself. Doing the work serially in the parent session when fan-out is appropriate is the second most common failure mode.
 
 ## The team roster (registered subagents)
 
-When you fan out, you spawn one of these specialist agents via `Agent(subagent_type: "<name>", model: "<model>", prompt: "...")`. They are real Claude Code subagents installed at `~/.claude/agents/` by `dev-stack/install.sh`.
+When you fan out, you hand one of these specialist roles to a worker with `jdelegate --role <name> ...` (the role definition is inlined into the worker's prompt). The definitions are installed by `dev-stack/install.sh` and currently parked in `~/.claude/agents-parked`; `jdelegate` finds them there. Use the `Agent` tool with one of them only after `bash scripts/park-skills.sh unpark-agent <name>`.
 
 | Agent name           | Default model | Specialty                                      | Loads on startup                                                            |
 |----------------------|---------------|------------------------------------------------|-----------------------------------------------------------------------------|
@@ -112,7 +178,7 @@ If the user says "build X" / "implement Y" / "fix Z" and there is no `specs/<fea
 
 1. Phase 0 — `/kb-query` (mandatory)
 2. **Compute NIU yourself** from the user's request and any files mentioned
-3. If NIU ≥ 2 — spawn the `planner` agent first to produce a tasks.md substitute, then immediately spawn specialists from its output, all in one message
+3. If NIU ≥ 2 — produce the tasks.md substitute yourself (or `jdelegate --role planner`), then immediately dispatch specialists from its output, all in one turn
 4. If NIU = 1 — solo mode, do the work in the parent session
 5. Phases 6-12 run as normal after workers return
 
@@ -120,7 +186,7 @@ This skips Spec Kit entirely for small-to-medium features. Use the full Spec Kit
 
 ## Model assignment
 
-- **Opus** → the orchestrator only. Used when fan-out mode is chosen and the orchestrator must decompose tasks.md into work packets.
+- **Opus** → the main session as orchestrator (when it runs on Opus), decomposing tasks.md into work packets; workers get whatever `jdelegate` routes.
 - **Sonnet** → the default for all worker agents, implementation, debugging, review.
 - **Haiku** → cheap one-shot lookups the orchestrator needs (file existence, single-file read summaries, "does this symbol exist"). Spawn via `Agent(model: "haiku", ...)`.
 
@@ -219,7 +285,7 @@ This is the canonical map of how all 39 installed skills relate to each other. k
                           ▼                                   ▼
               ┌──────────────────────┐         ┌──────────────────────────────┐
               │ Phase 5a: SOLO       │         │ Phase 5b: FAN-OUT            │
-              │ executing-plans      │         │ Opus orchestrator (Agent)    │
+              │ executing-plans      │         │ Main-session orchestrator    │
               │ in current session   │         │  ↓                           │
               │ Sonnet               │         │ dispatching-parallel-agents  │
               └──────────┬───────────┘         │  ↓                           │
