@@ -642,3 +642,84 @@ test('quota: review and language chains follow quota but never gain GPT elsewher
   const impl = quotaRoute({ cliproxy: win(0.99, 0.99), 'opencode-go': win(0.99, 0.99), commandcode: win(0.99, 0.99), 'openai-codex': win(0, 0) });
   assert.doesNotMatch(impl, /openai-codex/);
 });
+
+// ── W4: the worker writes exit/out.log itself; `jdelegate wait` collects them ──
+test('W4 run.sh writes exit via an EXIT trap and opencode/pi workers also write out.log', () => {
+  for (const harness of ['opencode', 'pi']) {
+    const r = dry(['--harness', harness].slice(0, 0));
+    assert.equal(r.status, 0);
+  }
+  const r = dry([]);
+  assert.match(r.script, /trap .*exit.* EXIT/);
+});
+
+test('W4 dry-run pi and opencode scripts produce out.log', () => {
+  writeFileSync(tiers + '.w4', JSON.stringify({ tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['opencode-go/x']])) }));
+  const run = (h) => spawnSync(process.execPath, [JD, '--dry-run', '--harness', h, '--cwd', repo, 'do the thing'], { encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers + '.w4', JDELEGATE_CACHE: join(tmp, 'cache'), JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0' } });
+  const o = run('opencode'); const rs = readFileSync(o.stdout.match(/dry-run (\S+)/)[1] + '/run.sh', 'utf8');
+  assert.match(rs, /tee '[^']*out\.log'/);
+});
+
+test('W4 killing the wrapper leaves exit and out.log in the run dir and `wait` returns them', async () => {
+  const wcache = join(tmp, 'wcache');
+  stub('claude', 'sleep 2; echo WORKER-RESULT-LINE');
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'w4job', 'do the thing'], {
+    stdio: 'ignore', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: wcache, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0' } });
+  let runDir;
+  for (let i = 0; i < 100 && !runDir; i++) { await new Promise((r) => setTimeout(r, 100)); try { runDir = readdirSync(wcache).map((n) => join(wcache, n)).find((p) => existsSync(join(p, 'run.sh'))); } catch {} }
+  assert.ok(runDir, 'run dir created');
+  await new Promise((r) => setTimeout(r, 300));
+  child.kill('SIGKILL');
+  const w = spawnSync(process.execPath, [JD, 'wait', 'w4job'], { encoding: 'utf8', timeout: 20000, env: { ...process.env, JDELEGATE_CACHE: wcache } });
+  assert.equal(w.status, 0, w.stderr + w.stdout);
+  assert.ok(existsSync(join(runDir, 'exit')) && existsSync(join(runDir, 'out.log')));
+  assert.match(w.stdout, /exit 0/);
+  assert.match(w.stdout, /WORKER-RESULT-LINE/);
+  const w2 = spawnSync(process.execPath, [JD, 'wait', runDir], { encoding: 'utf8', timeout: 20000 });
+  assert.match(w2.stdout, /WORKER-RESULT-LINE/);
+});
+
+// ── W5: no opencode for jobs that need a shell ──
+const w5Tiers = join(tmp, 'w5-tiers.json');
+write(w5Tiers, JSON.stringify({
+  provider_priority: { 'opencode-go': 0, cliproxy: 1 },
+  tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test']])),
+  kinds: { code: { T3: ['opencode-go/deepseek-v4.1-flash', 'cliproxy/claude-haiku-4-5-20251001'] } },
+}));
+test('W5 a brief that needs a shell never goes to opencode', () => {
+  for (const words of [['git', 'commit'], ['run', 'the', 'tests'], ['then', 'lint'], ['use', 'bash']]) {
+    const out = printRoute(words, { JEV_ROUTER_CONFIG: w5Tiers });
+    assert.match(out, /claude · cliproxy\/claude-haiku/, words.join(' ') + ': ' + out);
+  }
+  assert.match(printRoute(['rename', 'a', 'variable'], { JEV_ROUTER_CONFIG: w5Tiers }), /opencode · opencode-go\/deepseek-v4\.1-flash/);
+});
+
+// ── W8: agy always bypasses permissions; codex usage limit marks codex exhausted and falls back ──
+test('W8 agy relay runs headless with --dangerously-skip-permissions by default', () => {
+  const relay = join(homedir(), '.claude', 'skills', 'agy-delegate', 'scripts', 'relay.mjs');
+  const agyLog = join(tmp, 'agy-argv.log');
+  stub('agy', `echo "$@" >> "${agyLog}"; [ "$1" = changelog ] && echo "1.0.16: x"; echo done`);
+  write(join(tmp, 'brief.txt'), 'hello');
+  spawnSync(process.execPath, [relay, '--brief', join(tmp, 'brief.txt'), '--cd', repo, '--out-dir', join(tmp, 'agyout')], { encoding: 'utf8', timeout: 20000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  assert.match(readFileSync(agyLog, 'utf8'), /--dangerously-skip-permissions/);
+});
+
+test('W8 a codex usage limit marks codex exhausted until the printed reset and the run falls back to the next tier', () => {
+  const ex = join(tmp, 'exhausted.json');
+  const cache = join(tmp, 'cx-cache');
+  stub('codex', `echo "You've hit your usage limit. Upgrade to Pro or try again at Oct 9th, 2030 3:14 PM."; exit 1`);
+  stub('claude', 'echo FALLBACK-CLAUDE-RAN');
+  write(join(tmp, 'cx-tiers.json'), JSON.stringify({
+    tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test']])),
+    kinds: { review: { T3: ['openai-codex/gpt-6.1-sol', 'cliproxy/claude-opus-5-5'] } },
+  }));
+  jevStub();
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--role', 'reviewer', '--cwd', repo, 'review it'], { encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: join(tmp, 'cx-tiers.json'), JEV_EXHAUSTED_FILE: ex, JDELEGATE_CACHE: cache,
+      JDELEGATE_AGENT_DIRS: `${agents}:${agentsParked}`, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_AUTO_ROLE: '0' } });
+  assert.match(r.stdout, /FALLBACK-CLAUDE-RAN/, r.stdout + r.stderr);
+  const j = JSON.parse(readFileSync(ex, 'utf8'));
+  assert.equal(j['openai-codex'], new Date('Oct 9 2030 3:14 PM').getTime());
+});
