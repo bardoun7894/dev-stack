@@ -14,3 +14,4 @@ step() {  # step <label> <cmd...>
 step scan python3 "$S/capability-scan.py"
 step outcomes python3 "$S/capability-outcomes.py"
 step registry python3 "$S/capability-registry.py" build
+step quota "$HERE/quota-snapshot"

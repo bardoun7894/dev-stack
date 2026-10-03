@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -537,4 +537,108 @@ test('a coding brief with another role stays on claude, never GPT', () => {
 
 test('a language brief still routes to GPT', () => {
   assert.match(printRoute([], { KIND_ANSWER: 'language' }), /codex · openai-codex\/gpt-6\.1-sol/);
+});
+
+// ── quota-aware ranking (tiers.json quota_policy + quota.json) ──────────
+const quotaTiers = join(tmp, 'quota-tiers.json');
+const quotaChain = ['cliproxy/claude-sonnet-5-5', 'cliproxy/claude-opus-5-5', 'opencode-go/deepseek-v4-pro', 'commandcode/MiniMaxAI/MiniMax-M3', 'openrouter/nvidia/nemotron'];
+const quotaConfig = (extra = {}) => write(quotaTiers, JSON.stringify({
+  metered_providers: ['openrouter'],
+  provider_priority: { cliproxy: 0, 'openai-codex': 0, 'opencode-go': 1, commandcode: 2, openrouter: 3 },
+  quota_policy: { warm: 0.7, hot: 0.9, stale_minutes: 20 },
+  tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, quotaChain])),
+  kinds: { review: { T3: ['openai-codex/gpt-6.1-sol', 'cliproxy/claude-opus-5-5'] }, language: { T3: ['openai-codex/gpt-6.1-sol', 'cliproxy/claude-sonnet-5-5'] } },
+  ...extra,
+}));
+const quotaFile = join(tmp, 'quota.json');
+const win = (five_hour, weekly, monthly = null) => ({ five_hour, weekly, monthly, resets: {}, source: 'api', at: new Date().toISOString(), note: '' });
+const writeQuota = (providers, at = new Date()) => write(quotaFile, JSON.stringify({ at: at.toISOString(), providers }));
+const failingSnapshot = join(bin, 'quota-snapshot-fail');
+stub('quota-snapshot-fail', 'echo called >> "$SNAP_LOG"; exit 1');
+const snapLog = join(tmp, 'snap.log');
+const quotaRoute = (providers, { at, env = {}, args = [] } = {}) => {
+  quotaConfig();
+  if (providers === null) { try { unlinkSync(quotaFile); } catch {} } else writeQuota(providers, at);
+  write(snapLog, '');
+  const out = printRoute(args, { JEV_ROUTER_CONFIG: quotaTiers, JEV_QUOTA_FILE: quotaFile, JDELEGATE_QUOTA_SNAPSHOT: failingSnapshot, SNAP_LOG: snapLog, ...env });
+  return out;
+};
+const first = (out) => out.match(/→ \w+ · (\S+)/)?.[1];
+
+test('quota: healthy subscriptions keep the chain order', () => {
+  const out = quotaRoute({ cliproxy: win(0.1, 0.2), 'opencode-go': win(0.1, 0.1), commandcode: win(0.1, 0.1) });
+  assert.equal(first(out), 'cliproxy/claude-sonnet-5-5');
+  assert.doesNotMatch(out, /quota:/);
+});
+
+test('quota: cliproxy weekly 0.95 drops behind the next healthy subscription and says why', () => {
+  const out = quotaRoute({ cliproxy: win(0.1, 0.95), 'opencode-go': win(0.1, 0.1), commandcode: win(0.1, 0.1) });
+  assert.equal(first(out), 'opencode-go/deepseek-v4-pro');
+  assert.match(out, /quota: cliproxy weekly 95% → demoted/);
+});
+
+test('quota: warm is ranked after healthy, hot after warm; chain order inside a bucket', () => {
+  // cliproxy hot (0.95), opencode-go warm (0.8), commandcode healthy
+  assert.equal(first(quotaRoute({ cliproxy: win(0.1, 0.95), 'opencode-go': win(0.8, 0.1), commandcode: win(0.1, 0.1) })), 'commandcode/MiniMaxAI/MiniMax-M3');
+  // cliproxy hot, opencode-go warm, commandcode hot -> warm one first
+  assert.equal(first(quotaRoute({ cliproxy: win(0.1, 0.95), 'opencode-go': win(0.8, 0.1), commandcode: win(0.95, 0.1) })), 'opencode-go/deepseek-v4-pro');
+  // all hot -> chain order again, still used
+  assert.equal(first(quotaRoute({ cliproxy: win(0.95, 0.1), 'opencode-go': win(0.1, 0.99), commandcode: win(0.91, 0.1) })), 'cliproxy/claude-sonnet-5-5');
+});
+
+test('quota: the most-used window decides, monthly included', () => {
+  const out = quotaRoute({ cliproxy: win(0.1, 0.1), 'opencode-go': win(0.1, 0.1, 0.93), commandcode: win(0.1, 0.1) }, { args: ['--harness', 'opencode'] });
+  assert.match(out, /no live model|opencode-go/);
+  const out2 = quotaRoute({ cliproxy: win(0.95, 0.1), 'opencode-go': win(0.1, 0.1, 0.93), commandcode: win(0.1, 0.1) });
+  assert.equal(first(out2), 'commandcode/MiniMaxAI/MiniMax-M3');
+  assert.match(out2, /opencode-go monthly 93% → demoted/);
+});
+
+test('quota: metered stays last even when every subscription is hot', () => {
+  const out = quotaRoute({ cliproxy: win(0.99, 0.99), 'opencode-go': win(0.99, 0.99), commandcode: win(0.99, 0.99) });
+  assert.doesNotMatch(first(out), /openrouter/);
+});
+
+test('quota: a provider with unknown quota (error / absent) uses the static priority', () => {
+  const err = { five_hour: null, weekly: null, monthly: null, resets: {}, source: 'error', note: 'x' };
+  // cliproxy unknown -> static 0, wins over opencode-go healthy (bucket 0, later index)
+  assert.equal(first(quotaRoute({ cliproxy: err, 'opencode-go': win(0.1, 0.1) })), 'cliproxy/claude-sonnet-5-5');
+  // opencode-go unknown (static 1) is behind a healthy commandcode (bucket 0) when cliproxy is hot
+  assert.equal(first(quotaRoute({ cliproxy: win(0.95, 0.1), 'opencode-go': err, commandcode: win(0.1, 0.1) })), 'commandcode/MiniMaxAI/MiniMax-M3');
+});
+
+test('quota: a missing file triggers one snapshot attempt; failure falls back to the static ranking', () => {
+  const out = quotaRoute(null);
+  assert.equal(first(out), 'cliproxy/claude-sonnet-5-5');
+  assert.equal(readFileSync(snapLog, 'utf8').trim().split('\n').length, 1);
+});
+
+test('quota: a fresh file is not refreshed; a stale one is, and the stale data is still used when the refresh fails', () => {
+  quotaRoute({ cliproxy: win(0.1, 0.95), 'opencode-go': win(0.1, 0.1) });
+  assert.equal(readFileSync(snapLog, 'utf8').trim(), '');
+  const out = quotaRoute({ cliproxy: win(0.1, 0.95), 'opencode-go': win(0.1, 0.1) }, { at: new Date(Date.now() - 60 * 60_000) });
+  assert.equal(readFileSync(snapLog, 'utf8').trim().split('\n').length, 1);
+  assert.equal(first(out), 'opencode-go/deepseek-v4-pro');
+});
+
+test('quota: a stale file is replaced by a successful snapshot', () => {
+  stub('quota-snapshot-ok', `echo '{"at":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","providers":{"cliproxy":{"five_hour":0.1,"weekly":0.97,"monthly":null,"source":"api"}}}' > "$QUOTA_SNAPSHOT_OUT"`);
+  const out = quotaRoute({ cliproxy: win(0.1, 0.1), 'opencode-go': win(0.1, 0.1) }, { at: new Date(Date.now() - 60 * 60_000), env: { JDELEGATE_QUOTA_SNAPSHOT: join(bin, 'quota-snapshot-ok') } });
+  assert.equal(first(out), 'opencode-go/deepseek-v4-pro');
+});
+
+test('quota: without quota_policy nothing changes', () => {
+  quotaConfig({ quota_policy: undefined });
+  writeQuota({ cliproxy: win(0.1, 0.99), 'opencode-go': win(0.1, 0.1) });
+  const out = printRoute([], { JEV_ROUTER_CONFIG: quotaTiers, JEV_QUOTA_FILE: quotaFile });
+  assert.equal(first(out), 'cliproxy/claude-sonnet-5-5');
+});
+
+test('quota: review and language chains follow quota but never gain GPT elsewhere', () => {
+  const out = quotaRoute({ 'openai-codex': win(0.1, 0.95), cliproxy: win(0.1, 0.1) }, { args: ['--role', 'reviewer'] });
+  assert.equal(first(out), 'cliproxy/claude-opus-5-5');
+  const healthy = quotaRoute({ 'openai-codex': win(0.1, 0.1), cliproxy: win(0.1, 0.1) }, { args: ['--role', 'reviewer'] });
+  assert.equal(first(healthy), 'openai-codex/gpt-6.1-sol');
+  const impl = quotaRoute({ cliproxy: win(0.99, 0.99), 'opencode-go': win(0.99, 0.99), commandcode: win(0.99, 0.99), 'openai-codex': win(0, 0) });
+  assert.doesNotMatch(impl, /openai-codex/);
 });

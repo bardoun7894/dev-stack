@@ -278,6 +278,43 @@ const alive = (ref) => {
 const harnessFor = (ref) =>
   ({ cliproxy: "claude", "openai-codex": "codex", "opencode-go": "opencode" })[provider(ref)] ?? "pi";
 
+// Quota-aware ranking (tiers.json quota_policy + bin/quota-snapshot). No quota_policy -> the static ranking above.
+const POLICY = CONFIG.quota_policy;
+const QUOTA_FILE = process.env.JEV_QUOTA_FILE || join(HOME, ".cache", "jev-router", "quota.json");
+const QUOTA_SNAPSHOT = process.env.JDELEGATE_QUOTA_SNAPSHOT || join(dirname(realpathSync(process.argv[1])), "quota-snapshot");
+const WINDOW_LABEL = { five_hour: "5h", weekly: "weekly", monthly: "monthly" };
+let quotaMemo;
+/** The quota file, refreshed synchronously (4 s cap) when older than stale_minutes; a stale or missing file is kept when the refresh fails. */
+function loadQuota() {
+  if (!POLICY) return undefined;
+  if (quotaMemo !== undefined) return quotaMemo || undefined;
+  const fresh = (j) => j?.providers && Date.now() - Date.parse(j.at) <= (POLICY.stale_minutes ?? 20) * 60_000;
+  let j = readJson(QUOTA_FILE);
+  if (!fresh(j)) {
+    try { spawnSync(QUOTA_SNAPSHOT, [], { timeout: 4000, stdio: "ignore", env: { ...process.env, QUOTA_SNAPSHOT_OUT: QUOTA_FILE } }); } catch { /* keep the stale file */ }
+    j = readJson(QUOTA_FILE) ?? j;
+  }
+  quotaMemo = j?.providers ? j.providers : null;
+  return quotaMemo || undefined;
+}
+/** Used fractions of a provider's known windows, or undefined when nothing is known. */
+function windowsOf(quota, prov) {
+  const e = quota?.[prov];
+  if (!e || e.source === "error") return undefined;
+  const w = Object.keys(WINDOW_LABEL).filter((k) => typeof e[k] === "number").map((k) => [k, e[k]]);
+  return w.length ? w : undefined;
+}
+function bucketOf(ref, quota) {
+  const prov = provider(ref);
+  if (METERED.has(prov)) return { bucket: 9 };
+  const w = windowsOf(quota, prov);
+  if (!w) return { bucket: PRIORITY[prov] ?? 2 };
+  const top = Math.max(...w.map(([, f]) => f));
+  const bucket = top >= (POLICY.hot ?? 0.9) ? 3 : top >= (POLICY.warm ?? 0.7) ? 2 : 0;
+  const driven = w.filter(([, f]) => f >= (POLICY.warm ?? 0.7)).map(([k, f]) => `${WINDOW_LABEL[k]} ${Math.round(f * 100)}%`);
+  return { bucket, note: bucket ? `${prov} ${driven.join(", ")} → demoted` : undefined };
+}
+
 function pick(d) {
   const thinkIdx = Math.max(0, THINK.indexOf(CONFIG.thinking?.[d.tier] ?? "medium"));
   const thinking = THINK[Math.min(THINK.length - 1, d.role === "thinker" ? Math.max(thinkIdx + 1, 2) : thinkIdx)];
@@ -285,15 +322,19 @@ function pick(d) {
     return { harness: "agy", ref: `agy/${CONFIG.agy_model ?? "gemini-3.8-flash-high"}`, thinking, why: `UI work (ui ${d.ui.toFixed(2)}) → agy` };
   }
   const chain = [...new Set([...(CONFIG.kinds?.[d.kind]?.[d.tier] ?? []), ...(CONFIG.tiers?.[d.tier] ?? [])])];
-  const ranked = chain
+  const quota = loadQuota();
+  const scored = chain
     .filter(alive)
-    .map((ref, i) => ({ ref, i, rank: (METERED.has(provider(ref)) ? 3 : (PRIORITY[provider(ref)] ?? 2)) }))
-    .sort((x, y) => x.rank - y.rank || x.i - y.i)
-    .map((x) => x.ref)
-    .filter((ref) => !opt.harness || harnessFor(ref) === opt.harness);
+    .map((ref, i) => quota
+      ? { ref, i, ...bucketOf(ref, quota) }
+      : { ref, i, bucket: METERED.has(provider(ref)) ? 3 : (PRIORITY[provider(ref)] ?? 2) })
+    .sort((x, y) => x.bucket - y.bucket || x.i - y.i)
+    .filter((x) => !opt.harness || harnessFor(x.ref) === opt.harness);
+  const ranked = scored.map((x) => x.ref);
+  const demoted = [...new Set(scored.map((x) => x.note).filter(Boolean))];
   const ref = ranked[0];
   if (!ref) return undefined;
-  return { harness: harnessFor(ref), ref, thinking, why: `${d.kind}·${d.tier} chain, first live` };
+  return { harness: harnessFor(ref), ref, thinking, why: `${d.kind}·${d.tier} chain, first live${demoted.length ? `; quota: ${demoted.join("; ")}` : ""}` };
 }
 
 // ── 3. worker command ───────────────────────────────────────────────────
@@ -571,6 +612,7 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
 
 if (opt.dryRun) {
   const { run } = makeRun(opt.brief, p, d.tier);
+  writeFileSync(join(run, "dry-run"), "");  // quota-snapshot does not count dry runs as provider calls
   let mcpShown = "";
   try {
     const cfg = JSON.parse(readFileSync(join(run, "mcp.json"), "utf8"));
