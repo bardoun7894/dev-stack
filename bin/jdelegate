@@ -514,6 +514,8 @@ async function selectWorker(harness) {
 // With an explicit --harness the selections do not depend on the route: start them now, alongside it.
 const earlySelection = opt.harness && !opt.print ? selectWorker(opt.harness) : undefined;
 const d = await routeDecision();
+// Owner rule 2026-10-03: a reviewer worker runs on the review chain (GPT first, Opus fallback), whatever kind the brief routed to.
+if (opt.role === "reviewer" && CONFIG.kinds?.review) d.kind = "review";
 const p = pick(d);
 let head =
   `[jdelegate] ${d.tier} ${d.kind}·${d.role} (jev @${(d.conf ?? 0).toFixed(2)}, ui ${d.ui.toFixed(2)}, ${d.ms}ms` +
