@@ -164,7 +164,7 @@ fs.appendFileSync(\`${'$'}{e.JEV_LOG}\`, (a[0] === 'raw' ? 'raw ' + input.replac
 setTimeout(() => {
   if (a[0] !== 'raw' || e.RAW_FAIL) process.exit(3);
   const qs = JSON.parse(input).questions; const answers = {};
-  if (qs.tier) Object.assign(answers, { tier: { choice: 'T3', confidence: 0.9 }, kind: { choice: 'code', confidence: 0.9 }, role: { choice: 'doer', confidence: 0.9 }, arabic: { noul: 0.01 }, ui: { noul: 0.02 } });
+  if (qs.tier) Object.assign(answers, { tier: { choice: 'T3', confidence: 0.9 }, kind: { choice: e.KIND_ANSWER || 'code', confidence: 0.9 }, role: { choice: 'doer', confidence: 0.9 }, arabic: { noul: Number(e.ARABIC || 0.01) }, ui: { noul: 0.02 } });
   else for (const k of Object.keys(qs)) {
     const kv = (e.MCP_SCORES || '').split(',').find((x) => k === 'mcp:' + x.split('=')[0]);
     answers[k] = e.RAW_BAD === k ? { oops: 1 } : k === 'role' ? { choice: e.ROLE_ANSWER || 'none', confidence: Number(e.ROLE_CONF || 0.9) } : { noul: kv ? Number(kv.split('=')[1]) : 0.1 };
@@ -503,4 +503,38 @@ test('--full on claude with an explicit --role or --skill warns and exits 2', ()
     assert.match(r.stderr, /--full/);
   }
   assert.equal(rdry(['--full']).status, 0);
+});
+
+// Owner rule 2026-10-03: GPT only for review and language; implementers never get GPT.
+const ownerTiers = join(tmp, 'owner-tiers.json');
+write(ownerTiers, JSON.stringify({
+  tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test']])),
+  kinds: {
+    code: { T3: ['cliproxy/claude-sonnet-5-5'] },
+    review: { T3: ['openai-codex/gpt-6.1-sol', 'cliproxy/claude-opus-5-5'] },
+    language: { T3: ['openai-codex/gpt-6.1-sol'] },
+  },
+}));
+const printRoute = (args, env = {}) => {
+  jevStub();
+  writeFileSync(jevLog, '');
+  return spawnSync(process.execPath, [JD, '--print', '--cwd', repo, ...args, 'do the thing'], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: ownerTiers,
+      JDELEGATE_CACHE: join(tmp, 'cache'), JDELEGATE_AGENT_DIRS: `${agents}:${agentsParked}`, JDELEGATE_SELECT_CACHE: '0', ...env },
+  }).stdout;
+};
+
+test('--role reviewer routes to the review chain: codex gpt-6.1-sol', () => {
+  assert.match(printRoute(['--role', 'reviewer']), /codex · openai-codex\/gpt-6\.1-sol .*review·T3/);
+});
+
+test('a coding brief with another role stays on claude, never GPT', () => {
+  const out = printRoute(['--role', 'debugger']);
+  assert.match(out, /claude · cliproxy\/claude-sonnet-5-5/);
+  assert.doesNotMatch(out, /openai-codex/);
+});
+
+test('a language brief still routes to GPT', () => {
+  assert.match(printRoute([], { KIND_ANSWER: 'language' }), /codex · openai-codex\/gpt-6\.1-sol/);
 });
