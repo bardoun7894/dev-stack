@@ -40,7 +40,7 @@ step() {
   tail=$(grep -v '^[[:space:]]*$' "$TMP" | tail -n 1 | tr -d '\r' | cut -c1-160)
   if [ $ok = 1 ]; then echo "STEP $part:$label PASS $tail"; [ "$istest" = 1 ] && cat "$TMP" >> "$FULL"
   else echo "STEP $part:$label FAIL rc=$rc $tail"; cat "$TMP" >> "$FULL"; ANYFAIL=1; fi
-  return $ok
+  return $((1 - ok))
 }
 # lines <multiline-string> -> "name|cmd" pairs run via step
 runlist() { local part=$1 dir=$2 list=$3 line; while IFS= read -r line; do [ -n "${line// }" ] || continue; step "$part" "${line%%|*}" "$dir" "${line#*|}"; done <<< "$list"; }
