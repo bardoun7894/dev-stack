@@ -347,6 +347,9 @@ function bucketOf(ref, quota) {
 /** opencode workers have no usable shell: a brief that commits, runs tests, lints or calls bash goes to a shell-capable harness. */
 const needsShell = (brief) => /\bgit\s+(commit|push|merge|rebase|checkout|add)\b|\b(commit|run(ning)?\s+(the\s+|all\s+|our\s+)?(unit\s+|e2e\s+)?tests?|test\s+suite|lint(er|ing)?|bash|shell|npm\s+(test|run)|pytest|phpunit|cargo\s+test)\b/i.test(brief);
 
+/** Owner rule 2026-10-07: computer use, browser/e2e/playwright, running tests and QA run on kinds.test (Haiku 5.5). */
+const isTestWork = (brief, role) => role === "qa-engineer" || /\b(computer[- ]use|browser|e2e|end[- ]to[- ]end|playwright|puppeteer|cypress|selenium|qa|run(ning)?\s+(the\s+|all\s+|our\s+)?(unit\s+|e2e\s+|integration\s+)?tests?|test\s+suite)\b/i.test(brief);
+
 function pick(d) {
   const thinkIdx = Math.max(0, THINK.indexOf(CONFIG.thinking?.[d.tier] ?? "medium"));
   const thinking = THINK[Math.min(THINK.length - 1, d.role === "thinker" ? Math.max(thinkIdx + 1, 2) : thinkIdx)];
@@ -591,6 +594,7 @@ const earlySelection = opt.harness && !opt.print ? selectWorker(opt.harness) : u
 const d = await routeDecision();
 // Owner rule 2026-10-03: a reviewer worker runs on the review chain (GPT first, Opus fallback), whatever kind the brief routed to.
 if (opt.role === "reviewer" && CONFIG.kinds?.review) d.kind = "review";
+if (CONFIG.kinds?.test && d.kind !== "review" && isTestWork(opt.brief, opt.role)) d.kind = "test";
 const p = pick(d);
 let head =
   `[jdelegate] ${d.tier} ${d.kind}·${d.role} (jev @${(d.conf ?? 0).toFixed(2)}, ui ${d.ui.toFixed(2)}, ${d.ms}ms` +
