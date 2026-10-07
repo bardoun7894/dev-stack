@@ -16,7 +16,7 @@ while true; do
       echo "$bad" | grep -E 'CONFLICT|INFRA' >> "$D/.faillines"
       echo "-- free-model summary:"; [ -f "$D/.faillines" ] && bash "$HERE/failsum.sh" "$D/.faillines"; rm -f "$D/.faillines"
       exit 0; done
-    if pgrep -f "gate/gate.sh" >/dev/null; then lf=$(ls -t "$D"/full-*.txt "$D"/gate-*.log 2>/dev/null | head -1)
+    if pgrep -f "gate/gate.sh" >/dev/null; then lf=$(ls -t "$D"/full-*.txt "$D"/gate-*.log "$D"/.step-* 2>/dev/null | head -1)
       [ -n "$lf" ] && [ $(( $(date +%s) - $(mtime "$lf") )) -gt "$STALL_SECS" ] && { echo "STALL: $r/$(basename "$lf") unchanged ${STALL_SECS}s+"; exit 0; }; fi
   done
   sleep "$POLL"
