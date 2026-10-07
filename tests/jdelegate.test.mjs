@@ -723,3 +723,20 @@ test('W8 a codex usage limit marks codex exhausted until the printed reset and t
   const j = JSON.parse(readFileSync(ex, 'utf8'));
   assert.equal(j['openai-codex'], new Date('Oct 9 2030 3:14 PM').getTime());
 });
+
+// Owner rule 2026-10-07: computer use / browser-e2e / running tests / QA go to kind test (Haiku 5.5).
+test('test-kind briefs and role=qa-engineer route to kinds.test; code briefs do not', () => {
+  const t = join(tmp, 'tiers-test-kind.json');
+  write(t, JSON.stringify({
+    tiers: { T0: ['cliproxy/claude-test'], T1: ['cliproxy/claude-test'], T2: ['opencode-go/x'], T3: ['cliproxy/claude-test'], T4: ['cliproxy/claude-test'] },
+    kinds: { test: { T2: ['cliproxy/claude-haiku-5-5'], T3: ['cliproxy/claude-haiku-5-5'] } },
+  }));
+  const route = (brief, extra = []) => spawnSync(process.execPath, [JD, '--print', ...extra, brief], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: t, JDELEGATE_CACHE: join(tmp, 'cache'), JDELEGATE_SELECT_CACHE: '0' },
+  }).stdout;
+  assert.match(route('run the e2e tests for the login page'), /test·.*claude-haiku-5-5/);
+  assert.match(route('use playwright to click through checkout'), /claude-haiku-5-5/);
+  assert.match(route('review the diff', ['--role', 'qa-engineer']), /claude-haiku-5-5/);
+  assert.doesNotMatch(route('rename function foo in utils.ts'), /haiku-5-5/);
+});
