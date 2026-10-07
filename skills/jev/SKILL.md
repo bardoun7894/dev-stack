@@ -17,6 +17,8 @@ Jev (TypeSafe "System One", OpenRouter `typesafe/jev-1.13`) takes **state + name
 | a label, yes/no, probability, score, routing target, model tier | **Jev** |
 | an internal summary/digest of public data | free model (`deepseek/deepseek-v4-flash-0731:free`) |
 | text a client/recruiter/public reads, or image understanding | Claude Sonnet 5 / Haiku 4.5 |
+| computer use, browser/e2e testing, running tests, QA | Claude Haiku 5.5 (`cliproxy/claude-haiku-5-5`, kind `test`) |
+| Arabic text (translate, write, correct) | GPT-6 Luna (`kinds.language`; Arabic only, never code or other work) |
 | code, debugging, multi-file work | Claude Opus 5 |
 | the hardest long-horizon work / GUI control | Fable 5.1 / GPT-6 Astra |
 
@@ -61,8 +63,8 @@ Where the loops run in dev-stack:
 | Every prompt | `jev-skill-suggest` picks at most one relevant skill | Claude uses it or ignores it | `skill-suggest` |
 | Orchestrator | Step 3b sizes each packet (trivial…hard) | spawns the right model | `orchestrator` |
 | Code review | `jev-review diff` flags risky hunks | reviewer / `/codex` / `/panel` read only those | `review` |
-| Lint / scan | `jev-review lint`, `jev-review scan` | Haiku/Opus fix the shortlist | `lint`, `scan` |
-| Browser / e2e | checkpoint verdict + cause | `jev-browse` picks each action; Claude fixes failures | `browse` |
+| Lint / scan | `jev-review lint`, `jev-review scan` | Haiku 5.5 (tests/QA) or Opus fix the shortlist | `lint`, `scan` |
+| Browser / e2e | checkpoint verdict + cause | `jev-browse` picks each action; Haiku 5.5 runs the browser/e2e steps, Claude fixes failures | `browse` |
 | Driving an agent (`drive-screen`) | `jev_gate.py` reads a herdr pane: prompt / working / idle / dialog / exited + in-project | `autodrive.py --herdr` approves safe prompts; anything else stops for a human | `drive-screen` |
 | KB, hooks, project code | see [references/use-cases.md](references/use-cases.md) | | per call site |
 
@@ -126,6 +128,7 @@ before designing a new integration.
 ## E2e tests, browsing, and code tests
 
 Jev goes in the middle: the browser driver acts, Jev judges the page, an LLM runs only when Jev escalates.
+Computer use, browser/e2e, running tests and QA run on Haiku 5.5 (`cliproxy/claude-haiku-5-5`, Haiku 4.5 as fallback); jdelegate routes them to kind `test`.
 Ladder `L0` Playwright/agent-browser → `L1` Jev → `L2` cheap text LLM → `L3` vision → `L4` Opus/agent.
 
 - Deterministic assertions first; Jev replaces fuzzy ones.

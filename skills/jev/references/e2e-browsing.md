@@ -15,7 +15,7 @@ Named `L0`–`L4` so it doesn't clash with `jev route`'s `T0`–`T4` model tiers
 |---|---|---|---|
 | L0 | Playwright / agent-browser, deterministic | navigation, clicks, known selectors, exact text, status codes, URLs | free, ms |
 | L1 | **Jev** | "did this step work?", why it failed, what rung goes next, which link/action to take | ~$0.00002, < 1 s |
-| L2 | cheap text LLM (Haiku 4.5; free `opencode/ling-3.0-flash-fin-free` with Haiku fallback) | repair a broken selector from the trimmed aria tree, extract a region | cheap |
+| L2 | cheap text LLM (Haiku 5.5, Haiku 4.5 as fallback; free `opencode/ling-3.0-flash-fin-free` with Haiku fallback) | repair a broken selector from the trimmed aria tree, extract a region | cheap |
 | L3 | vision model on a screenshot | layout, visual regressions, canvas/charts, anything Jev said `uncertain` about | medium |
 | L4 | Opus / `dogfood` / `codex-computer` | exploratory runs, failures L1–L3 couldn't explain | expensive, on demand |
 
