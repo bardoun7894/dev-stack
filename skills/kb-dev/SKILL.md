@@ -56,7 +56,8 @@ Phase 8 is the gate for UI changes. Run the suite that matches the app before sa
 - Evergreen suite: the full mobile flow set, run on every PR by `.eas/workflows/e2e-tests.yml`. Commit `.e2e/cache` so CI replays the verified `act` steps at L0 with no model call.
 - Per-PR exploration run: the PR diff and description drive a run that tests the changed features, next to the evergreen suite. Its caching is not documented; assume it pays the model each time until measured.
 - On a failure, read `.e2e/artifacts/**/screen.txt` before changing a locator.
-- Agent steps: Haiku 5.5 by default; GPT-6 Luna only for Arabic and RTL checks (see the jev reference).
+- Agent steps: Jev decision executor; text model Haiku 5.5, GPT-6 Luna only for Arabic (see the jev reference).
+- Per-PR results go to the PR as a comment via `@e2e-dev/github`.
 
 ## Phase 6a: lock the checks before building
 

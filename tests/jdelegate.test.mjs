@@ -780,4 +780,6 @@ test('lean worker keeps the Skill tool on: no --disable-slash-commands, Skill in
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.script, /--tools Bash Read Edit Write Glob Grep Skill 2>&1/);
   assert.doesNotMatch(r.script, /--disable-slash-commands/);
+  // bundled Claude Code skills add ~3k first-turn tokens; the repo's .claude/skills still load
+  assert.match(r.script, /"disableBundledSkills":true/);
 });
