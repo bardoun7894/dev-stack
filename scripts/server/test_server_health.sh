@@ -81,8 +81,14 @@ PM2
 
   cat > "$T/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
-# ps --format '{{.Names}}' (one per line)
-printf '%s\n' "${HEALTH_STUB_DOCKER:-}"
+# ps --format => HEALTH_STUB_DOCKER; ps -a => HEALTH_STUB_DOCKER_ALL;
+# inspect => line "name=output" from HEALTH_STUB_INSPECT; port => line "name" in HEALTH_STUB_PORTS
+case "${1:-}" in
+  ps) if [ "${2:-}" = "-a" ]; then printf '%s\n' "${HEALTH_STUB_DOCKER_ALL:-}"; else printf '%s\n' "${HEALTH_STUB_DOCKER:-}"; fi ;;
+  inspect) n="${!#}"; printf '%s\n' "${HEALTH_STUB_INSPECT:-}" | awk -F'=' -v n="$n" '$1==n {sub(/^[^=]*=/,""); print; exit}' ;;
+  port) n="${2:-}"; printf '%s\n' "${HEALTH_STUB_PORTS:-}" | grep -Fx "$n" >/dev/null && echo "80/tcp -> 0.0.0.0:8080" ;;
+esac
+exit 0
 DOCKER
   chmod +x "$T/bin/docker"
 
@@ -103,7 +109,7 @@ DF
   chmod +x "$T/bin/df"
 }
 
-export HEALTH_STUB_HOSTS= HEALTH_STUB_FAILED= HEALTH_STUB_PM2LIST= HEALTH_STUB_DOCKER= HEALTH_STUB_CRONTAB= HEALTH_STUB_DF= HEALTH_STUB_NODNS=
+export HEALTH_STUB_HOSTS= HEALTH_STUB_FAILED= HEALTH_STUB_PM2LIST= HEALTH_STUB_DOCKER= HEALTH_STUB_CRONTAB= HEALTH_STUB_DF= HEALTH_STUB_NODNS= HEALTH_STUB_DOCKER_ALL= HEALTH_STUB_INSPECT= HEALTH_STUB_PORTS=
 # Set mtime N days ago (portable)
 age_touch() { python3 -c "import os,sys,time; t=time.time()-float(sys.argv[2])*86400; os.utime(sys.argv[1],(t,t))" "$1" "$2"; }
 
@@ -287,6 +293,22 @@ echo "$out" | grep -q "runc-process" && bad "chkrootkit-runc" "runc flagged: $ou
 out="$(run_script --rebaseline)"
 out="$(run_script)"
 echo "$out" | grep -q "chkrootkit: /usr/bin/x" && bad "chkrootkit-rebaseline" "rebaseline did not absorb: $out" || ok "chkrootkit-rebaseline"
+
+# ---- 9b. docker: down restart-policy container, unbound ports, clean ----
+HEALTH_STUB_DOCKER_ALL="obs-n8n
+web-ok
+web-nobind
+manual-job"
+HEALTH_STUB_INSPECT="obs-n8n=always exited 1 Error: cannot assign 100.64.0.1:5678
+web-ok=always running 1
+web-nobind=unless-stopped running 1
+manual-job=no exited 0"
+HEALTH_STUB_PORTS="web-ok"
+out="$(run_script)"
+echo "$out" | grep -q "docker: obs-n8n exited .*cannot assign" && ok "docker-down" || bad "docker-down" "no down finding: $out"
+echo "$out" | grep -q "docker: web-nobind .*not bound" && ok "docker-noports" || bad "docker-noports" "no port finding: $out"
+echo "$out" | grep -Eq "docker: (web-ok|manual-job)" && bad "docker-clean" "clean container flagged: $out" || ok "docker-clean"
+HEALTH_STUB_DOCKER_ALL=""; HEALTH_STUB_INSPECT=""; HEALTH_STUB_PORTS=""
 
 # ---- 10. --dry-run never invokes curl to api.telegram.org ----
 # Re-do a clean site alert + check curl never touches api.telegram.

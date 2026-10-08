@@ -231,6 +231,25 @@ check_docker() {
     done <<<"$prev"
   fi
   printf '%s\n' "$cur" > "$DOCKER_PREVIOUS"
+
+  # restart-policy containers that are down, and running ones with no live port mapping
+  local info policy status nb err
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    if printf '%s' "$name" | grep -Eq "$DOCKER_IGNORE"; then continue; fi
+    info=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}} {{.State.Status}} {{len .HostConfig.PortBindings}} {{.State.Error}}' "$name" 2>/dev/null) || continue
+    read -r policy status nb err <<<"$info"
+    case "$policy" in
+      always|unless-stopped)
+        if [ "$status" != "running" ]; then
+          add "docker" "$name $status (restart=$policy): $(printf '%s' "$err" | cut -c1-120)"
+          continue
+        fi ;;
+    esac
+    if [ "$status" = "running" ] && [ "${nb:-0}" -gt 0 ] && [ -z "$(docker port "$name" 2>/dev/null)" ]; then
+      add "docker" "$name running but published ports are not bound"
+    fi
+  done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | sort -u)
 }
 
 # --- f. cron logs ---
