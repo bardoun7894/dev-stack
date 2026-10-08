@@ -13,6 +13,7 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 0. Ground in prior art     | `/kb-query`                                                                            | (no agent)     |
 | 1. Brainstorm options      | `brainstorming` (obra)                                                                 | inline         |
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
+| 2a. Research (mandatory)   | `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher` (one pass, read-only) → `specs/NNN/research.md` | Sonnet (read-only + web) |
 | 3. Architectural plan      | `/kb-spec plan` → `/speckit.plan` → `writing-plans` (obra)                             | inline         |
 | 4. Task breakdown          | `/kb-spec tasks` → `/speckit.tasks`                                                    | inline         |
 | 5a. Implement (solo)       | `executing-plans` (obra) in current session                                            | Sonnet         |
@@ -84,10 +85,12 @@ The full classifier and per-role defaults live in `~/code/dev-stack/agents/orche
 ## Mandatory sequencing rules
 
 1. **Never skip phase 0** — always run `/kb-query` first, even if you think you know the answer. The KB has history you will not remember.
-2. **Never skip phase 8** — `verification-before-completion` runs the full test suite and the user's definition of done. Saying "done" without it is the most common failure mode.
-3. **Capture knowledge in phase 12** — without `/kb-spec post` + `/kb-compile`, the next feature will not benefit from what you just learned.
-4. **Fan-out guardrail** — never spawn more than 4 parallel workers without user confirmation. Cost and debugging difficulty grow non-linearly past that.
-5. **Fan-out tripwire** — if NIU ≥ 2, you MUST spawn parallel workers via the `Agent` tool BEFORE doing any edits yourself. Doing the work serially in the parent session when fan-out is appropriate is the second most common failure mode.
+2. **Never skip phase 2a** — Research (KB prior art + library docs at repo versions + 2-3 competitor references with URLs + risks) must land in `specs/NNN/research.md` before any Phase 3 design decision. Dispatch `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher`; one read-only pass, output is `specs/NNN/research.md`.
+3. **Never skip phase 8** — `verification-before-completion` runs the full test suite and the user's definition of done. Saying "done" without it is the most common failure mode.
+4. **Phase 9 review is mandatory** — `requesting-code-review` runs on every change that touches code. The only exemption is a diff that contains zero code/config changes (docs-only). One reviewer pass + one `receiving-code-review` fix round; only **P0** and **P1** findings block. P2/P3 are informational and do not gate the branch. Treat phase 9 as a gate: no `finishing-a-development-branch` (phase 11) before review findings are triaged.
+5. **Capture knowledge in phase 12** — without `/kb-spec post` + `/kb-compile`, the next feature will not benefit from what you just learned.
+6. **Fan-out guardrail** — never spawn more than 4 parallel workers without user confirmation. Cost and debugging difficulty grow non-linearly past that.
+7. **Fan-out tripwire** — if NIU ≥ 2, you MUST spawn parallel workers via the `Agent` tool BEFORE doing any edits yourself. Doing the work serially in the parent session when fan-out is appropriate is the second most common failure mode.
 
 ## The team roster (registered subagents)
 
@@ -103,6 +106,7 @@ When you fan out, you spawn one of these specialist agents via `Agent(subagent_t
 | `debugger`           | sonnet→opus   | Root-cause analysis, regression test authoring | systematic-debugging, TDD, verification-before-completion                   |
 | `designer`           | sonnet        | Full design workflow chain in one context      | design-md, design-check, normalize, polish, audit, TDD                      |
 | `reviewer`           | sonnet        | Spec compliance + code quality review          | requesting-code-review, receiving-code-review                               |
+| `researcher`         | sonnet        | Read-only prior-art + library-docs + competitor scan → specs/NNN/research.md | (web access, no writes outside specs/NNN/research.md)        |
 
 You may also spawn `general-purpose` subagents with `model: haiku` for trivial one-shot lookups (e.g. "does X exist in file Y?").
 
@@ -128,7 +132,7 @@ This skips Spec Kit entirely for small-to-medium features. Use the full Spec Kit
 
 | Trigger phrase (EN)                | Trigger phrase (AR)                          | What kb-dev does                                                  |
 |------------------------------------|----------------------------------------------|-------------------------------------------------------------------|
-| "new feature X"                    | "ميزة جديدة X" / "خاصية جديدة X"             | Run phases 0 → 4, pause for solo/fan-out decision                 |
+| "new feature X"                    | "ميزة جديدة X" / "خاصية جديدة X"             | Run phases 0 → 2a → 4, pause for solo/fan-out decision            |
 | "build X" / "implement X"          | "ابني X" / "اعمل X" / "نفّذ X" / "صنع X"     | Run phases 0 → 12 (full pipeline)                                 |
 | "implement the spec at specs/NNN"  | "نفّذ المواصفات في specs/NNN"                | Run phase 0, then jump to phase 5, then 6–12                      |
 | "fix bug Y" (< 30 LOC)             | "أصلح خطأ Y" / "صلح Y" / "إصلاح Y"           | Run phase 0, then solo-mode phase 5a straight through to 12       |
@@ -195,6 +199,14 @@ This is the canonical map of how all 39 installed skills relate to each other. k
                                              ▼
               ┌──────────────────────────────────────────────────────────────┐
               │   Phase 2: /kb-spec pre  →  /speckit.specify  →  spec.md     │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │   Phase 2a: Research — researcher (read-only + web)         │
+              │   → specs/NNN/research.md (KB prior art, library docs for   │
+              │     repo versions, 2-3 competitors with URLs, risks)        │
+              │   Mandatory before Phase 3 design decisions.                │
               └──────────────────────────────┬───────────────────────────────┘
                                              │
                                              ▼
