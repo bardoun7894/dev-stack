@@ -729,6 +729,72 @@ test('timeout: a sleeping fake worker is killed (no orphan) and jdelegate exits 
   assert.ok(elapsed < 20_000, `jdelegate took ${elapsed} ms; should have timed out around 1.5 s`);
 });
 
+// ── timeout in herdr tab mode (no real herdr): pid file + recursive pgrep kills the worker tree ──
+test('timeout in herdr tab mode (fake herdr that just nohups run.sh): the worker tree is killed and jdelegate exits non-zero', async () => {
+  const wcache = join(tmp, 'wcache-tab');
+  // fake herdr:
+  //   pane get <pane>          -> {"workspace_id":"ws1"}
+  //   tab create ...            -> {"tab_id":"TABID","pane_id":"PANEID"}
+  //   pane run <pane> <cmd...>  -> nohup-eval the cmd in the background so jdelegate does not block
+  //   tab close <tab>           -> do nothing (proves the worker is killed by SIGTERM/SIGKILL, not by tab close)
+  // The "tab close does nothing" rule is the test: with the old code, the tab close was the only kill and the
+  // fake worker would survive SIGHUP.
+  stub('herdr', [
+    'set -e',
+    'log="$HERDR_LOG"',
+    'echo "$*" >> "$log"',
+    'case "$1" in',
+    '  pane)',
+    '    case "$2" in',
+    '      get) echo \'{"workspace_id":"ws1"}\'; exit 0 ;;',
+    '      run) shift 3; nohup bash -c "$*" </dev/null >/dev/null 2>&1 & disown; exit 0 ;;',
+    '    esac ;;',
+    '  tab)',
+    '    case "$2" in',
+    '      create) echo \'{"tab_id":"TABID","pane_id":"PANEID"}\'; exit 0 ;;',
+    '      close) exit 0 ;;',
+    '    esac ;;',
+    'esac',
+    'exit 0',
+  ].join('\n'));
+  // fake claude: records its pid, sleeps 60s (the test will SIGKILL it well before that)
+  const pidFile = join(tmp, 'fake-claude-tab.pid');
+  stub('claude', `echo $$ > ${pidFile}; exec sleep 60`);
+  const herdrLog = join(tmp, 'herdr.log');
+  writeFileSync(herdrLog, '');
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [JD, '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'tabjob', '--timeout', '0.05', 'do the thing'], {
+    encoding: 'utf8', timeout: 30_000,
+    env: {
+      ...process.env, PATH: `${bin}:${process.env.PATH}`,
+      JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers,
+      JDELEGATE_CACHE: wcache, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0',
+      JDELEGATE_TIMEOUT_MS: '1500',
+      HERDR_ENV: '1', HERDR_PANE_ID: 'HOSTPANE', HERDR_LOG: herdrLog,
+    },
+  });
+  const elapsed = Date.now() - t0;
+  assert.notEqual(r.status, 0, `expected non-zero, got ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+  assert.match(r.stdout, /timed out after 0\.05 min/, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
+  assert.match(r.stdout, /herdr tab /, `expected herdr-mode message, got: ${r.stdout}`);
+  // the herdr stub was actually used: pane get, tab create, pane run, tab close
+  const calls = readFileSync(herdrLog, 'utf8').split('\n').filter(Boolean);
+  assert.ok(calls.some((l) => l.startsWith('pane get ')), 'herdr pane get was called');
+  assert.ok(calls.some((l) => l.startsWith('tab create ')), 'herdr tab create was called');
+  assert.ok(calls.some((l) => l.startsWith('pane run ')), 'herdr pane run was called');
+  assert.ok(calls.some((l) => l.startsWith('tab close ')), 'herdr tab close was called (and did nothing)');
+  // the fake worker pid was recorded and is now gone
+  const pid = Number(readFileSync(pidFile, 'utf8').trim());
+  assert.ok(pid > 0, 'fake claude pid recorded in tab mode');
+  for (let i = 0; i < 50; i++) {
+    if (spawnSync('kill', ['-0', String(pid)]).status !== 0) break;
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  assert.equal(spawnSync('kill', ['-0', String(pid)]).status, 1, `fake claude pid ${pid} is still alive after timeout in herdr tab mode`);
+  // and jdelegate must not have hung
+  assert.ok(elapsed < 20_000, `jdelegate took ${elapsed} ms; should have timed out around 1.5 s`);
+});
+
 // ── W8: agy always bypasses permissions; codex usage limit marks codex exhausted and falls back ──
 test('W8 agy relay runs headless with --dangerously-skip-permissions by default', () => {
   const relay = join(homedir(), '.claude', 'skills', 'agy-delegate', 'scripts', 'relay.mjs');
