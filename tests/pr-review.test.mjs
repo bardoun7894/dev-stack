@@ -26,11 +26,19 @@ if (cmd === "pi" || cmd === "opencode") {
   else {
     const model = args[args.indexOf(cmd === "pi" ? "--model" : "-m") + 1];
     if (sc.bFail?.includes(model)) { process.stderr.write("quota"); process.exit(1); }
-    out((sc.bOut ?? "No blocking issues\\nVERDICT: PASS") + "");
+    const text = (sc.bOut ?? "No blocking issues\\nVERDICT: PASS") + "";
+    if (cmd === "pi" && args[args.indexOf("--mode") + 1] === "json") {
+      const usage = sc.bUsage === null ? undefined : (sc.bUsage ?? { input: 10, output: 5, cacheRead: 3, cacheWrite: 2, cost: { total: 0.002 } });
+      out(JSON.stringify({ type: "agent_start" }) + "\\n" + JSON.stringify({ type: "agent_end", messages: [{ role: "user", content: "x" }, { role: "assistant", content: [{ type: "text", text }], usage }] }) + "\\n");
+    } else out(text);
   }
 }
 else if (cmd === "jev") { if (sc.jevFail) { process.stderr.write("api"); process.exit(sc.jevFail); } out(JSON.stringify(sc.jev ?? { choice: "pass", confidence: 0.95 })); }
-else if (cmd === "claude") { if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); } out(sc.claudeOut ?? "No blocking issues"); }
+else if (cmd === "claude") {
+  if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); }
+  if (sc.claudeRaw !== undefined) out(sc.claudeRaw);
+  else out(JSON.stringify({ type: "result", result: sc.claudeOut ?? "No blocking issues", total_cost_usd: sc.claudeCost ?? 0.0123, usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 50 } }));
+}
 else if (args[0] === "search") out(JSON.stringify(sc.search ?? []));
 else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(args.join(" ").includes("mergeStateStatus") ? (sc.prMerge ?? sc.pr) : sc.pr));
 else if (args[0] === "api") {
@@ -265,7 +273,7 @@ test("second reviewer: first model, pi invocation, one comment with both section
   const r = go({});
   assert.equal(piCalls(r).length, 1);
   const a = piCalls(r)[0].args;
-  assert.deepEqual(a.slice(0, 8), ["--mode", "text", "-p", "--no-extensions", "--no-context-files", "--no-skills", "--no-tools", "--no-session"]);
+  assert.deepEqual(a.slice(0, 8), ["--mode", "json", "-p", "--no-extensions", "--no-context-files", "--no-skills", "--no-tools", "--no-session"]);
   assert.equal(a[a.indexOf("--model") + 1], "commandcode/gpt-6.1-sol");
   assert.equal(r.posts.length, 1);
   assert.match(r.posts[0].bodyFile, /\*\*Haiku 5\.5 review\*\*[\s\S]*\*\*Second review \(commandcode\/gpt-6\.1-sol\)\*\*[\s\S]*<!-- haiku-review sha=/);
@@ -355,8 +363,39 @@ test("decision log line carries the contract fields", () => {
   const r = go({});
   assert.equal(r.decisions.length, 1);
   const d = r.decisions[0];
-  assert.deepEqual(Object.keys(d), ["at", "repo", "pr", "sha", "a", "b", "b_model", "jev", "conf", "lines", "action", "reason"]);
+  assert.deepEqual(Object.keys(d), ["at", "repo", "pr", "sha", "a", "b", "b_model", "jev", "conf", "lines", "action", "reason", "cost"]);
   assert.equal(d.repo, "o/r"); assert.equal(d.pr, 1); assert.equal(d.sha, SHA);
   assert.equal(d.a, "PASS"); assert.equal(d.b, "PASS"); assert.equal(d.b_model, "commandcode/gpt-6.1-sol");
   assert.equal(d.jev, "pass"); assert.equal(d.conf, 0.95); assert.equal(d.lines, 10); assert.equal(d.action, "merged");
+});
+
+// ---- cost per decision ----
+test("cost fields: Haiku from claude JSON, second reviewer from pi json, jev_calls counted", () => {
+  const r = go({});
+  assert.deepEqual(r.decisions[0].cost, { haiku_usd: 0.0123, haiku_tokens: 200, b_model: "commandcode/gpt-6.1-sol", b_usd: 0.002, b_tokens: 20, jev_calls: 1 });
+  assert.ok(r.claudes[0].args.includes("--output-format") && r.claudes[0].args.includes("json"));
+  assert.ok(r.posts[0].bodyFile.includes("No blocking issues\nVERDICT: PASS"));
+  assert.ok(!r.posts[0].bodyFile.includes("total_cost_usd"));
+  const j = jevCalls(r)[0].args;
+  assert.equal(j[j.indexOf("--log") + 1], "pr-review");
+});
+
+test("cost: pi without usage and opencode -> null b cost; no jev call -> jev_calls 0", () => {
+  const a = go({ bUsage: null });
+  assert.deepEqual([a.decisions[0].cost.b_usd, a.decisions[0].cost.b_tokens], [null, null]);
+  const b = go({ files: { "exhausted.json": { commandcode: future } } });
+  assert.equal(b.decisions[0].cost.b_model, "opencode-go/deepseek-v4.1-flash");
+  assert.deepEqual([b.decisions[0].cost.b_usd, b.decisions[0].cost.b_tokens], [null, null]);
+  const c = go({ claudeOut: "P1 a.js:1 bad\nVERDICT: BLOCK" });
+  assert.equal(c.decisions[0].cost.jev_calls, 0);
+  assert.equal(c.decisions[0].cost.haiku_usd, 0.0123);
+});
+
+test("malformed claude JSON -> error, nothing posted, no merge", () => {
+  for (const claudeRaw of ["not json at all\nVERDICT: PASS", '{"type":"result"}', "{}"]) {
+    const r = go({ claudeRaw });
+    assert.notEqual(r.status, 0, claudeRaw);
+    assert.equal(r.posts.length, 0, claudeRaw);
+    assert.equal(merges(r).length, 0, claudeRaw);
+  }
 });
