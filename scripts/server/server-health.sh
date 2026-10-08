@@ -15,6 +15,7 @@
 #
 # Flags:
 #   --dry-run   print findings to stdout instead of sending Telegram
+#   --rebaseline  rewrite $STATE_DIR/chkrootkit.baseline from the current log
 #   --summary   send the daily digest (all current findings, or "all green")
 #
 # Exit 0 always unless the script itself breaks.
@@ -31,10 +32,12 @@ DOCKER_IGNORE="${DOCKER_IGNORE:-^(ostudio-dev-|board-test-)|_[a-z]+$}"
 
 DRY_RUN=0
 SUMMARY=0
+REBASELINE=0
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
     --summary) SUMMARY=1 ;;
+    --rebaseline) REBASELINE=1 ;;
     --help|-h)
       sed -n '2,30p' "$0"; exit 0 ;;
   esac
@@ -275,19 +278,23 @@ check_disk() {
 }
 
 # --- h. chkrootkit ---
+# Reports only paths not in $STATE_DIR/chkrootkit.baseline (seeded on first run).
 check_chkrootkit() {
   [ -f "$VAR_LOG_CHKROOTKIT" ] || return 0
-  local pth
-  while IFS= read -r pth; do
-    case "$pth" in
-      /tmp/*|/usr/lib/python3/dist-packages/fail2ban/tests/*|/usr/lib/python3/dist-packages/twisted/*) continue ;;
-    esac
-    add "chkrootkit" "$pth"
-  done < <(awk '
+  local pth base="$STATE_DIR/chkrootkit.baseline" cur
+  cur=$(awk '
     /^(Searching for|Checking)/ { inw = 0; next }
     /WARNING/ { inw = 1; next }
     inw && /^\// && !/lstat\(\/tmp\/runc-process/ { print }
-  ' "$VAR_LOG_CHKROOTKIT" | sort -u)
+  ' "$VAR_LOG_CHKROOTKIT" | grep -Ev '^/tmp/' | sort -u)
+  if [ "$REBASELINE" = "1" ] || [ ! -f "$base" ]; then
+    printf '%s\n' "$cur" | sed '/^$/d' > "$base"
+    return 0
+  fi
+  while IFS= read -r pth; do
+    [ -z "$pth" ] && continue
+    add "chkrootkit" "$pth"
+  done < <(printf '%s\n' "$cur" | comm -23 - "$base")
 }
 
 # --- run all checks ---
