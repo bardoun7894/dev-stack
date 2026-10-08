@@ -1,0 +1,147 @@
+#!/usr/bin/env node
+/**
+ * pr-review — Haiku 5.5 PR reviewer (replaces the CodeRabbit GitHub App).
+ *
+ *   pr-review <owner/repo> <number> [--dry-run]     review one PR
+ *   pr-review --sweep [--max 5] [--dry-run]         review open PRs on bardoun7894's repos with no review for the current head sha
+ *
+ * Skips drafts, docs-only PRs, and PRs whose head sha already carries the marker
+ * `<!-- haiku-review sha=<sha> -->`. Fails closed: claude error/timeout/empty output posts nothing.
+ * One stdout line per PR: repo#N sha7 action seconds.
+ * Tests stub every gh/claude call via PR_REVIEW_RUNNER (an executable called as `runner <cmd> <args...>`).
+ */
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const OWNER = "bardoun7894";
+const MAX_DIFF = 120000;
+const TIMEOUT_MS = 300000;
+const RUNNER = process.env.PR_REVIEW_RUNNER;
+
+const PROMPT = `You are reviewing a GitHub pull request diff (supplied below). Review for correctness bugs, security issues, broken tests, and missing error handling.
+Label each finding P0, P1 or P2, give file:line and a one-line fix. At most 10 findings, most severe first.
+If there is nothing blocking, reply exactly "No blocking issues".
+No praise and no summary of the PR.
+
+`;
+
+const CLAUDE_ARGS = [
+  "-p", "--model", "claude-haiku-5-5", "--effort", "medium",
+  "--setting-sources", "project,local",
+  "--settings", '{"disableAllHooks":true,"autoMemoryEnabled":false,"disableBundledSkills":true}',
+  "--strict-mcp-config", "--tools", "",
+];
+const CLAUDE_ARGS_FALLBACK = [...CLAUDE_ARGS.slice(0, -2), "--disallowedTools", "Bash", "Edit", "Write"];
+
+// The single place gh and claude are invoked.
+function exec(cmd, args, { input, cwd, timeout = 60000 } = {}) {
+  const env = cmd === "claude" ? { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" } : process.env;
+  const r = RUNNER
+    ? spawnSync(RUNNER, [cmd, ...args], { input, cwd, env, timeout, encoding: "utf8", maxBuffer: 64 << 20 })
+    : spawnSync(cmd, args, { input, cwd, env, timeout, encoding: "utf8", maxBuffer: 64 << 20 });
+  if (r.error) throw new Error(`${cmd}: ${r.error.code === "ETIMEDOUT" ? "timeout" : r.error.message}`);
+  if (r.status !== 0) throw new Error(`${cmd} exit ${r.status}: ${(r.stderr || r.stdout || "").trim().slice(0, 300)}`);
+  return r.stdout;
+}
+
+const gh = (args, o) => exec("gh", args, o);
+const isDocs = (p) => /\.(md|mdx|txt|rst)$/.test(p) || p.startsWith("docs/");
+
+function askClaude(input) {
+  try {
+    return exec("claude", CLAUDE_ARGS, { input, cwd: tmpdir(), timeout: TIMEOUT_MS });
+  } catch (e) {
+    if (!/tools/i.test(e.message)) throw e;
+    return exec("claude", CLAUDE_ARGS_FALLBACK, { input, cwd: tmpdir(), timeout: TIMEOUT_MS });
+  }
+}
+
+// Returns the action; throws on error.
+function reviewPr(repo, n, dry) {
+  const pr = JSON.parse(gh(["pr", "view", String(n), "-R", repo, "--json", "headRefOid,files,comments,reviews,title,body,isDraft"]));
+  const sha = pr.headRefOid;
+  const info = { sha7: sha.slice(0, 7) };
+  if (pr.isDraft) return { ...info, action: "skipped-draft" };
+  const marker = `<!-- haiku-review sha=${sha} -->`;
+  const bodies = [...(pr.comments ?? []), ...(pr.reviews ?? [])].map((x) => x.body ?? "");
+  if (bodies.some((b) => b.includes(marker))) return { ...info, action: "skipped-seen" };
+  const files = (pr.files ?? []).map((f) => f.path);
+  if (files.length && files.every(isDocs)) return { ...info, action: "skipped-docs" };
+
+  let diff = gh(["pr", "diff", String(n), "-R", repo], { timeout: 120000 });
+  let note = "";
+  if (diff.length > MAX_DIFF) {
+    diff = diff.slice(0, MAX_DIFF);
+    note = `> Diff truncated: only the first ${MAX_DIFF} characters were reviewed.\n\n`;
+  }
+  const out = askClaude(`${PROMPT}PR title: ${pr.title}\n\nPR description:\n${pr.body ?? ""}\n\nDiff:\n${diff}\n`).trim();
+  if (!out) throw new Error("claude returned empty output");
+
+  const body = `**Haiku 5.5 review**\n\n${note}${out}\n\n${marker}`;
+  if (dry) {
+    process.stdout.write(`${body}\n`);
+  } else {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-"));
+    try {
+      const f = join(dir, "body.md");
+      writeFileSync(f, body);
+      gh(["pr", "review", String(n), "-R", repo, "--comment", "--body-file", f]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  return { ...info, action: "reviewed" };
+}
+
+// Logs one line; returns the action, or null on error.
+function runOne(repo, n, dry) {
+  const t0 = Date.now();
+  const secs = () => ((Date.now() - t0) / 1000).toFixed(1);
+  try {
+    const r = reviewPr(repo, n, dry);
+    console.log(`${repo}#${n} ${r.sha7} ${r.action} ${secs()}`);
+    return r.action;
+  } catch (e) {
+    console.log(`${repo}#${n} ------- error ${secs()}`);
+    console.error(`pr-review: ${repo}#${n}: ${e.message}`);
+    return null;
+  }
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+  const dry = argv.includes("--dry-run");
+  if (argv.includes("--help") || argv.length === 0) {
+    console.log("usage: pr-review <owner/repo> <number> [--dry-run]\n       pr-review --sweep [--max 5] [--dry-run]");
+    return 0;
+  }
+  if (argv.includes("--sweep")) {
+    const mi = argv.indexOf("--max");
+    const max = mi >= 0 ? parseInt(argv[mi + 1], 10) : 5;
+    if (!(max > 0)) { console.error("pr-review: --max needs a positive number"); return 2; }
+    let list;
+    try {
+      list = JSON.parse(gh(["search", "prs", "--owner", OWNER, "--state", "open", "--json", "repository,number,updatedAt", "--limit", "50"]));
+    } catch (e) { console.error(`pr-review: search failed: ${e.message}`); return 1; }
+    list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    // --max counts PRs reviewed (calls to the model), not PRs inspected.
+    let done = 0;
+    for (const p of list) {
+      if (done >= max) break;
+      const repo = p.repository.nameWithOwner ?? `${OWNER}/${p.repository.name}`;
+      const action = runOne(repo, p.number, dry);
+      if (action === null || action === "reviewed") done++;
+    }
+    return 0;
+  }
+  const pos = argv.filter((a) => !a.startsWith("--"));
+  if (pos.length !== 2 || !/^[^/]+\/[^/]+$/.test(pos[0]) || !/^\d+$/.test(pos[1])) {
+    console.error("usage: pr-review <owner/repo> <number> [--dry-run]");
+    return 2;
+  }
+  return runOne(pos[0], pos[1], dry) === null ? 1 : 0;
+}
+
+process.exit(main());
