@@ -138,6 +138,7 @@ Ladder `L0` Playwright/agent-browser → `L1` Jev → `L2` cheap text LLM → `L
 - Fail closed: error / low confidence = `uncertain` → escalate, never `pass`. Cache answers by snapshot hash.
 - Unit tests stub the Jev client and test the `null` fallback; one opt-in live contract test.
 - Need a whole flow checked, not one page? `jev-browse --flows flows.json` runs the System 1 agent.
+- Mobile app, or a suite mixing exact and agent steps? TesterArmy `e2e` (`npx e2e run`), see the mobile section of the reference.
 
 Questions JSON, thresholds, Playwright/shell helpers, browsing-agent patterns, CI triage:
 [references/e2e-browsing.md](references/e2e-browsing.md).
