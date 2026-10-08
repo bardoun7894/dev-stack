@@ -87,6 +87,9 @@ const THINK = ["off", "minimal", "low", "medium", "high"];
 const argv = process.argv.slice(2);
 const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor (--advisor opus; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
 const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", dryRun: false, gc: false, older: 60, brief: "" };
+// JDELEGATE_TIMEOUT_MS overrides --timeout for tests (and fine-grained timeouts in general). opt.timeout stays in minutes for the help text.
+const TIMEOUT_OVERRIDE_MS = process.env.JDELEGATE_TIMEOUT_MS ? Number(process.env.JDELEGATE_TIMEOUT_MS) : undefined;
+const timeoutMs = () => TIMEOUT_OVERRIDE_MS ?? Math.max(1, opt.timeout) * 60_000;
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === "--cwd") opt.cwd = resolve(argv[++i]);
@@ -123,7 +126,7 @@ if (argv[0] === "wait") {
   const runs = names.map((n) => ({ n, run: resolveRun(n) }));
   const missing = runs.filter((r) => !r.run);
   if (missing.length) { console.error(`jdelegate wait: no run found for ${missing.map((r) => r.n).join(", ")}`); process.exit(2); }
-  const limit = Date.now() + (argv.includes("--timeout") ? Number(argv[argv.indexOf("--timeout") + 1]) : opt.timeout) * 60_000;
+  const limit = Date.now() + (TIMEOUT_OVERRIDE_MS ?? ((argv.includes("--timeout") ? Number(argv[argv.indexOf("--timeout") + 1]) : opt.timeout) * 60_000));
   let rcAll = 0;
   for (const { n, run } of runs) {
     while (!existsSync(join(run, "exit"))) {
@@ -651,6 +654,8 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
   const label = `${nameLabel} · ${attemptP.ref.split("/").pop()}`;
   writeFileSync(join(run, "run.sh"),
     `#!/bin/bash\n# jdelegate worker: ${label.replace(/[\r\n]+/g, " ")}\nset -o pipefail\n` +
+    `# record the bash pid so the wrapper can SIGTERM/SIGKILL the worker tree on timeout (closes the herdr tab is not enough: workers survive SIGHUP)\n` +
+    `echo $$ > ${q(join(run, "pid"))}\n` +
     `# the worker records its own exit (also when killed), so a dead jdelegate wrapper loses nothing: see \`jdelegate wait\`\n` +
     `trap 'rc=$?; [ -e ${q(join(run, "exit"))} ] || { echo $rc > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}; }' EXIT\n` +
     `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
@@ -721,13 +726,26 @@ async function execute(attemptBrief, attemptP, attemptTier) {
       where = `herdr tab "${label}"`;
     }
   }
-  if (where === "inline") spawnSync("bash", [join(run, "run.sh")], { stdio: ["ignore", "ignore", "ignore"], timeout: opt.timeout * 60_000 });
+  // Inline mode: launch with `detached: true` so the run.sh is its own session/process-group leader. The child pid is also
+  // the pgid, which lets a timeout kill the whole tree (bash + worker + worker children) in one shot via `kill -TERM -<pid>`.
+  // The old spawnSync + timeout only killed bash; the worker kept running and was orphaned.
+  let inlinePid;
+  if (where === "inline") {
+    const child = spawn("bash", [join(run, "run.sh")], { stdio: "ignore", detached: true });
+    inlinePid = child.pid;
+  }
+  // The timeout we enforce here, in ms. JDELEGATE_TIMEOUT_MS overrides --timeout for tests.
+  const limitMs = timeoutMs();
   while (!existsSync(join(run, "exit"))) {
-    if (Date.now() - started > opt.timeout * 60_000) {
-      console.log(`${head}\n[jdelegate] still running after ${opt.timeout} min in ${where}; result will be in ${run}`);
+    if (Date.now() - started > limitMs) {
+      await killWorkerTree({ run, inlinePid, where, tab: existsSync(join(run, "tab")) ? readFileSync(join(run, "tab"), "utf8").trim() : "" });
+      // The user-facing value, in minutes. Use the original --timeout number (so the message matches what was passed
+      // on the command line, even when JDELEGATE_TIMEOUT_MS overrides the wall-clock value for tests).
+      const minutesText = `${opt.timeout} min`;
+      console.log(`${head}\n[jdelegate] timed out after ${minutesText} in ${where}; worker tree killed, result will be in ${run}`);
       process.exit(124);
     }
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 500));
   }
   const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
   const answer = finalAnswer(attemptP, run);
@@ -739,6 +757,51 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     } catch { /* a tab that will not close must not fail the job */ }
   }
   return { run, where, started, rc, answer };
+}
+
+/**
+ * Kill the whole worker tree on timeout and close the herdr tab. Inline: the detached child is its own session/pgrp
+ * leader, so its pid is the pgid; `kill -TERM -<pid>` reaches bash + worker + worker children. Herdr tab mode: the
+ * worker runs locally (herdr is a local terminal multiplexer), so the run.sh writes its bash pid to `<run>/pid`; we
+ * collect the full descendant tree with recursive `pgrep -P` BEFORE killing, then SIGTERM them all, wait up to 5 s for
+ * the EXIT trap to write the exit file, then SIGKILL survivors. Closing the tab alone is not enough (workers survive
+ * SIGHUP). After the kill, we close the tab as before.
+ */
+async function killWorkerTree({ run, inlinePid, where, tab }) {
+  if (where === "inline" && inlinePid) {
+    try { process.kill(-inlinePid, "SIGTERM"); } catch { /* already gone */ }
+    // Give bash 5 s to run its EXIT trap and write the exit file; then SIGKILL anything left.
+    for (let i = 0; i < 50 && !existsSync(join(run, "exit")); i++) await new Promise((r) => setTimeout(r, 100));
+    try { process.kill(-inlinePid, "SIGKILL"); } catch { /* already gone */ }
+    // If anything still lives (it shouldn't), recurse on children of the inline pid.
+    for (let i = 0; i < 3; i++) {
+      const left = spawnSync("pgrep", ["-P", String(inlinePid)], { encoding: "utf8" }).stdout.trim();
+      if (!left) break;
+      for (const p of left.split("\n")) { try { process.kill(Number(p), "SIGKILL"); } catch {} }
+    }
+  } else {
+    // herdr tab (or any other mode): bash wrote its pid to <run>/pid on startup; collect the full descendant tree
+    // BEFORE killing, then SIGTERM all of them, wait for the EXIT trap, SIGKILL survivors.
+    const pidFile = join(run, "pid");
+    let rootPid;
+    try { rootPid = Number(readFileSync(pidFile, "utf8").trim()); } catch { rootPid = NaN; }
+    if (Number.isFinite(rootPid) && rootPid > 0) {
+      const collect = (pid) => {
+        const kids = spawnSync("pgrep", ["-P", String(pid)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number).filter(Number.isFinite);
+        const out = [pid];
+        for (const k of kids) out.push(...collect(k));
+        return out;
+      };
+      const tree = collect(rootPid);
+      for (const p of tree) { try { process.kill(p, "SIGTERM"); } catch {} }
+      // Give bash 5 s to run its EXIT trap and write the exit file; then SIGKILL anything left.
+      for (let i = 0; i < 50 && !existsSync(join(run, "exit")); i++) await new Promise((r) => setTimeout(r, 100));
+      for (const p of tree) { try { process.kill(p, "SIGKILL"); } catch {} }
+    }
+  }
+  if (tab) {
+    try { spawnSync("herdr", ["tab", "close", tab], { encoding: "utf8", timeout: 8000 }); } catch { /* the tab may be already gone */ }
+  }
 }
 
 const initialTier = d.tier;
