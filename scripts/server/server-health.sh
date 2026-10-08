@@ -117,11 +117,11 @@ check_sites() {
   done
   [ -z "$names" ] && return 0
   local results
-  results=$(printf '%s\n' $names | sort -u | xargs -I{} -P8 sh -c '
-    getent ahosts "{}" 2>/dev/null | grep -q . || exit 0
-    code=$(curl -s -o /dev/null -m 10 -w "%{http_code}" "https://{}/" 2>/dev/null)
-    case "$code" in 000|5*) printf "%s %s\n" "{}" "$code" ;; esac
-  ')
+  results=$(printf '%s\n' $names | sort -u | xargs -P8 -n1 sh -c '
+    getent ahosts "$1" 2>/dev/null | grep -q . || exit 0
+    code=$(curl -s -o /dev/null -m 10 -w "%{http_code}" "https://$1/" 2>/dev/null)
+    case "$code" in 000|5*) printf "%s %s\n" "$1" "$code" ;; esac
+  ' _)
   local name code
   while IFS=' ' read -r name code; do
     [ -z "$code" ] && continue
