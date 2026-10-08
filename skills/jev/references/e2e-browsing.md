@@ -333,8 +333,9 @@ installed first (`npx expo run:ios --configuration Release`). Each test starts w
 |---|---|---|
 | `screen.getByText(...).tap()`, `getByRole(...)` | deterministic | n/a, L0 |
 | `expect(...).toBeVisible()` / `toContainText()` | deterministic | n/a, L0 |
-| `agent.act('<one goal>')` | model drives | replayed at L0 once a later check verifies it |
-| `agent.assert` / `waitFor` / `extract` | model judges | never, always calls the model |
+| `agent.act('<one goal>')` | Jev drives (decision executor) | replayed at L0 once a later check verifies it |
+| `agent.assert` (decision executor) | Jev call, L1 | never |
+| `waitFor` / `extract` | text model | never, always calls the model |
 
 **Record and replay.** An `act` step that a later check verifies is saved in `.e2e/cache` and replayed with no
 model call. If the screen changed, the model takes over. `.e2e/cache/` is gitignored by default; commit it for
@@ -348,6 +349,9 @@ build profile, runs `npx e2e run --config e2e.ci.config.ts` and uploads the repo
 junit, screenshots). Use an API key in CI, not a subscription login. Expo's loop also adds a PR exploration
 run: it reads the PR diff and description and tests the changed features, next to the evergreen suite.
 
+**Reporting and engines.** The `@e2e-dev/github` reporter posts results as a PR comment; use it for the per-PR
+run. Web runs through the `@e2e-dev/web` engine package (Chromium, Firefox and WebKit via Playwright).
+
 Mapping to the ladder:
 
 - Exact `expect` and deterministic taps: L0. Replayed `act`: L0.
@@ -355,9 +359,22 @@ Mapping to the ladder:
 - `agent.assert`: a model judge, never cached. Prefer an exact `expect` (L0), then a Jev checkpoint on the
   `screen.txt` text (L1, ~$0.00002), over `agent.assert`. Fail closed as elsewhere.
 
-**Model for agent steps** (owner rule, 2026-10-08): Haiku 5.5 drives `agent.act` by default, same as
-`kinds.test`. GPT-6 Luna only for steps or asserts that check Arabic text and language structure (RTL screens,
-Arabic copy).
+**Jev first for agent steps** (verified in e2e's decision-models docs). Through e2e's decision executor,
+`agent.act` and `agent.assert` run on Jev (`@e2e-dev/decision`, `decisionExecutor`). The text model writes the
+`type` values and handles `waitFor` and `extract`. The text model is Haiku 5.5 by default; GPT-6 Luna only for
+Arabic text and language structure (owner rule, 2026-10-08).
+
+```ts
+import { decisionExecutor } from '@e2e-dev/decision';
+import { typeSafeAi } from '@ai-sdk/typesafe-ai';
+// text model is Haiku 5.5: pass its AI SDK model object as textModel
+// agents: { default: { executor: decisionExecutor({ model: typeSafeAi.decisionModel('jev-latest'), textModel: <Haiku 5.5 AI SDK model> }) } }
+```
+
+- Needs `ai` 7.0.128 or later.
+- A model id string in `model` fails with `INVALID_CONFIG`; pass the model object.
+- A done or failed claim is re-checked once on a fresh screen, with one question: is the step's task complete?
+- Measure accuracy on our suite before touching `minProbability` or `minConfidence`.
 
 Caveat, one run: a public run (kacperkapusciak, 2026-10-07, same suite, 24 tests) had Haiku 5.5 at 964k tokens,
 $0.030, 111 calls, 1 fail, and GPT-6 Luna at 262k tokens, $0.0071, 56 calls, 0 fail. Re-measure on our suite
