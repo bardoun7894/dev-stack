@@ -54,7 +54,7 @@ test('lean command isolates the worker from user config and loads a system-promp
   assert.match(r.script, /--strict-mcp-config/);
   assert.doesNotMatch(r.script, /--bare/);
   // the variadic --tools stays last so it cannot swallow a flag
-  assert.match(r.script, /--tools Bash Read Edit Write Glob Grep 2>&1/);
+  assert.match(r.script, /--tools Bash Read Edit Write Glob Grep Skill 2>&1/);
 });
 
 test('--full command is the plain one', () => {
@@ -242,7 +242,7 @@ test('auto-role is off with --no-auto-role, JDELEGATE_AUTO_ROLE=0 or an explicit
 });
 
 const mcpDef = (name) => ({ command: 'node', args: [`${name}.js`], description: `the ${name} server` });
-const mcpOf = (script) => JSON.parse(readFileSync(script.match(/--mcp-config '([^']+)' --disable/)[1], 'utf8')).mcpServers;
+const mcpOf = (script) => JSON.parse(readFileSync(script.match(/--mcp-config '([^']+)'/)[1], 'utf8')).mcpServers;
 
 test('auto-MCP: no servers configured means no jev noul call and an empty config', () => {
   jevStub();
@@ -641,4 +641,145 @@ test('quota: review and language chains follow quota but never gain GPT elsewher
   assert.equal(first(healthy), 'openai-codex/gpt-6.1-sol');
   const impl = quotaRoute({ cliproxy: win(0.99, 0.99), 'opencode-go': win(0.99, 0.99), commandcode: win(0.99, 0.99), 'openai-codex': win(0, 0) });
   assert.doesNotMatch(impl, /openai-codex/);
+});
+
+// ── W4: the worker writes exit/out.log itself; `jdelegate wait` collects them ──
+test('W4 run.sh writes exit via an EXIT trap and opencode/pi workers also write out.log', () => {
+  for (const harness of ['opencode', 'pi']) {
+    const r = dry(['--harness', harness].slice(0, 0));
+    assert.equal(r.status, 0);
+  }
+  const r = dry([]);
+  assert.match(r.script, /trap .*exit.* EXIT/);
+});
+
+test('W4 dry-run pi and opencode scripts produce out.log', () => {
+  writeFileSync(tiers + '.w4', JSON.stringify({ tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['opencode-go/x']])) }));
+  const run = (h) => spawnSync(process.execPath, [JD, '--dry-run', '--harness', h, '--cwd', repo, 'do the thing'], { encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers + '.w4', JDELEGATE_CACHE: join(tmp, 'cache'), JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0' } });
+  const o = run('opencode'); const rs = readFileSync(o.stdout.match(/dry-run (\S+)/)[1] + '/run.sh', 'utf8');
+  assert.match(rs, /tee '[^']*out\.log'/);
+});
+
+test('W4 killing the wrapper leaves exit and out.log in the run dir and `wait` returns them', async () => {
+  const wcache = join(tmp, 'wcache');
+  stub('claude', 'sleep 2; echo WORKER-RESULT-LINE');
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'w4job', 'do the thing'], {
+    stdio: 'ignore', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: wcache, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0' } });
+  let runDir;
+  for (let i = 0; i < 100 && !runDir; i++) { await new Promise((r) => setTimeout(r, 100)); try { runDir = readdirSync(wcache).map((n) => join(wcache, n)).find((p) => existsSync(join(p, 'run.sh'))); } catch {} }
+  assert.ok(runDir, 'run dir created');
+  await new Promise((r) => setTimeout(r, 300));
+  child.kill('SIGKILL');
+  const w = spawnSync(process.execPath, [JD, 'wait', 'w4job'], { encoding: 'utf8', timeout: 20000, env: { ...process.env, JDELEGATE_CACHE: wcache } });
+  assert.equal(w.status, 0, w.stderr + w.stdout);
+  assert.ok(existsSync(join(runDir, 'exit')) && existsSync(join(runDir, 'out.log')));
+  assert.match(w.stdout, /exit 0/);
+  assert.match(w.stdout, /WORKER-RESULT-LINE/);
+  const w2 = spawnSync(process.execPath, [JD, 'wait', runDir], { encoding: 'utf8', timeout: 20000 });
+  assert.match(w2.stdout, /WORKER-RESULT-LINE/);
+});
+
+// ── W5: no opencode for jobs that need a shell ──
+const w5Tiers = join(tmp, 'w5-tiers.json');
+write(w5Tiers, JSON.stringify({
+  provider_priority: { 'opencode-go': 0, cliproxy: 1 },
+  tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test']])),
+  kinds: { code: { T3: ['opencode-go/deepseek-v4.1-flash', 'cliproxy/claude-haiku-4-5-20251001'] } },
+}));
+test('W5 a brief that needs a shell never goes to opencode', () => {
+  for (const words of [['git', 'commit'], ['run', 'the', 'tests'], ['then', 'lint'], ['use', 'bash']]) {
+    const out = printRoute(words, { JEV_ROUTER_CONFIG: w5Tiers });
+    assert.match(out, /claude · cliproxy\/claude-haiku/, words.join(' ') + ': ' + out);
+  }
+  assert.match(printRoute(['rename', 'a', 'variable'], { JEV_ROUTER_CONFIG: w5Tiers }), /opencode · opencode-go\/deepseek-v4\.1-flash/);
+});
+
+// ── W8: agy always bypasses permissions; codex usage limit marks codex exhausted and falls back ──
+test('W8 agy relay runs headless with --dangerously-skip-permissions by default', () => {
+  const relay = join(homedir(), '.claude', 'skills', 'agy-delegate', 'scripts', 'relay.mjs');
+  const agyLog = join(tmp, 'agy-argv.log');
+  stub('agy', `echo "$@" >> "${agyLog}"; [ "$1" = changelog ] && echo "1.0.16: x"; echo done`);
+  write(join(tmp, 'brief.txt'), 'hello');
+  spawnSync(process.execPath, [relay, '--brief', join(tmp, 'brief.txt'), '--cd', repo, '--out-dir', join(tmp, 'agyout')], { encoding: 'utf8', timeout: 20000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  assert.match(readFileSync(agyLog, 'utf8'), /--dangerously-skip-permissions/);
+});
+
+test('W8 a codex usage limit marks codex exhausted until the printed reset and the run falls back to the next tier', () => {
+  const ex = join(tmp, 'exhausted.json');
+  const cache = join(tmp, 'cx-cache');
+  stub('codex', `echo "You've hit your usage limit. Upgrade to Pro or try again at Oct 9th, 2030 3:14 PM."; exit 1`);
+  stub('claude', 'echo FALLBACK-CLAUDE-RAN');
+  write(join(tmp, 'cx-tiers.json'), JSON.stringify({
+    tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test']])),
+    kinds: { review: { T3: ['openai-codex/gpt-6.1-sol', 'cliproxy/claude-opus-5-5'] } },
+  }));
+  jevStub();
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--role', 'reviewer', '--cwd', repo, 'review it'], { encoding: 'utf8', timeout: 30000,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: join(tmp, 'cx-tiers.json'), JEV_EXHAUSTED_FILE: ex, JDELEGATE_CACHE: cache,
+      JDELEGATE_AGENT_DIRS: `${agents}:${agentsParked}`, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_AUTO_ROLE: '0' } });
+  assert.match(r.stdout, /FALLBACK-CLAUDE-RAN/, r.stdout + r.stderr);
+  const j = JSON.parse(readFileSync(ex, 'utf8'));
+  assert.equal(j['openai-codex'], new Date('Oct 9 2030 3:14 PM').getTime());
+});
+
+// Owner rule 2026-10-07: computer use / browser-e2e / running tests / QA go to kind test (Haiku 5.5).
+test('test-kind briefs and role=qa-engineer route to kinds.test; code briefs do not', () => {
+  const t = join(tmp, 'tiers-test-kind.json');
+  write(t, JSON.stringify({
+    tiers: { T0: ['cliproxy/claude-test'], T1: ['cliproxy/claude-test'], T2: ['opencode-go/x'], T3: ['cliproxy/claude-test'], T4: ['cliproxy/claude-test'] },
+    kinds: { test: { T2: ['cliproxy/claude-haiku-5-5'], T3: ['cliproxy/claude-haiku-5-5'] } },
+  }));
+  const route = (brief, extra = []) => spawnSync(process.execPath, [JD, '--print', ...extra, brief], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: t, JDELEGATE_CACHE: join(tmp, 'cache'), JDELEGATE_SELECT_CACHE: '0' },
+  }).stdout;
+  assert.match(route('run the e2e tests for the login page'), /test·.*claude-haiku-5-5/);
+  assert.match(route('use playwright to click through checkout'), /claude-haiku-5-5/);
+  assert.match(route('review the diff', ['--role', 'qa-engineer']), /claude-haiku-5-5/);
+  assert.doesNotMatch(route('rename function foo in utils.ts'), /haiku-5-5/);
+});
+
+// Owner decision 2026-10-08: Sonnet/Haiku claude workers get the Opus advisor; lean workers keep the Skill tool.
+const tiersFor = (ref) => {
+  const f = join(tmp, `tiers-${ref.replace(/\W/g, '_')}.json`);
+  write(f, JSON.stringify({ tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, [ref]])) }));
+  return f;
+};
+const advisorEnv = (ref, extra = {}) => ({ JEV_ROUTER_CONFIG: tiersFor(ref), JDELEGATE_ADVISOR: '', ...extra });
+
+test('advisor: sonnet and haiku claude workers get --advisor opus, lean and --full', () => {
+  for (const ref of ['cliproxy/claude-sonnet-5-5', 'cliproxy/claude-haiku-5-5']) {
+    const lean = dry([], { env: advisorEnv(ref) });
+    assert.equal(lean.status, 0, lean.stderr);
+    assert.match(lean.script, /--advisor opus /, ref);
+    const full = dry(['--full'], { env: advisorEnv(ref) });
+    assert.equal(full.status, 0, full.stderr);
+    assert.match(full.script, /--advisor opus /, ref);
+  }
+});
+
+test('advisor: opus workers get no advisor flag', () => {
+  const r = dry([], { env: advisorEnv('cliproxy/claude-opus-5-5') });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.script, /--advisor/);
+});
+
+test('advisor: JDELEGATE_ADVISOR=0 drops the flag; JDELEGATE_ADVISOR=<model> overrides the advisor model', () => {
+  const off = dry([], { env: advisorEnv('cliproxy/claude-sonnet-5-5', { JDELEGATE_ADVISOR: '0' }) });
+  assert.equal(off.status, 0, off.stderr);
+  assert.doesNotMatch(off.script, /--advisor/);
+  const over = dry([], { env: advisorEnv('cliproxy/claude-haiku-5-5', { JDELEGATE_ADVISOR: 'claude-fable-5-1' }) });
+  assert.equal(over.status, 0, over.stderr);
+  assert.match(over.script, /--advisor claude-fable-5-1 /);
+});
+
+test('lean worker keeps the Skill tool on: no --disable-slash-commands, Skill in --tools', () => {
+  const r = dry([]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.script, /--tools Bash Read Edit Write Glob Grep Skill 2>&1/);
+  assert.doesNotMatch(r.script, /--disable-slash-commands/);
+  // bundled Claude Code skills add ~3k first-turn tokens; the repo's .claude/skills still load
+  assert.match(r.script, /"disableBundledSkills":true/);
 });

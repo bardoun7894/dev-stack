@@ -15,7 +15,7 @@ Named `L0`–`L4` so it doesn't clash with `jev route`'s `T0`–`T4` model tiers
 |---|---|---|---|
 | L0 | Playwright / agent-browser, deterministic | navigation, clicks, known selectors, exact text, status codes, URLs | free, ms |
 | L1 | **Jev** | "did this step work?", why it failed, what rung goes next, which link/action to take | ~$0.00002, < 1 s |
-| L2 | cheap text LLM (Haiku 4.5; free `opencode/ling-3.0-flash-fin-free` with Haiku fallback) | repair a broken selector from the trimmed aria tree, extract a region | cheap |
+| L2 | cheap text LLM (Haiku 5.5, Haiku 4.5 as fallback; free `opencode/ling-3.0-flash-fin-free` with Haiku fallback) | repair a broken selector from the trimmed aria tree, extract a region | cheap |
 | L3 | vision model on a screenshot | layout, visual regressions, canvas/charts, anything Jev said `uncertain` about | medium |
 | L4 | Opus / `dogfood` / `codex-computer` | exploratory runs, failures L1–L3 couldn't explain | expensive, on demand |
 
@@ -308,6 +308,80 @@ Lessons baked into it (all from the decision log, `jev tune browse`):
   `validationMessage`s in the judge state, or bad-input sessions look like nothing happened.
 - Hostile input echoed back into a textbox still reads as alarming and comes back `uncertain`. That's
   intended, and it escalates to L3 (screenshot) rather than passing.
+
+## Mobile and mixed suites: TesterArmy e2e
+
+[TesterArmy `e2e`](https://e2e.tester.army/docs) is an open-source agentic e2e framework, and the one Expo
+documents. Web runs on Playwright; mobile runs on agent-device against the iOS Simulator or Android Emulator.
+Use it for a mobile app, or for a suite that needs exact steps mixed with agent steps. A web app stays on
+`jev-browse` and its replay cache.
+
+```bash
+npx e2e init                  # engine Mobile or Web, then model gateway
+npx e2e run [file] [--target ios] [--video]
+npx e2e models                # npx e2e login for a ChatGPT/Copilot/SuperGrok subscription, or an API key
+npx agent-device doctor       # simulator/emulator check
+npx agent-device devices
+```
+
+`init` adds `e2e`, `@e2e-dev/mobile`, a `test:e2e` script, `e2e.config.ts`, `tests/example.e2e.ts`,
+`.agents/skills/e2e/` (linked at `.claude/skills/e2e/`) and `.mcp.json` with the `e2e mcp` server. That server
+lets a coding agent open the app and verify locators before it writes them. Mobile needs a Release build
+installed first (`npx expo run:ios --configuration Release`). Each test starts with `await app.open()`.
+
+| Call | Who decides | Cached |
+|---|---|---|
+| `screen.getByText(...).tap()`, `getByRole(...)` | deterministic | n/a, L0 |
+| `expect(...).toBeVisible()` / `toContainText()` | deterministic | n/a, L0 |
+| `agent.act('<one goal>')` | Jev drives (decision executor) | replayed at L0 once a later check verifies it |
+| `agent.assert` (decision executor) | Jev call, L1 | never |
+| `waitFor` / `extract` | text model | never, always calls the model |
+
+**Record and replay.** An `act` step that a later check verifies is saved in `.e2e/cache` and replayed with no
+model call. If the screen changed, the model takes over. `.e2e/cache/` is gitignored by default; commit it for
+CI replay. `--no-cache` forces the model.
+
+**Failures.** `.e2e/report.json` holds the results; `.e2e/artifacts` holds a screenshot and `screen.txt`
+(roles and text). Read `screen.txt` to fix a locator, not the screenshot.
+
+**CI.** Expo's EAS Workflow (`.eas/workflows/e2e-tests.yml`) runs on a `pull_request` trigger with a simulator
+build profile, runs `npx e2e run --config e2e.ci.config.ts` and uploads the report (summary.md, report.json,
+junit, screenshots). Use an API key in CI, not a subscription login. Expo's loop also adds a PR exploration
+run: it reads the PR diff and description and tests the changed features, next to the evergreen suite.
+
+**Reporting and engines.** The `@e2e-dev/github` reporter posts results as a PR comment; use it for the per-PR
+run. Web runs through the `@e2e-dev/web` engine package (Chromium, Firefox and WebKit via Playwright).
+
+Mapping to the ladder:
+
+- Exact `expect` and deterministic taps: L0. Replayed `act`: L0.
+- Live `agent.act`: L2 driver.
+- `agent.assert` with the decision executor: a Jev call, L1, never cached. Without it (plain LLM agent): a full
+  model judge, never cached. Prefer an exact `expect` (L0) first, then a Jev checkpoint on the `screen.txt` text
+  (L1, ~$0.00002). Fail closed as elsewhere.
+
+**Jev first for agent steps** (verified in e2e's decision-models docs). Through e2e's decision executor,
+`agent.act` and `agent.assert` run on Jev (`@e2e-dev/decision`, `decisionExecutor`). The text model writes the
+`type` values and handles `waitFor` and `extract`. The text model is Haiku 5.5 for every step, Arabic screens included. GPT-6 Luna only for a step that judges the Arabic words themselves (wording, grammar, spelling) (owner rule 2026-10-08).
+
+```ts
+import { decisionExecutor } from '@e2e-dev/decision';
+import { typeSafeAi } from '@ai-sdk/typesafe-ai';
+import { anthropic } from '@ai-sdk/anthropic';
+// text model is Haiku 5.5: pass its AI SDK model object as textModel
+// agents: { default: { executor: decisionExecutor({ model: typeSafeAi.decisionModel('jev-latest'), textModel: anthropic('claude-haiku-5-5') }) } }
+```
+
+- Needs `ai` 7.0.128 or later.
+- A model id string in `model` fails with `INVALID_CONFIG`; pass the model object.
+- A done or failed claim is re-checked once on a fresh screen, with one question: is the step's task complete?
+- Measure accuracy on our suite before touching `minProbability` or `minConfidence`.
+
+Caveat, one run: a public run (kacperkapusciak, 2026-10-07, same suite, 24 tests) had Haiku 5.5 at 964k tokens,
+$0.030, 111 calls, 1 fail, and GPT-6 Luna at 262k tokens, $0.0071, 56 calls, 0 fail. Re-measure on our suite
+before changing the rule.
+
+Both follow the same rule as the rest of this file: pay once per UI change, not per run.
 
 ## Browsing agents (Claude driving a browser to get something done)
 

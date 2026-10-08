@@ -18,7 +18,7 @@
  *
  * Lean claude workers (default; --full restores the plain `claude -p`): ~10k first-turn tokens instead of ~29k.
  * No user/project hooks, no auto-memory, no CLAUDE.md auto-discovery (~/.claude/CLAUDE.md is the orchestrator's rulebook),
- * settings from project+local only, no MCP, 6 core tools. In their place <run>/worker-prompt.md goes in via
+ * settings from project+local only, no MCP, 6 core tools + Skill (the repo's own .claude/skills work). In their place <run>/worker-prompt.md goes in via
  * --append-system-prompt-file: a short worker contract, the git-root repo's own CLAUDE.md/AGENTS.md (never $HOME's),
  * an optional role (--role, or the one `jev choice` picks from config/worker-roles.json), and any skills (--skill, or the one
  * jev-skill-suggest picks when it is in config/worker-skills.json). With no --mcp, each configured MCP server is judged by
@@ -51,7 +51,8 @@ const { buildRouteBody, buildOutputBody, parseRoute, parseIds } = await import(`
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; } };
 const CONFIG = readJson(process.env.JEV_ROUTER_CONFIG ?? `${HOME}/.config/jev-router/tiers.json`) ?? {};
 const DEAD = readJson(`${HOME}/.config/jev-router/dead-models.json`) ?? {};
-const EXHAUSTED = readJson(`${HOME}/.config/jev-router/exhausted.json`) ?? {};
+const EXHAUSTED_FILE = process.env.JEV_EXHAUSTED_FILE || `${HOME}/.config/jev-router/exhausted.json`;
+const EXHAUSTED = readJson(EXHAUSTED_FILE) ?? {};
 const JEV = process.env.JDELEGATE_JEV || ([`${HOME}/.local/bin/jev`, "/usr/local/bin/jev"].find(existsSync) ?? "jev");
 const CACHE = process.env.JDELEGATE_CACHE || join(HOME, ".cache", "jdelegate");
 const SKILL_DIRS = (process.env.JDELEGATE_SKILL_DIRS || `${HOME}/.claude/skills:${HOME}/.claude/skills-parked`).split(":").filter(Boolean);
@@ -84,7 +85,7 @@ const THINK = ["off", "minimal", "low", "medium", "high"];
 
 // ── args ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
-const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, no skills, 6 core tools (~10k vs ~43k first-turn tokens).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
+const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor (--advisor opus; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
 const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", dryRun: false, gc: false, older: 60, brief: "" };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -109,6 +110,34 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--print") opt.print = true;
   else if (a === "--brief-file") opt.brief = readFileSync(argv[++i], "utf8");
   else opt.brief = opt.brief ? `${opt.brief} ${a}` : a;
+}
+if (argv[0] === "wait") {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const names = argv.slice(1).filter((a) => !a.startsWith("--"));
+  if (!names.length) { console.error("usage: jdelegate wait <run-dir-or-name>..."); process.exit(2); }
+  const resolveRun = (n) => {
+    if (existsSync(join(n, "run.sh"))) return resolve(n);
+    const hits = existsSync(CACHE) ? readdirSync(CACHE).filter((d) => d === n || d.includes(`-${n}-`)).sort() : [];
+    return hits.length ? join(CACHE, hits[hits.length - 1]) : undefined;
+  };
+  const runs = names.map((n) => ({ n, run: resolveRun(n) }));
+  const missing = runs.filter((r) => !r.run);
+  if (missing.length) { console.error(`jdelegate wait: no run found for ${missing.map((r) => r.n).join(", ")}`); process.exit(2); }
+  const limit = Date.now() + (argv.includes("--timeout") ? Number(argv[argv.indexOf("--timeout") + 1]) : opt.timeout) * 60_000;
+  let rcAll = 0;
+  for (const { n, run } of runs) {
+    while (!existsSync(join(run, "exit"))) {
+      if (Date.now() > limit) { console.log(`=== ${n} (${run})\nstill running`); rcAll = 124; break; }
+      await sleep(500);
+    }
+    if (!existsSync(join(run, "exit"))) continue;
+    const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
+    const read = (f) => { try { return readFileSync(join(run, f), "utf8"); } catch { return ""; } };
+    const text = read("final.txt").trim() || read("out.log").trim() || read("err.log").trim();
+    console.log(`=== ${n} (${run})\nexit ${rc}\n${text.split("\n").slice(-40).join("\n")}`);
+    if (rc !== 0 && rcAll === 0) rcAll = rc;
+  }
+  process.exit(rcAll);
 }
 if (opt.gc) {
   const root = CACHE;
@@ -315,6 +344,12 @@ function bucketOf(ref, quota) {
   return { bucket, note: bucket ? `${prov} ${driven.join(", ")} → demoted` : undefined };
 }
 
+/** opencode workers have no usable shell: a brief that commits, runs tests, lints or calls bash goes to a shell-capable harness. */
+const needsShell = (brief) => /\bgit\s+(commit|push|merge|rebase|checkout|add)\b|\b(commit|run(ning)?\s+(the\s+|all\s+|our\s+)?(unit\s+|e2e\s+)?tests?|test\s+suite|lint(er|ing)?|bash|shell|npm\s+(test|run)|pytest|phpunit|cargo\s+test)\b/i.test(brief);
+
+/** Owner rule 2026-10-07: computer use, browser/e2e/playwright, running tests and QA run on kinds.test (Haiku 5.5). */
+const isTestWork = (brief, role) => role === "qa-engineer" || /\b(computer[- ]use|browser|e2e|end[- ]to[- ]end|playwright|puppeteer|cypress|selenium|qa|run(ning)?\s+(the\s+|all\s+|our\s+)?(unit\s+|e2e\s+|integration\s+)?tests?|test\s+suite)\b/i.test(brief);
+
 function pick(d) {
   const thinkIdx = Math.max(0, THINK.indexOf(CONFIG.thinking?.[d.tier] ?? "medium"));
   const thinking = THINK[Math.min(THINK.length - 1, d.role === "thinker" ? Math.max(thinkIdx + 1, 2) : thinkIdx)];
@@ -329,7 +364,8 @@ function pick(d) {
       ? { ref, i, ...bucketOf(ref, quota) }
       : { ref, i, bucket: METERED.has(provider(ref)) ? 3 : (PRIORITY[provider(ref)] ?? 2) })
     .sort((x, y) => x.bucket - y.bucket || x.i - y.i)
-    .filter((x) => !opt.harness || harnessFor(x.ref) === opt.harness);
+    .filter((x) => !opt.harness || harnessFor(x.ref) === opt.harness)
+    .filter((x) => !(needsShell(opt.brief) && harnessFor(x.ref) === "opencode"));
   const ranked = scored.map((x) => x.ref);
   const demoted = [...new Set(scored.map((x) => x.note).filter(Boolean))];
   const ref = ranked[0];
@@ -402,6 +438,13 @@ function leanMcpConfig() {
 const isLean = () => !(opt.full && !opt.mcp.length);
 let workerSkills = [];
 let workerRole;
+// Owner decision 2026-10-08: Sonnet/Haiku claude workers get the Opus advisor (claude --advisor, docs: code.claude.com/docs/en/advisor).
+// JDELEGATE_ADVISOR=0 turns it off; JDELEGATE_ADVISOR=<model> picks another advisor.
+function advisorFlag(id) {
+  const env = (process.env.JDELEGATE_ADVISOR ?? "").trim();
+  if (env === "0" || !/sonnet|haiku/i.test(id)) return "";
+  return ` --advisor ${env.replace(/[^\w./-]/g, "") || "opus"}`;
+}
 function workerScript(p, run, briefFile) {
   const id = p.ref.slice(p.ref.indexOf("/") + 1);
   const effortClaude = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
@@ -409,21 +452,23 @@ function workerScript(p, run, briefFile) {
   switch (p.harness) {
     case "claude":
       if (!isLean())
-        return `claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+        return `claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
       // lean: brief on stdin (variadic --tools would swallow a trailing prompt argument). No CLAUDE.md files, no user
       // settings, no hooks, no auto-memory; the worker's context is <run>/worker-prompt.md. (--bare would break OAuth login.)
-      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""}}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --disable-slash-commands --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep 2>&1 | tee ${q(join(run, "out.log"))}`;
+      // Skill tool on: the repo's own .claude/skills (project settings) stay reachable; slash commands stay off.
+      // disableBundledSkills: with the Skill tool on, ~19 bundled Claude Code skills added ~3k first-turn tokens.
+      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"disableBundledSkills":true}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "codex":
       return `codex exec -m ${q(id)} -C ${q(opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "agy":
-      return `node ${q(AGY_RELAY)} --brief ${q(briefFile)} --cd ${q(opt.cwd)} --model ${q(id)} --out-dir ${q(join(run, "agy"))} 2>&1 | tee ${q(join(run, "out.log"))}`;
+      return `node ${q(AGY_RELAY)} --brief ${q(briefFile)} --cd ${q(opt.cwd)} --model ${q(id)} --dangerously-skip-permissions --out-dir ${q(join(run, "agy"))} 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "opencode": {
       // JSON events to a file for the answer; a readable stream in the tab.
       const show =
         'if .type == "text" then "🤖 " + (.part.text // "") ' +
         'elif .type == "tool_use" then "🔧 " + (.part.tool // "tool") + " " + ((.part.state.input // {}) | tostring | .[0:140]) ' +
         'elif .type == "error" then "✗ " + (.error | tostring | .[0:200]) else empty end';
-      return `opencode run -m ${q(p.ref)} --dir ${q(opt.cwd)} --auto --format json "$(cat ${q(briefFile)})" </dev/null 2>${q(join(run, "err.log"))} | tee ${q(join(run, "out.jsonl"))} | jq --unbuffered -rR ${q(`fromjson? | ${show}`)}`;
+      return `opencode run -m ${q(p.ref)} --dir ${q(opt.cwd)} --auto --format json "$(cat ${q(briefFile)})" </dev/null 2>${q(join(run, "err.log"))} | tee ${q(join(run, "out.jsonl"))} | jq --unbuffered -rR ${q(`fromjson? | ${show}`)} | tee ${q(join(run, "out.log"))}`;
     }
     default: {
       // Bare pi, like software-factory's lib/agent.py: with extensions loaded the
@@ -434,7 +479,8 @@ function workerScript(p, run, briefFile) {
         `pi --mode json -p --no-extensions --no-context-files --no-skills --model ${q(p.ref)} --thinking ${p.thinking} --session-dir ${q(join(run, "sessions"))} "$(cat ${q(briefFile)})" </dev/null > ${q(join(run, "out.jsonl"))} 2>${q(join(run, "err.log"))} & PI=$!`,
         `until ls ${q(join(run, "sessions"))}/*.jsonl >/dev/null 2>&1 || ! kill -0 $PI 2>/dev/null; do sleep 0.5; done`,
         `S=$(ls ${q(join(run, "sessions"))}/*.jsonl 2>/dev/null | head -1); [ -n "$S" ] && { ${q(view)} "$S" ${q(opt.name)} & V=$!; }`,
-        `wait $PI; RC=$?; sleep 1; [ -n "$V" ] && kill $V 2>/dev/null; exit $RC`,
+        `wait $PI; RC=$?; sleep 1; [ -n "$V" ] && kill $V 2>/dev/null`,
+        `jq -rs ${q('[.[] | select(.type == "agent_end")] | last | (.messages // []) | map(select(.role == "assistant")) | last | (.content // []) | map(select(.type == "text") | .text) | join("\\n")')} ${q(join(run, "out.jsonl"))} > ${q(join(run, "out.log"))} 2>/dev/null; exit $RC`,
       ].join("\n");
     }
   }
@@ -557,6 +603,7 @@ const earlySelection = opt.harness && !opt.print ? selectWorker(opt.harness) : u
 const d = await routeDecision();
 // Owner rule 2026-10-03: a reviewer worker runs on the review chain (GPT first, Opus fallback), whatever kind the brief routed to.
 if (opt.role === "reviewer" && CONFIG.kinds?.review) d.kind = "review";
+if (CONFIG.kinds?.test && d.kind !== "review" && isTestWork(opt.brief, opt.role)) d.kind = "test";
 const p = pick(d);
 let head =
   `[jdelegate] ${d.tier} ${d.kind}·${d.role} (jev @${(d.conf ?? 0).toFixed(2)}, ui ${d.ui.toFixed(2)}, ${d.ms}ms` +
@@ -603,9 +650,12 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
   }
   const label = `${nameLabel} · ${attemptP.ref.split("/").pop()}`;
   writeFileSync(join(run, "run.sh"),
-    `#!/bin/bash\n# jdelegate worker: ${label.replace(/[\r\n]+/g, " ")}\nset -o pipefail\ncd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
+    `#!/bin/bash\n# jdelegate worker: ${label.replace(/[\r\n]+/g, " ")}\nset -o pipefail\n` +
+    `# the worker records its own exit (also when killed), so a dead jdelegate wrapper loses nothing: see \`jdelegate wait\`\n` +
+    `trap 'rc=$?; [ -e ${q(join(run, "exit"))} ] || { echo $rc > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}; }' EXIT\n` +
+    `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
     `printf '\\e]2;%s\\a' ${q(label)}\necho ${q(`▶ ${label}  (${attemptTier} ${d.kind}·${d.role})`)}\n` +
-    `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit"))}\n` +
+    `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}\n` +
     `echo; echo "■ done (exit $RC) — result: "${q(run)}\n`, { mode: 0o755 });
   return { run, label };
 }
@@ -622,6 +672,36 @@ if (opt.dryRun) {
   } catch { /* no MCP config in this mode */ }
   console.log(`${head}\n[jdelegate] dry-run ${run}\n${mcpShown}${readFileSync(join(run, "run.sh"), "utf8")}`);
   process.exit(0);
+}
+
+/** Epoch ms when a codex "You've hit your usage limit" message says codex works again (absolute or relative form); 5 h from now when unparseable. */
+function codexResetAt(text) {
+  const abs = text.match(/try again at ([^\n]*?)\.?(?:\n|$)/i)?.[1]?.replace(/(\d)(st|nd|rd|th)\b/g, "$1");
+  const t = abs ? Date.parse(abs) : NaN;
+  if (t > Date.now()) return t;
+  const rel = text.match(/try again in ((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m)\s*,?\s*(?:and\s*)?)+)/i)?.[1];
+  if (rel) {
+    const unit = { d: 864e5, h: 36e5, m: 6e4 };
+    let ms = 0;
+    for (const [, n, u] of rel.matchAll(/(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)/gi)) ms += Number(n) * unit[u[0].toLowerCase()];
+    if (ms) return Date.now() + ms;
+  }
+  return Date.now() + 5 * 36e5;
+}
+/** A codex worker that hit the plan limit: record the provider as exhausted so every router skips it. Returns true when it did. */
+function markCodexExhausted(attemptP, run) {
+  if (attemptP.harness !== "codex") return false;
+  let text = "";
+  try { text = readFileSync(join(run, "out.log"), "utf8"); } catch { return false; }
+  if (!/You've hit your usage limit/i.test(text)) return false;
+  const until = codexResetAt(text);
+  EXHAUSTED["openai-codex"] = until;
+  try {
+    const cur = readJson(EXHAUSTED_FILE) ?? {};
+    mkdirSync(dirname(EXHAUSTED_FILE), { recursive: true });
+    writeFileSync(EXHAUSTED_FILE, JSON.stringify({ ...cur, "openai-codex": until }, null, 2));
+  } catch { /* the in-memory mark still drives this run's fallback */ }
+  return true;
 }
 
 async function execute(attemptBrief, attemptP, attemptTier) {
@@ -664,6 +744,10 @@ async function execute(attemptBrief, attemptP, attemptTier) {
 const initialTier = d.tier;
 let tier = initialTier, currentP = p, brief = opt.brief;
 let result = await execute(brief, currentP, tier);
+if (markCodexExhausted(currentP, result.run)) {
+  const next = pick({ ...d, tier });
+  if (next) { currentP = next; result = await execute(brief, currentP, tier); }
+}
 let escalationReason = "";
 let verdict;
 if (result.rc !== 0) verdict = { choice: "failed_needs_stronger", confidence: 1 };
