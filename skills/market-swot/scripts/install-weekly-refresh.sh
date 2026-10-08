@@ -20,6 +20,15 @@ cat <<E
     <string>-c</string>
     <string>$CLAUDE -p "/market-swot refresh" --allowedTools "Bash Read Edit Write WebSearch WebFetch" &lt;/dev/null</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>$HOME</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>$HOME/.claude/skills/market-swot</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
