@@ -355,7 +355,7 @@ run. Web runs through the `@e2e-dev/web` engine package (Chromium, Firefox and W
 Mapping to the ladder:
 
 - Exact `expect` and deterministic taps: L0. Replayed `act`: L0.
-- Live `agent.act`: L2 driver.
+- Live `agent.act`: L1 with the decision executor (Jev picks the action, the text model only writes typed values); L2 driver without it.
 - `agent.assert` with the decision executor: a Jev call, L1, never cached. Without it (plain LLM agent): a full
   model judge, never cached. Prefer an exact `expect` (L0) first, then a Jev checkpoint on the `screen.txt` text
   (L1, ~$0.00002). Fail closed as elsewhere.
@@ -369,12 +369,16 @@ import { decisionExecutor } from '@e2e-dev/decision';
 import { typeSafeAi } from '@ai-sdk/typesafe-ai';
 import { anthropic } from '@ai-sdk/anthropic';
 // text model is Haiku 5.5: pass its AI SDK model object as textModel
-// agents: { default: { executor: decisionExecutor({ model: typeSafeAi.decisionModel('jev-latest'), textModel: anthropic('claude-haiku-5-5') }) } }
+// agents: { default: { executor: decisionExecutor({ model: typeSafeAi.decisionModel('jev-latest'), textModel: anthropic('claude-haiku-5-5'), minProbability: 0.8, minConfidence: 0.8 }) } }
 ```
 
 - Needs `ai` 7.0.128 or later.
 - A model id string in `model` fails with `INVALID_CONFIG`; pass the model object.
 - A done or failed claim is re-checked once on a fresh screen, with one question: is the step's task complete?
+- `minProbability` and `minConfidence` default to 0 in `decisionExecutor` (executor.js), so it acts on any Jev
+  answer and never escalates on low confidence. That breaks rule 4 (fail closed). Start at
+  `minProbability: 0.8`, `minConfidence: 0.8` (the same bars as the Playwright helper) and tune only after
+  measuring on our suite.
 - Measure accuracy on our suite before touching `minProbability` or `minConfidence`.
 
 Caveat, one run: a public run (kacperkapusciak, 2026-10-07, same suite, 24 tests) had Haiku 5.5 at 964k tokens,
