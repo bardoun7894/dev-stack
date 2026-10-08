@@ -127,6 +127,16 @@ function parseVerdict(text) {
   return lines[lines.length - 1] === "VERDICT: PASS" ? "PASS" : "BLOCK";
 }
 
+// True when a `gh pr diff` failure is GitHub's 300-file cap. Matches the live stderr:
+// "gh: ... the diff exceeded the maximum number of files (300) ... PullRequest.diff too_large".
+function diffTooLarge(err) {
+  const m = String(err?.message ?? err ?? "").toLowerCase();
+  return /too_large/.test(m) || /exceeded the maximum number of files/.test(m);
+}
+
+// Body posted once on the new-PR path when gh pr diff fails with the 300-file cap.
+const TOO_LARGE_BODY = (sha) => `Too large for automatic review (diff over GitHub's 300-file limit). Needs a human.\n\nVERDICT: BLOCK\n\n<!-- haiku-review sha=${sha} -->`;
+
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; } };
 // exhausted.json maps provider -> expiry ms; dead-models.json maps model ref -> expiry ms. Accept lists/booleans/ISO strings too.
 function listed(map, key) {
@@ -370,7 +380,22 @@ function reviewPr(repo, n, dry) {
   const files = (pr.files ?? []).map((f) => f.path);
   if (files.length && files.every(isDocs)) return { ...info, action: "skipped-docs" };
 
-  let diff = gh(["pr", "diff", String(n), "-R", repo], { timeout: 120000 });
+  let diff;
+  try {
+    diff = gh(["pr", "diff", String(n), "-R", repo], { timeout: 120000 });
+  } catch (e) {
+    if (diffTooLarge(e)) {
+      // Post the skipped-marker once so the next sweep takes the existing skipped-seen path and never merges.
+      if (!dry) {
+        try { postComment(repo, n, TOO_LARGE_BODY(sha)); }
+        catch (pe) { console.error(`pr-review: ${repo}#${n}: too-large comment: ${pe.message}`); }
+      } else {
+        process.stdout.write(`${TOO_LARGE_BODY(sha)}\n`);
+      }
+      return { ...info, action: "skipped-too-large" };
+    }
+    throw e;
+  }
   let note = "";
   if (diff.length > MAX_DIFF) {
     diff = diff.slice(0, MAX_DIFF);
