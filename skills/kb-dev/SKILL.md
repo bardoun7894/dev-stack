@@ -14,6 +14,7 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 1. Brainstorm options      | `brainstorming` (obra)                                                                 | inline         |
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
 | 2a. Research (mandatory)   | `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher` (one pass, read-only) → `specs/NNN/research.md` | Sonnet (read-only + web) |
+| 2b. Market & UX research   | `market-swot project` — required for new products and UI-heavy features (new screens, redesign, landing pages), optional otherwise; feeds Phase 3 | inline + researcher |
 | 3. Architectural plan      | `/kb-spec plan` → `/speckit.plan` → `writing-plans` (obra)                             | inline         |
 | 4. Task breakdown          | `/kb-spec tasks` → `/speckit.tasks`                                                    | inline         |
 | 5a. Implement (solo)       | `executing-plans` (obra) in current session                                            | Sonnet         |
@@ -133,6 +134,7 @@ This skips Spec Kit entirely for small-to-medium features. Use the full Spec Kit
 | Trigger phrase (EN)                | Trigger phrase (AR)                          | What kb-dev does                                                  |
 |------------------------------------|----------------------------------------------|-------------------------------------------------------------------|
 | "new feature X"                    | "ميزة جديدة X" / "خاصية جديدة X"             | Run phases 0 → 2a → 4, pause for solo/fan-out decision            |
+| "swot" / "compare with competitors" / "make the UI like X" / "personal brand" | "تحليل سوات" / "منافسين" / "براند شخصي" | Run `market-swot` (project or me), hard stop for owner approval |
 | "build X" / "implement X"          | "ابني X" / "اعمل X" / "نفّذ X" / "صنع X"     | Run phases 0 → 12 (full pipeline)                                 |
 | "implement the spec at specs/NNN"  | "نفّذ المواصفات في specs/NNN"                | Run phase 0, then jump to phase 5, then 6–12                      |
 | "fix bug Y" (< 30 LOC)             | "أصلح خطأ Y" / "صلح Y" / "إصلاح Y"           | Run phase 0, then solo-mode phase 5a straight through to 12       |
@@ -207,6 +209,13 @@ This is the canonical map of how all 39 installed skills relate to each other. k
               │   → specs/NNN/research.md (KB prior art, library docs for   │
               │     repo versions, 2-3 competitors with URLs, risks)        │
               │   Mandatory before Phase 3 design decisions.                │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │   Phase 2b: Market & UX research — market-swot project      │
+              │   → docs/market-swot/<date>/REPORT.md (SWOT, F/R codes)     │
+              │   Required for new products / UI-heavy features.            │
               └──────────────────────────────┬───────────────────────────────┘
                                              │
                                              ▼
