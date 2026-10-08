@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,16 @@ const bi = args.indexOf("--body-file");
 if (bi >= 0) bodyFile = readFileSync(args[bi + 1], "utf8");
 appendFileSync(dir + "/calls.jsonl", JSON.stringify({ cmd, args, stdin, bodyFile }) + "\\n");
 const out = (s) => process.stdout.write(s);
-if (cmd === "claude") { if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); } out(sc.claudeOut ?? "No blocking issues"); }
+if (cmd === "pi" || cmd === "opencode") {
+  if (args[0] === "--version") { if (sc.noTools?.includes(cmd)) process.exit(127); out("1.0"); }
+  else {
+    const model = args[args.indexOf(cmd === "pi" ? "--model" : "-m") + 1];
+    if (sc.bFail?.includes(model)) { process.stderr.write("quota"); process.exit(1); }
+    out((sc.bOut ?? "No blocking issues\\nVERDICT: PASS") + "");
+  }
+}
+else if (cmd === "jev") { if (sc.jevFail) { process.stderr.write("api"); process.exit(sc.jevFail); } out(JSON.stringify(sc.jev ?? { choice: "pass", confidence: 0.95 })); }
+else if (cmd === "claude") { if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); } out(sc.claudeOut ?? "No blocking issues"); }
 else if (args[0] === "search") out(JSON.stringify(sc.search ?? []));
 else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(args.join(" ").includes("mergeStateStatus") ? (sc.prMerge ?? sc.pr) : sc.pr));
 else if (args[0] === "api") {
@@ -39,18 +48,26 @@ function run(argv, scenario) {
   writeFileSync(join(dir, "stub.mjs"), STUB);
   chmodSync(join(dir, "stub.mjs"), 0o755);
   writeFileSync(join(dir, "scenario.json"), JSON.stringify(scenario));
+  mkdirSync(join(dir, "cfg"));
+  for (const [name, content] of Object.entries(scenario.files ?? {})) writeFileSync(join(dir, name), typeof content === "string" ? content : JSON.stringify(content));
   const r = spawnSync(BIN, argv, {
     encoding: "utf8",
-    env: { ...process.env, PR_REVIEW_RUNNER: join(dir, "stub.mjs"), STUB_DIR: dir },
+    env: {
+      ...process.env, PR_REVIEW_RUNNER: join(dir, "stub.mjs"), STUB_DIR: dir, PR_REVIEW_CFG: join(dir, "cfg"),
+      JEV_EXHAUSTED_FILE: join(dir, "exhausted.json"), PR_REVIEW_DEAD: join(dir, "dead.json"), PR_REVIEW_QUOTA: join(dir, "quota.json"),
+      PR_REVIEW_LOG: join(dir, "log", "decisions.jsonl"),
+    },
   });
+  const lf = join(dir, "log", "decisions.jsonl");
+  const decisions = existsSync(lf) ? readFileSync(lf, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
   const f = join(dir, "calls.jsonl");
   const calls = existsSync(f) ? readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-  return { ...r, calls, posts: calls.filter((c) => c.args[0] === "pr" && c.args[1] === "review"), claudes: calls.filter((c) => c.cmd === "claude") };
+  return { ...r, calls, decisions, posts: calls.filter((c) => c.args[0] === "pr" && c.args[1] === "review"), claudes: calls.filter((c) => c.cmd === "claude") };
 }
 
 const pr = (over = {}) => ({
   headRefOid: SHA, title: "t", body: "b", isDraft: false, comments: [], reviews: [],
-  files: [{ path: "src/a.js" }], ...over,
+  files: [{ path: "src/a.js", additions: 5, deletions: 5 }], ...over,
 });
 
 test("marker for current sha -> skipped-seen", () => {
@@ -158,7 +175,7 @@ test("PASS + all green -> merge with --match-head-commit", () => {
   const r = go({});
   assert.equal(r.status, 0);
   assert.equal(merges(r).length, 1);
-  assert.deepEqual(merges(r)[0].args, ["pr", "merge", "1", "-R", "o/r", "--merge", "--match-head-commit", SHA]);
+  assert.deepEqual(merges(r)[0].args, ["pr", "merge", "1", "-R", "o/r", "--squash", "--match-head-commit", SHA]);
   assert.match(r.stdout, /merged/);
   assert.ok(r.posts[0].bodyFile.includes("VERDICT: PASS"));
 });
@@ -220,7 +237,7 @@ test("workflow without deploy -> merge", () => {
 });
 
 test("already-reviewed PASS unmerged -> merge re-check, no new review", () => {
-  const body = `**Haiku 5.5 review**\n\nok\nVERDICT: PASS\n\n<!-- haiku-review sha=${SHA} -->`;
+  const body = `**Haiku 5.5 review**\n\nok\nVERDICT: PASS\n\n**Second review (commandcode/gpt-6.1-sol)**\n\nok\nVERDICT: PASS\n\n<!-- haiku-review sha=${SHA} -->`;
   const r = run(["--sweep"], {
     search: [{ repository: { nameWithOwner: "bardoun7894/r" }, number: 3, updatedAt: "2026-10-01T00:00:00Z" }],
     pr: pr({ comments: [{ body }] }), prMerge: green(),
@@ -237,4 +254,109 @@ test("--dry-run and --no-merge -> no merge", () => {
   const n = go({}, ["--no-merge"]);
   assert.equal(merges(n).length, 0);
   assert.equal(n.posts.length, 1);
+});
+
+// ---- second reviewer, Jev gate, size/risk, kill switch, decision log ----
+const piCalls = (r) => r.calls.filter((c) => (c.cmd === "pi" || c.cmd === "opencode") && !c.args.includes("--version"));
+const jevCalls = (r) => r.calls.filter((c) => c.cmd === "jev");
+const future = Date.now() + 3600e3;
+
+test("second reviewer: first model, pi invocation, one comment with both sections", () => {
+  const r = go({});
+  assert.equal(piCalls(r).length, 1);
+  const a = piCalls(r)[0].args;
+  assert.deepEqual(a.slice(0, 8), ["--mode", "text", "-p", "--no-extensions", "--no-context-files", "--no-skills", "--no-tools", "--no-session"]);
+  assert.equal(a[a.indexOf("--model") + 1], "commandcode/gpt-6.1-sol");
+  assert.equal(r.posts.length, 1);
+  assert.match(r.posts[0].bodyFile, /\*\*Haiku 5\.5 review\*\*[\s\S]*\*\*Second review \(commandcode\/gpt-6\.1-sol\)\*\*[\s\S]*<!-- haiku-review sha=/);
+});
+
+test("second reviewer: skips exhausted provider and dead model, falls through to next", () => {
+  const r = go({ files: { "exhausted.json": { commandcode: future }, "dead.json": { "opencode-go/deepseek-v4.1-flash": future } } });
+  assert.deepEqual(piCalls(r).map((c) => c.cmd + ":" + c.args[c.args.indexOf(c.cmd === "pi" ? "--model" : "-m") + 1]), ["opencode:opencode-go/glm-5.3-flash"]);
+  assert.equal(merges(r).length, 1);
+  assert.match(r.posts[0].bodyFile, /Second review \(opencode-go\/glm-5\.3-flash\)/);
+});
+
+test("second reviewer: quota >= 0.9 skips provider; expired exhausted entry does not", () => {
+  const quota = { providers: { commandcode: { five_hour: 0.2, weekly: 0.93, monthly: null } } };
+  const r = go({ files: { "quota.json": quota, "exhausted.json": { "opencode-go": 1 } } });
+  assert.equal(piCalls(r)[0].args[piCalls(r)[0].args.indexOf("-m") + 1], "opencode-go/deepseek-v4.1-flash");
+});
+
+test("second reviewer: a model that errors -> next model", () => {
+  const r = go({ bFail: ["commandcode/gpt-6.1-sol"] });
+  assert.equal(piCalls(r).length, 2);
+  assert.match(r.posts[0].bodyFile, /Second review \(commandcode\/deepseek\/deepseek-v4\.1-flash\)/);
+  assert.equal(merges(r).length, 1);
+});
+
+test("all second reviewers exhausted -> A posted with note, no merge", () => {
+  const r = go({ files: { "exhausted.json": { commandcode: future, "opencode-go": future } } });
+  assert.equal(piCalls(r).length, 0);
+  assert.equal(merges(r).length, 0);
+  assert.equal(jevCalls(r).length, 0);
+  assert.match(r.posts[0].bodyFile, /second reviewer unavailable \(no quota\)/);
+  assert.equal(r.decisions[0].reason, "no-second-reviewer");
+});
+
+test("second reviewer BLOCK -> no merge", () => {
+  const r = go({ bOut: "P1 a.js:1 bad\nVERDICT: BLOCK" });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "second-verdict-block");
+});
+
+test("Jev pass 0.95 -> squash merge with head commit, merged comment", () => {
+  const r = go({ jev: { choice: "pass", confidence: 0.95 } });
+  assert.equal(merges(r).length, 1);
+  assert.deepEqual(merges(r)[0].args.slice(-3), ["--squash", "--match-head-commit", SHA]);
+  assert.equal(jevCalls(r)[0].args[0], "choice");
+  const c = skipComments(r).find((x) => x.bodyFile.includes("haiku-merged"));
+  assert.match(c.bodyFile, /Auto-merged after Haiku \+ commandcode\/gpt-6\.1-sol \+ Jev \(0\.95\) passed\. Revert: `gh pr revert 1 -R o\/r`/);
+  assert.ok(c.bodyFile.includes(`<!-- haiku-merged sha=${SHA} -->`));
+});
+
+test("Jev pass 0.8, block, error, exit 2 -> no merge", () => {
+  assert.equal(merges(go({ jev: { choice: "pass", confidence: 0.8 } })).length, 0);
+  assert.equal(merges(go({ jev: { choice: "block", confidence: 0.99 } })).length, 0);
+  assert.equal(merges(go({ jevFail: 3 })).length, 0);
+  assert.equal(merges(go({ jevFail: 2 })).length, 0);
+  assert.equal(go({ jev: { choice: "pass", confidence: 0.8 } }).decisions[0].reason, "jev-low-confidence");
+});
+
+test("OFF file -> no merge, no model calls needed for merge", () => {
+  const r = go({ files: { "cfg/OFF": "" } });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "kill-switch");
+});
+
+test("no-automerge.txt lists the repo -> no merge; other repo still merges", () => {
+  assert.equal(merges(go({ files: { "cfg/no-automerge.txt": "x/y\no/r\n" } })).length, 0);
+  assert.equal(merges(go({ files: { "cfg/no-automerge.txt": "x/y\n" } })).length, 1);
+});
+
+test("301 changed lines -> no merge; 300 -> merge", () => {
+  const f = (a, d) => [{ path: "src/a.js", additions: a, deletions: d }];
+  const big = go({ pr: pr({ files: f(200, 101) }) });
+  assert.equal(merges(big).length, 0);
+  assert.equal(big.decisions[0].reason, "too-big-301");
+  assert.equal(merges(go({ pr: pr({ files: f(200, 100) }) })).length, 1);
+});
+
+test("risky paths -> no merge", () => {
+  for (const path of [".github/workflows/x.yml", "db/migrations/1.sql", ".env.example", "src/Auth/login.js", "package-lock.json", "infra/Dockerfile"]) {
+    const r = go({ pr: pr({ files: [{ path, additions: 1, deletions: 1 }] }) });
+    assert.equal(merges(r).length, 0, path);
+    assert.match(r.decisions[0].reason, /^risky-path/, path);
+  }
+});
+
+test("decision log line carries the contract fields", () => {
+  const r = go({});
+  assert.equal(r.decisions.length, 1);
+  const d = r.decisions[0];
+  assert.deepEqual(Object.keys(d), ["at", "repo", "pr", "sha", "a", "b", "b_model", "jev", "conf", "lines", "action", "reason"]);
+  assert.equal(d.repo, "o/r"); assert.equal(d.pr, 1); assert.equal(d.sha, SHA);
+  assert.equal(d.a, "PASS"); assert.equal(d.b, "PASS"); assert.equal(d.b_model, "commandcode/gpt-6.1-sol");
+  assert.equal(d.jev, "pass"); assert.equal(d.conf, 0.95); assert.equal(d.lines, 10); assert.equal(d.action, "merged");
 });
