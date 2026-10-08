@@ -23,7 +23,7 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 6. Test-first discipline   | `test-driven-development` (obra) inside each worker                                    | Sonnet         |
 | 6a. Approve + lock checks | list checks in plain words → wait for user OK → `lock-checks approve <tests>` → loops/workers call `lock-checks verify` after each round; a failing verify = round undone | inline |
 | 7. Debug if something fails| `systematic-debugging` (obra)                                                          | Sonnet         |
-| 8. Verify before claiming  | `verification-before-completion` (obra); UI change → `jev-browse --flows` first (Jev System 1 agent, see `skills/jev/references/e2e-browsing.md`) | Sonnet |
+| 8. Verify before claiming  | `verification-before-completion` (obra); UI change → web: `jev-browse --flows` first (Jev System 1 agent, see `skills/jev/references/e2e-browsing.md`); mobile (Expo/RN/Flutter/native): `npx e2e run` (see Phase 8: e2e suites) | Sonnet |
 | 9. Request review          | `jev-review diff` first (System 1 screen): its `route` picks the reviewer alone, plus `/codex`, or plus `/panel`; then `requesting-code-review` (obra) | Sonnet |
 | 10. Apply review           | `receiving-code-review` (obra)                                                         | Sonnet         |
 | 11. Finish branch          | `finishing-a-development-branch` (obra) — **always ends in a PR** — optional: `using-git-worktrees` | inline |
@@ -48,6 +48,17 @@ git config devstack.allowMainCommit true    # this repo, permanently
 ```
 
 Never reach for the override to route around a missing branch — create the branch instead.
+
+## Phase 8: e2e suites
+
+Phase 8 is the gate for UI changes. Run the suite that matches the app before saying the change works.
+
+- Web: `jev-browse --flows e2e/flows.json` (see `skills/jev/references/e2e-browsing.md`).
+- Mobile (Expo/RN; Flutter and native not yet verified for `e2e init`): TesterArmy `e2e`, `npx e2e run --target ios`.
+- Evergreen suite: the full mobile flow set, run on every PR by `.eas/workflows/e2e-tests.yml`. Commit `.e2e/cache` so CI replays the verified `act` steps at L0 with no model call.
+- Per-PR exploration run: the PR diff and description drive a run that tests the changed features, next to the evergreen suite. Its caching is not documented; assume it pays the model each time until measured.
+- On a failure, read `.e2e/artifacts/**/screen.txt` before changing a locator.
+- Agent steps: Haiku 5.5 by default; GPT-6 Luna only for Arabic and RTL checks (see the jev reference).
 
 ## Phase 6a: lock the checks before building
 
