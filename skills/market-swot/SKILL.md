@@ -1,6 +1,6 @@
 ---
 name: market-swot
-description: "SWOT + competitor research + UI/UX/motion direction + personal brand. Triggers: \"swot\", \"competitor analysis\", \"compare with similar apps/websites\", \"make the UI more professional/catchy like X\", \"personal brand\", \"analyze me\", \"تحليل سوات\", \"منافسين\", \"براند شخصي\", \\"audit our design\", \"what is outdated in the UI\", \"update the design\", \"راجع التصميم\", \"شو قديم بالتصميم\", \"/market-swot\". Modes: project (startup/app SWOT, competitors, feature gaps, UI/UX + motion), me (personal-brand SWOT for Mohamed Bardouni), audit (design audit vs current practice), refresh (update the skill's own knowledge). Ends in a HARD STOP for owner approval."
+description: "SWOT + competitor research + UI/UX/motion direction + personal brand. Triggers: \"swot\", \"competitor analysis\", \"compare with similar apps/websites\", \"make the UI more professional/catchy like X\", \"personal brand\", \"analyze me\", \"تحليل سوات\", \"منافسين\", \"براند شخصي\", \"audit our design\", \"what is outdated in the UI\", \"update the design\", \"راجع التصميم\", \"شو قديم بالتصميم\", \"/market-swot\". Modes: project (startup/app SWOT, competitors, feature gaps, UI/UX + motion), me (personal-brand SWOT for Mohamed Bardouni), audit (design audit vs current practice), refresh (update the skill's own knowledge). Ends in a HARD STOP for owner approval."
 user-invocable: true
 argument-hint: "project [<path>] | me | audit [<path>] [--url <live-url>] | refresh"
 allowed-tools: Bash Read Write Skill WebSearch WebFetch Agent
@@ -27,7 +27,7 @@ Run `bash scripts/freshness.sh` first, before any mode (stale = stamp older than
 If anything is stale, run step 4b first, then update the "AI-era UI/UX" section of `references/uiux-motion.md`: add new items
 with URL and date, move items whose sources are older than 12 months into its "Archived" list (never delete), bump
 `last_refreshed`, and show the owner a one-line diff summary. No cron, no loops: this runs only when the skill is used.
-Mode `refresh`: do only this, then stop.
+Mode `refresh`: do only this using steps 4b + 4c(b) only (no Chrome in headless runs), then stop.
 
 `/kb-spec log "market-swot: <subject>"`, `/kb-query "<subject> competitors positioning design"`, `check-project-inbox`.
 Skip research the KB already has.
@@ -59,6 +59,14 @@ WebSearch, adding the current month and year to each query. Keep only sources da
 `<report>/fresh-<date>.md` with a URL and date for every item. Feed them into R1.. and tag each such recommendation `fresh`.
 Weekly sources: see "Weekly fresh" in `references/sources.md`.
 
+### 4c. X (Twitter) pulse
+Two sources, merged into `<report>/x-posts-<date>.md` (URL, author handle, date and text exactly as shown):
+a) claude-in-chrome on x.com search in the owner's logged-in Chrome: Latest tab, query + `since:<date-7d>`, read at most ~30 posts.
+   Read only; never like, follow or post. If Chrome is not connected (e.g. headless), skip and say so.
+b) `web-search "x.com <topic> <month year>"` (SearXNG) for public posts.
+Then `bash scripts/x-summarize.sh <posts.md>` (Grok on Command Code via `pi -p`, summarizes only the given posts; it has no live X
+search). Exit 3 "grok unavailable" (429/quota/empty): summarize in session instead. Feed themes into R1.. tagged `fresh`.
+
 ### 5. Synthesis (in session)
 SWOT S/W/O/T, TOWS (SO/ST/WO/WT), feature gaps F1.. (adopt/adapt/skip), UI/UX + motion R1.. mapped to the project's
 DESIGN.md tokens (checklists: `references/uiux-motion.md`), personal-brand actions A1.. (headline, bio, portfolio case
@@ -81,6 +89,12 @@ memory says so).
 
 ### 9. Capture
 `/kb-docs-sync`, `/kb-spec log done`.
+
+## When it runs
+- On its own inside kb-dev Phase 2b for new products and UI-heavy work.
+- The freshness check (step 0) on every run.
+- Full SWOT or audit only on request.
+- Weekly refresh via launchd: `bash scripts/install-weekly-refresh.sh` (`--dry-run` prints the plist, `--uninstall` removes it).
 
 ## Mode audit: `/market-swot audit [<path>] [--url <live-url>]`
 Audits the design we already have against current online practice.
