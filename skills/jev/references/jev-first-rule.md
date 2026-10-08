@@ -18,3 +18,5 @@ Tools on PATH (Mac `~/.local/bin`, MyContabo `/usr/local/bin`):
 
 Full guide: the `jev` skill (`SKILL.md`, `references/e2e-browsing.md`).
 <!-- END jev-first -->
+
+Jev is the wrong judge when the decision needs owner context it was not given (audience fit, taste, current priorities); hand those to a small LLM even when Jev is confident, and keep Jev as the cheap first filter in front.
