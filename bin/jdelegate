@@ -654,6 +654,8 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
   const label = `${nameLabel} · ${attemptP.ref.split("/").pop()}`;
   writeFileSync(join(run, "run.sh"),
     `#!/bin/bash\n# jdelegate worker: ${label.replace(/[\r\n]+/g, " ")}\nset -o pipefail\n` +
+    `# record the bash pid so the wrapper can SIGTERM/SIGKILL the worker tree on timeout (closes the herdr tab is not enough: workers survive SIGHUP)\n` +
+    `echo $$ > ${q(join(run, "pid"))}\n` +
     `# the worker records its own exit (also when killed), so a dead jdelegate wrapper loses nothing: see \`jdelegate wait\`\n` +
     `trap 'rc=$?; [ -e ${q(join(run, "exit"))} ] || { echo $rc > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}; }' EXIT\n` +
     `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
@@ -759,10 +761,11 @@ async function execute(attemptBrief, attemptP, attemptTier) {
 
 /**
  * Kill the whole worker tree on timeout and close the herdr tab. Inline: the detached child is its own session/pgrp
- * leader, so its pid is the pgid; `kill -TERM -<pid>` reaches bash + worker + worker children. Herdr: close the tab
- * (the run.sh + its children live in a remote pane that we cannot reach from here). After the group kill, wait up to
- * 5 s for the EXIT trap to write the exit file, then SIGKILL the group and fall back to pgrep -P recursion on the
- * inline pid if anything is still alive.
+ * leader, so its pid is the pgid; `kill -TERM -<pid>` reaches bash + worker + worker children. Herdr tab mode: the
+ * worker runs locally (herdr is a local terminal multiplexer), so the run.sh writes its bash pid to `<run>/pid`; we
+ * collect the full descendant tree with recursive `pgrep -P` BEFORE killing, then SIGTERM them all, wait up to 5 s for
+ * the EXIT trap to write the exit file, then SIGKILL survivors. Closing the tab alone is not enough (workers survive
+ * SIGHUP). After the kill, we close the tab as before.
  */
 async function killWorkerTree({ run, inlinePid, where, tab }) {
   if (where === "inline" && inlinePid) {
@@ -775,6 +778,25 @@ async function killWorkerTree({ run, inlinePid, where, tab }) {
       const left = spawnSync("pgrep", ["-P", String(inlinePid)], { encoding: "utf8" }).stdout.trim();
       if (!left) break;
       for (const p of left.split("\n")) { try { process.kill(Number(p), "SIGKILL"); } catch {} }
+    }
+  } else {
+    // herdr tab (or any other mode): bash wrote its pid to <run>/pid on startup; collect the full descendant tree
+    // BEFORE killing, then SIGTERM all of them, wait for the EXIT trap, SIGKILL survivors.
+    const pidFile = join(run, "pid");
+    let rootPid;
+    try { rootPid = Number(readFileSync(pidFile, "utf8").trim()); } catch { rootPid = NaN; }
+    if (Number.isFinite(rootPid) && rootPid > 0) {
+      const collect = (pid) => {
+        const kids = spawnSync("pgrep", ["-P", String(pid)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number).filter(Number.isFinite);
+        const out = [pid];
+        for (const k of kids) out.push(...collect(k));
+        return out;
+      };
+      const tree = collect(rootPid);
+      for (const p of tree) { try { process.kill(p, "SIGTERM"); } catch {} }
+      // Give bash 5 s to run its EXIT trap and write the exit file; then SIGKILL anything left.
+      for (let i = 0; i < 50 && !existsSync(join(run, "exit")); i++) await new Promise((r) => setTimeout(r, 100));
+      for (const p of tree) { try { process.kill(p, "SIGKILL"); } catch {} }
     }
   }
   if (tab) {
