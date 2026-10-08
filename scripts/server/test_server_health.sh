@@ -273,7 +273,7 @@ HEALTH_STUB_HOSTS="beldify.example.com=200
 ostudio.example.com=200"
 out="$(run_script)"
 echo "$out" | grep -q "chkrootkit:" && bad "chkrootkit-seed" "first run not silent: $out" || ok "chkrootkit-seed"
-printf '/usr/bin/x\n/usr/bin/x\n' >> "$LOGD"
+printf 'WARNING: more\n/usr/bin/x\n/usr/bin/x\n' >> "$LOGD"
 HEALTH_STUB_HOSTS="beldify.example.com=200
 ostudio.example.com=200"
 HEALTH_STUB_FAILED=""
