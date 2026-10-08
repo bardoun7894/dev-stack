@@ -18,7 +18,7 @@
  *
  * Lean claude workers (default; --full restores the plain `claude -p`): ~10k first-turn tokens instead of ~29k.
  * No user/project hooks, no auto-memory, no CLAUDE.md auto-discovery (~/.claude/CLAUDE.md is the orchestrator's rulebook),
- * settings from project+local only, no MCP, 6 core tools. In their place <run>/worker-prompt.md goes in via
+ * settings from project+local only, no MCP, 6 core tools + Skill (the repo's own .claude/skills work). In their place <run>/worker-prompt.md goes in via
  * --append-system-prompt-file: a short worker contract, the git-root repo's own CLAUDE.md/AGENTS.md (never $HOME's),
  * an optional role (--role, or the one `jev choice` picks from config/worker-roles.json), and any skills (--skill, or the one
  * jev-skill-suggest picks when it is in config/worker-skills.json). With no --mcp, each configured MCP server is judged by
@@ -85,7 +85,7 @@ const THINK = ["off", "minimal", "low", "medium", "high"];
 
 // ── args ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
-const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, no skills, 6 core tools (~10k vs ~43k first-turn tokens).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
+const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor (--advisor opus; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
 const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", dryRun: false, gc: false, older: 60, brief: "" };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -438,6 +438,13 @@ function leanMcpConfig() {
 const isLean = () => !(opt.full && !opt.mcp.length);
 let workerSkills = [];
 let workerRole;
+// Owner decision 2026-10-08: Sonnet/Haiku claude workers get the Opus advisor (claude --advisor, docs: code.claude.com/docs/en/advisor).
+// JDELEGATE_ADVISOR=0 turns it off; JDELEGATE_ADVISOR=<model> picks another advisor.
+function advisorFlag(id) {
+  const env = (process.env.JDELEGATE_ADVISOR ?? "").trim();
+  if (env === "0" || !/sonnet|haiku/i.test(id)) return "";
+  return ` --advisor ${env.replace(/[^\w./-]/g, "") || "opus"}`;
+}
 function workerScript(p, run, briefFile) {
   const id = p.ref.slice(p.ref.indexOf("/") + 1);
   const effortClaude = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
@@ -445,10 +452,11 @@ function workerScript(p, run, briefFile) {
   switch (p.harness) {
     case "claude":
       if (!isLean())
-        return `claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+        return `claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
       // lean: brief on stdin (variadic --tools would swallow a trailing prompt argument). No CLAUDE.md files, no user
       // settings, no hooks, no auto-memory; the worker's context is <run>/worker-prompt.md. (--bare would break OAuth login.)
-      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""}}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --disable-slash-commands --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep 2>&1 | tee ${q(join(run, "out.log"))}`;
+      // Skill tool on: the repo's own .claude/skills (project settings) stay reachable; slash commands stay off.
+      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""}}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "codex":
       return `codex exec -m ${q(id)} -C ${q(opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "agy":

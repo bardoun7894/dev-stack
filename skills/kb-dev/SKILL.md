@@ -21,7 +21,7 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 6. Test-first discipline   | `test-driven-development` (obra) inside each worker                                    | Sonnet         |
 | 6a. Approve + lock checks | list checks in plain words → wait for user OK → `lock-checks approve <tests>` → loops/workers call `lock-checks verify` after each round; a failing verify = round undone | inline |
 | 7. Debug if something fails| `systematic-debugging` (obra)                                                          | Sonnet         |
-| 8. Verify before claiming  | `verification-before-completion` (obra); UI change → web: `jev-browse --flows` first (Jev System 1 agent, see `skills/jev/references/e2e-browsing.md`); mobile (Expo/RN/Flutter/native): `npx e2e run` (see Phase 8: e2e suites) | Sonnet |
+| 8. Verify before claiming  | `verification-before-completion` (obra); UI change → web: `jev-browse --flows` first (Jev System 1 agent, see `skills/jev/references/e2e-browsing.md`); mobile (Expo/RN): `npx e2e run` (see Phase 8: e2e suites) | Sonnet |
 | 9. Request review          | `jev-review diff` first (System 1 screen): its `route` picks the reviewer alone, plus `/codex`, or plus `/panel`; then `requesting-code-review` (obra) | Sonnet |
 | 10. Apply review           | `receiving-code-review` (obra)                                                         | Sonnet         |
 | 11. Finish branch          | `finishing-a-development-branch` (obra) — **always ends in a PR** — optional: `using-git-worktrees` | inline |

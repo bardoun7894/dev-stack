@@ -54,7 +54,7 @@ test('lean command isolates the worker from user config and loads a system-promp
   assert.match(r.script, /--strict-mcp-config/);
   assert.doesNotMatch(r.script, /--bare/);
   // the variadic --tools stays last so it cannot swallow a flag
-  assert.match(r.script, /--tools Bash Read Edit Write Glob Grep 2>&1/);
+  assert.match(r.script, /--tools Bash Read Edit Write Glob Grep Skill 2>&1/);
 });
 
 test('--full command is the plain one', () => {
@@ -242,7 +242,7 @@ test('auto-role is off with --no-auto-role, JDELEGATE_AUTO_ROLE=0 or an explicit
 });
 
 const mcpDef = (name) => ({ command: 'node', args: [`${name}.js`], description: `the ${name} server` });
-const mcpOf = (script) => JSON.parse(readFileSync(script.match(/--mcp-config '([^']+)' --disable/)[1], 'utf8')).mcpServers;
+const mcpOf = (script) => JSON.parse(readFileSync(script.match(/--mcp-config '([^']+)'/)[1], 'utf8')).mcpServers;
 
 test('auto-MCP: no servers configured means no jev noul call and an empty config', () => {
   jevStub();
@@ -739,4 +739,45 @@ test('test-kind briefs and role=qa-engineer route to kinds.test; code briefs do 
   assert.match(route('use playwright to click through checkout'), /claude-haiku-5-5/);
   assert.match(route('review the diff', ['--role', 'qa-engineer']), /claude-haiku-5-5/);
   assert.doesNotMatch(route('rename function foo in utils.ts'), /haiku-5-5/);
+});
+
+// Owner decision 2026-10-08: Sonnet/Haiku claude workers get the Opus advisor; lean workers keep the Skill tool.
+const tiersFor = (ref) => {
+  const f = join(tmp, `tiers-${ref.replace(/\W/g, '_')}.json`);
+  write(f, JSON.stringify({ tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, [ref]])) }));
+  return f;
+};
+const advisorEnv = (ref, extra = {}) => ({ JEV_ROUTER_CONFIG: tiersFor(ref), JDELEGATE_ADVISOR: '', ...extra });
+
+test('advisor: sonnet and haiku claude workers get --advisor opus, lean and --full', () => {
+  for (const ref of ['cliproxy/claude-sonnet-5-5', 'cliproxy/claude-haiku-5-5']) {
+    const lean = dry([], { env: advisorEnv(ref) });
+    assert.equal(lean.status, 0, lean.stderr);
+    assert.match(lean.script, /--advisor opus /, ref);
+    const full = dry(['--full'], { env: advisorEnv(ref) });
+    assert.equal(full.status, 0, full.stderr);
+    assert.match(full.script, /--advisor opus /, ref);
+  }
+});
+
+test('advisor: opus workers get no advisor flag', () => {
+  const r = dry([], { env: advisorEnv('cliproxy/claude-opus-5-5') });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.script, /--advisor/);
+});
+
+test('advisor: JDELEGATE_ADVISOR=0 drops the flag; JDELEGATE_ADVISOR=<model> overrides the advisor model', () => {
+  const off = dry([], { env: advisorEnv('cliproxy/claude-sonnet-5-5', { JDELEGATE_ADVISOR: '0' }) });
+  assert.equal(off.status, 0, off.stderr);
+  assert.doesNotMatch(off.script, /--advisor/);
+  const over = dry([], { env: advisorEnv('cliproxy/claude-haiku-5-5', { JDELEGATE_ADVISOR: 'claude-fable-5-1' }) });
+  assert.equal(over.status, 0, over.stderr);
+  assert.match(over.script, /--advisor claude-fable-5-1 /);
+});
+
+test('lean worker keeps the Skill tool on: no --disable-slash-commands, Skill in --tools', () => {
+  const r = dry([]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.script, /--tools Bash Read Edit Write Glob Grep Skill 2>&1/);
+  assert.doesNotMatch(r.script, /--disable-slash-commands/);
 });
