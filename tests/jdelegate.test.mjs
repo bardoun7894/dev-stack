@@ -696,6 +696,39 @@ test('W5 a brief that needs a shell never goes to opencode', () => {
   assert.match(printRoute(['rename', 'a', 'variable'], { JEV_ROUTER_CONFIG: w5Tiers }), /opencode · opencode-go\/deepseek-v4\.1-flash/);
 });
 
+// ── timeout kills the whole worker tree and exits non-zero ─────────────
+test('timeout: a sleeping fake worker is killed (no orphan) and jdelegate exits non-zero with a clear "timed out after N min" line', async () => {
+  const wcache = join(tmp, 'wcache-to');
+  const sleepMs = 60_000;
+  // fake claude: sleeps forever, but records its own pid so the test can prove it is gone
+  const pidFile = join(tmp, 'fake-claude.pid');
+  stub('claude', `echo $$ > ${pidFile}; exec sleep ${Math.ceil(sleepMs / 1000)}`);
+  const { spawn } = await import('node:child_process');
+  // 0.05 min = 3 s. JDELEGATE_TIMEOUT_MS overrides for tests so a small fractional value is reliable.
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'tojob', '--timeout', '0.05', 'do the thing'], {
+    encoding: 'utf8', timeout: 30_000,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers,
+      JDELEGATE_CACHE: wcache, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0',
+      JDELEGATE_TIMEOUT_MS: '1500' } });
+  const elapsed = Date.now() - t0;
+  // 1) non-zero exit
+  assert.notEqual(r.status, 0, `expected non-zero, got ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+  // 2) clear "timed out after N min" line on stdout
+  assert.match(r.stdout, /timed out after 0\.05 min/, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
+  // 3) the fake worker pid was recorded and the process is now gone
+  const pid = Number(readFileSync(pidFile, 'utf8').trim());
+  assert.ok(pid > 0, 'fake claude pid recorded');
+  // give the OS a moment to reap
+  for (let i = 0; i < 20; i++) {
+    if (spawnSync('kill', ['-0', String(pid)]).status !== 0) break;
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  assert.equal(spawnSync('kill', ['-0', String(pid)]).status, 1, `fake claude pid ${pid} is still alive after timeout`);
+  // 4) jdelegate did not hang waiting for the worker (sanity: < 20 s wall time, expected ~3 s)
+  assert.ok(elapsed < 20_000, `jdelegate took ${elapsed} ms; should have timed out around 1.5 s`);
+});
+
 // ── W8: agy always bypasses permissions; codex usage limit marks codex exhausted and falls back ──
 test('W8 agy relay runs headless with --dangerously-skip-permissions by default', () => {
   const relay = join(homedir(), '.claude', 'skills', 'agy-delegate', 'scripts', 'relay.mjs');
