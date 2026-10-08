@@ -118,6 +118,7 @@ check_sites() {
   [ -z "$names" ] && return 0
   local results
   results=$(printf '%s\n' $names | sort -u | xargs -I{} -P8 sh -c '
+    getent ahosts "{}" 2>/dev/null | grep -q . || exit 0
     code=$(curl -s -o /dev/null -m 10 -w "%{http_code}" "https://{}/" 2>/dev/null)
     case "$code" in 000|5*) printf "%s %s\n" "{}" "$code" ;; esac
   ')
@@ -180,15 +181,19 @@ check_pm2() {
   local tmp; tmp=$(mktemp)
   printf '%s' "$jlist" | python3 -c '
 import json, sys
+text = sys.stdin.read()
+lines = text.split("\n")
+for i, l in enumerate(lines):
+    if l.lstrip().startswith("["):
+        text = "\n".join(lines[i:])
+        break
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(text)
 except Exception:
     data = []
 for p in data:
-    name = p.get("name", "?")
-    status = p.get("status", "")
-    rt = int(p.get("restart_time") or 0)
-    print(f"{name}\t{status}\t{rt}", flush=True)
+    env = p.get("pm2_env") or {}
+    print("%s\t%s\t%d" % (p.get("name", "?"), env.get("status", ""), int(env.get("restart_time") or 0)))
 ' > "$tmp" 2>/dev/null
   local name status rt prev_v
   while IFS=$'\t' read -r name status rt; do
@@ -272,18 +277,17 @@ check_disk() {
 # --- h. chkrootkit ---
 check_chkrootkit() {
   [ -f "$VAR_LOG_CHKROOTKIT" ] || return 0
-  local line pth
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    pth=$(printf '%s' "$line" | grep -Eo '/[^[:space:]]+' | head -n1)
+  local pth
+  while IFS= read -r pth; do
     case "$pth" in
-      /tmp/*|*/fail2ban/tests/*) continue ;;
+      /tmp/*|/usr/lib/python3/dist-packages/fail2ban/tests/*|/usr/lib/python3/dist-packages/twisted/*) continue ;;
     esac
-    case "$line" in
-      *runc*) continue ;;
-    esac
-    add "chkrootkit" "$line"
-  done < <(grep -iE '^[[:space:]]*warning' "$VAR_LOG_CHKROOTKIT" | sed -E 's/^[[:space:]]*[Ww][Aa][Rr][Nn][Ii][Nn][Gg]:?[[:space:]]*//' | sort -u)
+    add "chkrootkit" "$pth"
+  done < <(awk '
+    /^(Searching for|Checking)/ { inw = 0; next }
+    /WARNING/ { inw = 1; next }
+    inw && /^\// && !/lstat\(\/tmp\/runc-process/ { print }
+  ' "$VAR_LOG_CHKROOTKIT" | sort -u)
 }
 
 # --- run all checks ---

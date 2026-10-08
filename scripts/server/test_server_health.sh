@@ -55,6 +55,14 @@ exit 0
 CURL
   chmod +x "$T/bin/curl"
 
+  cat > "$T/bin/getent" <<'GETENT'
+#!/usr/bin/env bash
+# stub getent ahosts NAME: no output (no DNS) for names listed in HEALTH_STUB_NODNS
+for n in ${HEALTH_STUB_NODNS:-}; do [ "$n" = "${2:-}" ] && exit 2; done
+echo "192.0.2.1 STREAM ${2:-}"
+GETENT
+  chmod +x "$T/bin/getent"
+
   cat > "$T/bin/systemctl" <<'SYSD'
 #!/usr/bin/env bash
 echo "${HEALTH_STUB_FAILED:-}"
@@ -64,7 +72,7 @@ SYSD
   cat > "$T/bin/pm2" <<'PM2'
 #!/usr/bin/env bash
 if [ "${1:-}" = "jlist" ]; then
-  printf '%s\n' "${HEALTH_STUB_PM2LIST:-[]}"
+  printf 'pm2 noise: not json\n%s\n' "${HEALTH_STUB_PM2LIST:-[]}"
   exit 0
 fi
 exit 0
@@ -95,7 +103,7 @@ DF
   chmod +x "$T/bin/df"
 }
 
-export HEALTH_STUB_HOSTS= HEALTH_STUB_FAILED= HEALTH_STUB_PM2LIST= HEALTH_STUB_DOCKER= HEALTH_STUB_CRONTAB= HEALTH_STUB_DF=
+export HEALTH_STUB_HOSTS= HEALTH_STUB_FAILED= HEALTH_STUB_PM2LIST= HEALTH_STUB_DOCKER= HEALTH_STUB_CRONTAB= HEALTH_STUB_DF= HEALTH_STUB_NODNS=
 # Set mtime N days ago (portable)
 age_touch() { python3 -c "import os,sys,time; t=time.time()-float(sys.argv[2])*86400; os.utime(sys.argv[1],(t,t))" "$1" "$2"; }
 
@@ -142,6 +150,18 @@ out="$(run_script)"
 echo "$out" | grep -q "site: beldify.example.com 502" && ok "502-beldify" || bad "502-beldify" "missing 502 finding in: $out"
 echo "$out" | grep -q "ostudio.example.com 502" && bad "502-clean" "ostudio flagged despite 200: $out" || ok "502-clean"
 
+# ---- 1b. unresolvable names are skipped; resolvable 000 is reported ----
+printf 'server_name nodns.example.com;\n' > "$T/nginx/sites-enabled/nodns.conf"
+printf 'server_name down.example.com;\n' > "$T/nginx/sites-enabled/down.conf"
+HEALTH_STUB_NODNS="nodns.example.com"
+HEALTH_STUB_HOSTS="nodns.example.com=000
+down.example.com=000"
+out="$(run_script)"
+echo "$out" | grep -q "nodns.example.com" && bad "nodns-skipped" "no-DNS name reported: $out" || ok "nodns-skipped"
+echo "$out" | grep -q "site: down.example.com 000" && ok "resolving-000" || bad "resolving-000" "resolving 000 not reported: $out"
+HEALTH_STUB_NODNS=""
+rm -f "$T/nginx/sites-enabled/nodns.conf" "$T/nginx/sites-enabled/down.conf"
+
 # ---- 2. 20-byte backup alerts; normal one does not ----
 head -c 1048576 /dev/zero > "$T/backups/beldify-2026-10-07.sql.gz"; age_touch "$T/backups/beldify-2026-10-07.sql.gz" 1
 printf '%020d' 0 > "$T/backups/beldify-2026-10-08.sql.gz"
@@ -166,9 +186,9 @@ out="$(run_script)"
 echo "$out" | grep -q "unit: nginx.service failed" && ok "unit" || bad "unit" "missing nginx.service failed finding: $out"
 
 # ---- 4. pm2 restart jump 0 -> 30 alerts; second run without growth does not ----
-PM2_BASE='[{"name":"web","status":"online","restart_time":0},{"name":"db","status":"online","restart_time":1}]'
+PM2_BASE='[{"name":"web","pid":1,"pm2_env":{"status":"online","restart_time":0},"monit":{"cpu":0}},{"name":"db","pid":1,"pm2_env":{"status":"online","restart_time":1},"monit":{"cpu":0}}]'
 HEALTH_STUB_PM2LIST="$PM2_BASE"; run_script >/dev/null
-PM2_BAD='[{"name":"web","status":"online","restart_time":30},{"name":"db","status":"online","restart_time":1}]'
+PM2_BAD='[{"name":"web","pid":1,"pm2_env":{"status":"online","restart_time":30},"monit":{"cpu":0}},{"name":"db","pid":1,"pm2_env":{"status":"online","restart_time":1},"monit":{"cpu":0}}]'
 HEALTH_STUB_PM2LIST="$PM2_BAD"
 HEALTH_STUB_FAILED=""
 HEALTH_STUB_HOSTS="beldify.example.com=200
@@ -236,21 +256,27 @@ LOGD="$T/logs/chkrootkit.log"
 mkdir -p "$(dirname "$LOGD")"
 cp /dev/null "$LOGD"
 cat >> "$LOGD" <<CHK
-chkrootkit 0.59
-Searching for suspicious files...
-WARNING: /tmp/evil-bin is suspicious
-WARNING: /usr/lib/python3/dist-packages/fail2ban/tests/data.bin is suspicious
-WARNING: /usr/sbin/runc -> /proc/123/exe lstat() call failed: No such file or directory
-WARNING: /usr/bin/x is suspicious
-WARNING: /usr/bin/x is suspicious
+Searching for suspicious files and dirs, it may take a while...
+WARNING: The following suspicious files and directories were found:
+/tmp/evil-bin
+/usr/lib/python3/dist-packages/fail2ban/tests/data.bin
+/usr/lib/python3/dist-packages/twisted/x.py
+/usr/bin/x
+/usr/bin/x
+Possible Linux.Xor.DDoS installed:
+lstat(/tmp/runc-process123) failed
+Checking \`ifpromisc'... 
+eth0: not promisc
+PACKET SNIFFER(/lib/systemd/systemd-networkd[1])
+/usr/bin/notwarned
 CHK
 touch "$LOGD"
 HEALTH_STUB_HOSTS="beldify.example.com=200
 ostudio.example.com=200"
 HEALTH_STUB_FAILED=""
 out="$(run_script)"
-echo "$out" | grep -q "chkrootkit: /usr/bin/x is suspicious" && ok "chkrootkit" || bad "chkrootkit" "no /usr/bin/x alert in: $out"
-[ "$(echo "$out" | grep -c "chkrootkit: /usr/bin/x is suspicious")" = "1" ] && ok "chkrootkit-dedupe" || bad "chkrootkit-dedupe" "found multiple /usr/bin/x alerts: $out"
+echo "$out" | grep -q "chkrootkit: /usr/bin/x$" && ok "chkrootkit" || bad "chkrootkit" "no /usr/bin/x alert in: $out"
+[ "$(echo "$out" | grep -c "chkrootkit: /usr/bin/x$")" = "1" ] && ok "chkrootkit-dedupe" || bad "chkrootkit-dedupe" "found multiple /usr/bin/x alerts: $out"
 echo "$out" | grep -q "chkrootkit: /tmp/" && bad "chkrootkit-tmp" "/tmp/ flagged: $out" || ok "chkrootkit-tmp"
 echo "$out" | grep -q "fail2ban/tests" && bad "chkrootkit-fail2ban" "fail2ban path flagged: $out" || ok "chkrootkit-fail2ban"
 echo "$out" | grep -q "runc-process" && bad "chkrootkit-runc" "runc flagged: $out" || ok "chkrootkit-runc"
