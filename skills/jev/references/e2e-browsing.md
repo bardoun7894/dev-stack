@@ -356,8 +356,9 @@ Mapping to the ladder:
 
 - Exact `expect` and deterministic taps: L0. Replayed `act`: L0.
 - Live `agent.act`: L2 driver.
-- `agent.assert`: a model judge, never cached. Prefer an exact `expect` (L0), then a Jev checkpoint on the
-  `screen.txt` text (L1, ~$0.00002), over `agent.assert`. Fail closed as elsewhere.
+- `agent.assert` with the decision executor: a Jev call, L1, never cached. Without it (plain LLM agent): a full
+  model judge, never cached. Prefer an exact `expect` (L0) first, then a Jev checkpoint on the `screen.txt` text
+  (L1, ~$0.00002). Fail closed as elsewhere.
 
 **Jev first for agent steps** (verified in e2e's decision-models docs). Through e2e's decision executor,
 `agent.act` and `agent.assert` run on Jev (`@e2e-dev/decision`, `decisionExecutor`). The text model writes the
@@ -367,8 +368,10 @@ Arabic text and language structure (owner rule, 2026-10-08).
 ```ts
 import { decisionExecutor } from '@e2e-dev/decision';
 import { typeSafeAi } from '@ai-sdk/typesafe-ai';
+import { anthropic } from '@ai-sdk/anthropic';
 // text model is Haiku 5.5: pass its AI SDK model object as textModel
-// agents: { default: { executor: decisionExecutor({ model: typeSafeAi.decisionModel('jev-latest'), textModel: <Haiku 5.5 AI SDK model> }) } }
+// for Arabic-language steps use a GPT-6 Luna model as textModel instead
+// agents: { default: { executor: decisionExecutor({ model: typeSafeAi.decisionModel('jev-latest'), textModel: anthropic('claude-haiku-5-5') }) } }
 ```
 
 - Needs `ai` 7.0.128 or later.
