@@ -391,7 +391,8 @@ test("decision log line carries the contract fields", () => {
 // ---- cost per decision ----
 test("cost fields: Haiku from claude JSON, second reviewer from pi json, jev_calls counted", () => {
   const r = go({});
-  assert.deepEqual(r.decisions[0].cost, { haiku_usd: 0.0123, haiku_tokens: 200, b_model: "commandcode/gpt-6.1-sol", b_usd: 0.002, b_tokens: 20, jev_calls: 1 });
+  // cost.jev_calls now includes the injection-guard (1 raw) + the merge-gate choice (1) = 2.
+  assert.deepEqual(r.decisions[0].cost, { haiku_usd: 0.0123, haiku_tokens: 200, b_model: "commandcode/gpt-6.1-sol", b_usd: 0.002, b_tokens: 20, jev_calls: 2 });
   assert.ok(r.claudes[0].args.includes("--output-format") && r.claudes[0].args.includes("json"));
   assert.ok(r.posts[0].bodyFile.includes("No blocking issues\nVERDICT: PASS"));
   assert.ok(!r.posts[0].bodyFile.includes("total_cost_usd"));
@@ -406,7 +407,9 @@ test("cost: pi without usage and opencode -> null b cost; no jev call -> jev_cal
   assert.equal(b.decisions[0].cost.b_model, "opencode-go/deepseek-v4.1-flash");
   assert.deepEqual([b.decisions[0].cost.b_usd, b.decisions[0].cost.b_tokens], [null, null]);
   const c = go({ claudeOut: "P1 a.js:1 bad\nVERDICT: BLOCK" });
-  assert.equal(c.decisions[0].cost.jev_calls, 0);
+  // cost.jev_calls reflects every Jev call for this PR, including the injection-guard.
+  // BLOCK still ran the guard once (guard runs unconditionally before claude), so count is 1.
+  assert.equal(c.decisions[0].cost.jev_calls, 1);
   assert.equal(c.decisions[0].cost.haiku_usd, 0.0123);
 });
 
@@ -428,7 +431,8 @@ test("clean PR still merges when guard is clean (default answers, max below bar)
   const g = JSON.parse(guardCalls(r)[0].stdin);
   assert.equal(typeof g.state, "string");
   assert.ok(Object.keys(g.questions).includes("verdict"));
-  assert.ok(g.questions.verdict.instructions.toLowerCase().includes("look only at this pr text"));
+  // Guard instruction now starts with the reworded shared prefix.
+  assert.ok(g.questions.verdict.instructions.startsWith("This is the text of one pull request (title, description and added lines) given to an AI code reviewer."));
 });
 
 test("verdict-injection PR at p=0.9 is reviewed, body carries warning, merge skipped injection-suspect", () => {
@@ -491,4 +495,42 @@ test("guard max takes the max across questions and chunks", () => {
   assert.equal(r.decisions[0].reason, "injection-suspect");
   assert.equal(r.decisions[0].injection.kind, "exfil");
   assert.equal(r.decisions[0].injection.max, 0.85);
+});
+
+test("guard questions carry the reworded shared prefix and per-question phrasing", () => {
+  const r = go({});
+  const calls = guardCalls(r);
+  assert.ok(calls.length >= 1, "guard ran at least once");
+  for (const c of calls) {
+    const body = JSON.parse(c.stdin);
+    const qs = body.questions;
+    for (const k of ["verdict", "exfil", "override", "owner"]) {
+      const instr = qs[k].instructions;
+      assert.ok(
+        instr.startsWith("This is the text of one pull request (title, description and added lines) given to an AI code reviewer. "),
+        `${k} must carry the shared prefix: got ${JSON.stringify(instr.slice(0, 80))}`,
+      );
+      assert.ok(instr.includes("Prompts, agent instructions, rule files and docs that mention an owner or AI agents are normal content of the code being changed."), `${k} must say owner/AI agent docs are normal`);
+      assert.ok(instr.includes("text aimed at THIS reviewer"), `${k} must say aimed at THIS reviewer`);
+    }
+    assert.ok(qs.verdict.instructions.toLowerCase().includes("pass") && qs.verdict.instructions.toLowerCase().includes("pre-approved"));
+    assert.ok(qs.exfil.instructions.toLowerCase().includes("secrets") || qs.exfil.instructions.toLowerCase().includes("tokens"));
+    assert.ok(qs.override.instructions.toLowerCase().includes("ignore") && qs.override.instructions.toLowerCase().includes("reviewer role"));
+    assert.ok(qs.owner.instructions.toLowerCase().includes("repo owner") || qs.owner.instructions.toLowerCase().includes("maintainer"));
+  }
+});
+
+test("cost.jev_calls includes the injection-guard calls plus the gate call", () => {
+  // Default scenario: 1 chunk guard (raw) + 1 gate (choice) = 2 total. cost.jev_calls must reflect both.
+  const r = go({});
+  assert.equal(guardCalls(r).length, 1, "guard ran once on the default small PR");
+  assert.equal(jevCalls(r).filter((c) => c.args[0] === "choice").length, 1, "gate ran once");
+  assert.equal(r.decisions[0].cost.jev_calls, 2, "cost.jev_calls must include the guard calls (reset happens AFTER guard)");
+});
+
+test("cost.jev_calls still 0 when no review happens (claude BLOCK short-circuits before guard in this branch only when guard skipped)", () => {
+  // The guard still runs before claude, so even on BLOCK the guard call is included.
+  const r = go({ claudeOut: "P1 a.js:1 bad\nVERDICT: BLOCK" });
+  assert.equal(guardCalls(r).length, 1, "guard runs unconditionally before claude");
+  assert.equal(r.decisions[0].cost.jev_calls, 1, "only guard called, gate never reached");
 });
