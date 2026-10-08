@@ -461,6 +461,7 @@ function workerScript(p, run, briefFile) {
     case "codex":
       return `codex exec -m ${q(id)} -C ${q(opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "agy":
+      // intentional (b15be86): agy is an unattended worker, so it always bypasses permissions
       return `node ${q(AGY_RELAY)} --brief ${q(briefFile)} --cd ${q(opt.cwd)} --model ${q(id)} --dangerously-skip-permissions --out-dir ${q(join(run, "agy"))} 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "opencode": {
       // JSON events to a file for the answer; a readable stream in the tab.
@@ -651,8 +652,9 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
   const label = `${nameLabel} · ${attemptP.ref.split("/").pop()}`;
   writeFileSync(join(run, "run.sh"),
     `#!/bin/bash\n# jdelegate worker: ${label.replace(/[\r\n]+/g, " ")}\nset -o pipefail\n` +
-    `# the worker records its own exit (also when killed), so a dead jdelegate wrapper loses nothing: see \`jdelegate wait\`\n` +
+    `# the worker records its own exit (also when killed by TERM/INT/HUP; SIGKILL cannot be trapped), so a dead jdelegate wrapper loses nothing: see \`jdelegate wait\`\n` +
     `trap 'rc=$?; [ -e ${q(join(run, "exit"))} ] || { echo $rc > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}; }' EXIT\n` +
+    `trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP\n` +
     `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
     `printf '\\e]2;%s\\a' ${q(label)}\necho ${q(`▶ ${label}  (${attemptTier} ${d.kind}·${d.role})`)}\n` +
     `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}\n` +

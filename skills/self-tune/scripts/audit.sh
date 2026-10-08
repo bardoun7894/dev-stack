@@ -5,8 +5,8 @@ L=~/.claude/logs/no-poll-guard.log
 if [ -f "$L" ]; then n=$(awk -v d="$(date -v-1d +%F_%T)" '$1>d' "$L" | wc -l | tr -d ' ')
   [ "$n" -gt 0 ] && { say "HOOK: $n block(s) in 24h — check the last ones for false positives:"; tail -5 "$L" | cut -c1-200; }; fi
 pgrep -f "board-astra/runqueue.sh" >/dev/null && say "OLD: runqueue.sh is running (retired path)"
-ps -axo pid=,etime=,command= | grep -E "claude(-[0-9.]+)? -p .*dangerously-skip-permissions|versions/[0-9.]+ -p " | grep -v grep | awk '{print "OLD: claude -p worker pid " $1 " up " $2}' | while read l; do say "$l"; done
-ps -axo pid=,command= | grep -E "node .*/jdelegate " | grep -v grep | grep -v -- "--no-auto-mcp" | awk '{print "HEAVY: jdelegate without lean flags, pid " $1}' | while read l; do say "$l"; done
+while read l; do say "$l"; done < <(ps -axo pid=,etime=,command= | grep -E "claude(-[0-9.]+)? -p .*dangerously-skip-permissions|versions/[0-9.]+ -p " | grep -v grep | awk '{print "OLD: claude -p worker pid " $1 " up " $2}')
+while read l; do say "$l"; done < <(ps -axo pid=,command= | grep -E "node .*/jdelegate " | grep -v grep | grep -v -- "--no-auto-mcp" | awk '{print "HEAVY: jdelegate without lean flags, pid " $1}')
 for d in ~/.cache/board-astra ~/.cache/gate/*; do [ -d "$d" ] || continue
   for done in "$d"/gate-*.done; do [ -f "$done" ] || continue; [ "$(cat "$done")" = 0 ] && continue
     full=$(ls -t "$d"/full-*"$(basename "$done" .done | sed 's/^gate-//; s/-/_/g')"* 2>/dev/null | head -1)

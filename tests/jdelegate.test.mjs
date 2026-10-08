@@ -653,6 +653,12 @@ test('W4 run.sh writes exit via an EXIT trap and opencode/pi workers also write 
   assert.match(r.script, /trap .*exit.* EXIT/);
 });
 
+test('W4 run.sh turns TERM, INT and HUP into an exit so the EXIT trap records the code', () => {
+  const r = dry([]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.script, /^trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP$/m);
+});
+
 test('W4 dry-run pi and opencode scripts produce out.log', () => {
   writeFileSync(tiers + '.w4', JSON.stringify({ tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['opencode-go/x']])) }));
   const run = (h) => spawnSync(process.execPath, [JD, '--dry-run', '--harness', h, '--cwd', repo, 'do the thing'], { encoding: 'utf8',
