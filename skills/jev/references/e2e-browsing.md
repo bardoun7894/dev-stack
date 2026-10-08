@@ -29,6 +29,25 @@ Rules of the ladder:
 5. **Pay once per UI change, not per run.** Anything L2+ learns (a repaired selector, a recorded flow) is cached
    and replayed at L0 next time.
 
+## Merge gate
+
+`bin/pr-review` auto-merge depends on the Jev decision **and**, for PRs that change UI (any path matching
+`\.(tsx|jsx|vue|svelte|css|scss|dart|html)$|\.blade\.php$|resources\/views|\/components\/|\/pages\//`), on a
+passing e2e run for the exact head sha. Sign it with one of:
+
+- a PR comment `<!-- e2e-pass sha=<full sha> -->`, or
+- a commit status/check with context `jev-e2e` (or `e2e`) in `success` on that sha.
+
+Missing marker, failing check, or lookup error all block auto-merge (`e2e-missing` / `e2e-failed` /
+`e2e-unknown`). Fail closed, never merge. Easiest post command for an e2e runner:
+
+```bash
+gh pr comment "$PR" -R "$REPO" --body "e2e passed for $HEAD_SHA<!-- e2e-pass sha=$HEAD_SHA -->"
+```
+
+(or create a `jev-e2e` status on the head sha via the Checks API; the e2e runner should pin the exact
+full sha it ran against, not a short prefix).
+
 ## Checkpoint questions (verified)
 
 ```json

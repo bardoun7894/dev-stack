@@ -62,6 +62,14 @@ else if (args[0] === "api") {
   const m = args[1].match(/contents\\/\\.github\\/workflows(?:\\/([^?]+))?/);
   if (m && !m[1]) { if (!sc.workflows) { process.stderr.write("gh: Not Found (HTTP 404)"); process.exit(1); } out(JSON.stringify(Object.keys(sc.workflows).map((name) => ({ name })))); }
   else if (m) out(JSON.stringify({ content: Buffer.from(sc.workflows[m[1]]).toString("base64") }));
+  else if (new RegExp("commits/[^/]+/check-runs").test(args[1])) {
+    if (sc.e2eCheck?.apiFail) { process.stderr.write("gh: API error (HTTP 500)"); process.exit(1); }
+    out(JSON.stringify(sc.e2eCheck?.checkRuns ?? { total_count: 0, check_runs: [] }));
+  }
+  else if (new RegExp("commits/[^/]+/status").test(args[1])) {
+    if (sc.e2eCheck?.apiFail) { process.stderr.write("gh: API error (HTTP 500)"); process.exit(1); }
+    out(JSON.stringify(sc.e2eCheck?.status ?? { state: "pending", statuses: [] }));
+  }
 }
 else if (args[0] === "pr" && (args[1] === "merge" || args[1] === "comment")) out("");
 else if (args[0] === "pr" && args[1] === "diff") {
@@ -385,7 +393,7 @@ test("decision log line carries the contract fields", () => {
   const r = go({});
   assert.equal(r.decisions.length, 1);
   const d = r.decisions[0];
-  assert.deepEqual(Object.keys(d), ["at", "repo", "pr", "sha", "a", "b", "b_model", "jev", "conf", "lines", "action", "reason", "injection", "cost"]);
+  assert.deepEqual(Object.keys(d), ["at", "repo", "pr", "sha", "a", "b", "b_model", "jev", "conf", "lines", "action", "reason", "injection", "e2e", "e2e_source", "cost"]);
   assert.equal(d.repo, "o/r"); assert.equal(d.pr, 1); assert.equal(d.sha, SHA);
   assert.equal(d.a, "PASS"); assert.equal(d.b, "PASS"); assert.equal(d.b_model, "commandcode/gpt-6.1-sol");
   assert.equal(d.jev, "pass"); assert.equal(d.conf, 0.95); assert.equal(d.lines, 10); assert.equal(d.action, "merged");
@@ -573,4 +581,108 @@ test("gh pr diff 406 too_large on already-reviewed PR -> skipped-too-large, no d
   assert.match(r.stdout, /skipped-too-large/);
   assert.equal(r.comments.length, 1, "one comment posted so future sweeps find the marker");
   assert.ok(r.comments[0].bodyFile.includes(`<!-- haiku-review sha=${SHA} -->`));
+});
+
+// ---- e2e gate for UI PRs ----
+const UI_FILE = [{ path: "src/Button.tsx", additions: 5, deletions: 5 }];
+const BACKEND_FILE = [{ path: "src/a.js", additions: 5, deletions: 5 }];
+const E2E_PASS = `<!-- e2e-pass sha=${SHA} -->`;
+
+test("UI PR + no marker => e2e-missing (no merge)", () => {
+  const r = go({ pr: pr({ files: UI_FILE }) });
+  assert.equal(merges(r).length, 0, "no merge");
+  assert.equal(r.decisions[0].reason, "e2e-missing");
+  assert.equal(r.decisions[0].e2e, "missing");
+  // Jev was never asked.
+  assert.equal(jevCalls(r).filter((c) => c.args[0] === "choice").length, 0);
+});
+
+test("UI PR + marker for an old sha => e2e-missing (no merge)", () => {
+  const r = go({ pr: pr({ files: UI_FILE, comments: [{ body: `<!-- e2e-pass sha=0000000 -->` }] }) });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "e2e-missing");
+  assert.equal(r.decisions[0].e2e, "missing");
+});
+
+test("UI PR + e2e-pass comment for head sha + Jev pass 0.95 => merged", () => {
+  const r = go({ pr: pr({ files: UI_FILE, comments: [{ body: E2E_PASS }] }) });
+  assert.equal(merges(r).length, 1, "merge happens");
+  assert.equal(r.decisions[0].action, "merged");
+  assert.equal(r.decisions[0].reason, "");
+  assert.equal(r.decisions[0].e2e, "pass");
+  assert.equal(r.decisions[0].jev, "pass");
+  assert.equal(r.decisions[0].conf, 0.95);
+});
+
+test("UI PR + jev-e2e check-run success for head sha + Jev pass 0.95 => merged", () => {
+  const r = go({
+    pr: pr({ files: UI_FILE }),
+    e2eCheck: { checkRuns: { total_count: 1, check_runs: [{ name: "jev-e2e", status: "completed", conclusion: "success" }] } },
+  });
+  assert.equal(merges(r).length, 1, "merge happens via check-run pass");
+  assert.equal(r.decisions[0].e2e, "pass");
+  assert.equal(r.decisions[0].action, "merged");
+});
+
+test("UI PR + failing jev-e2e status => e2e-failed (no merge)", () => {
+  const r = go({
+    pr: pr({ files: UI_FILE }),
+    e2eCheck: { status: { state: "failure", statuses: [{ context: "jev-e2e", state: "failure" }] } },
+  });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "e2e-failed");
+  assert.equal(r.decisions[0].e2e, "failed");
+});
+
+test("UI PR + failing jev-e2e check-run => e2e-failed (no merge)", () => {
+  const r = go({
+    pr: pr({ files: UI_FILE }),
+    e2eCheck: { checkRuns: { total_count: 1, check_runs: [{ name: "jev-e2e", status: "completed", conclusion: "failure" }] } },
+  });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "e2e-failed");
+  assert.equal(r.decisions[0].e2e, "failed");
+});
+
+test("UI PR + 'e2e' (short) status context success also counts as pass", () => {
+  const r = go({
+    pr: pr({ files: UI_FILE }),
+    e2eCheck: { status: { state: "success", statuses: [{ context: "e2e", state: "success" }] } },
+  });
+  assert.equal(merges(r).length, 1);
+  assert.equal(r.decisions[0].e2e, "pass");
+});
+
+test("backend-only PR => e2e not-needed, unchanged behaviour (merges)", () => {
+  const r = go({ pr: pr({ files: BACKEND_FILE }) });
+  assert.equal(merges(r).length, 1);
+  assert.equal(r.decisions[0].action, "merged");
+  assert.equal(r.decisions[0].e2e, "not-needed");
+  // No e2e API calls were made for non-UI PRs.
+  const e2eApiCalls = r.calls.filter((c) => c.cmd === "api" && new RegExp("commits/[^/]+/(check-runs|status)").test(c.args[1] || ""));
+  assert.equal(e2eApiCalls.length, 0, "no e2e API calls for backend-only PRs");
+});
+
+test("UI PR + e2e API lookup error => e2e-unknown (no merge, fail closed)", () => {
+  const r = go({ pr: pr({ files: UI_FILE }), e2eCheck: { apiFail: true } });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "e2e-unknown");
+  assert.equal(r.decisions[0].e2e, "unknown");
+});
+
+test("UI PR + blade.php path is a UI PR", () => {
+  const r = go({ pr: pr({ files: [{ path: "resources/views/users.blade.php", additions: 3, deletions: 3 }] }) });
+  assert.equal(merges(r).length, 0, "no merge without e2e marker");
+  assert.equal(r.decisions[0].reason, "e2e-missing");
+});
+
+test("UI PR + decision log includes e2e field next to jev/conf", () => {
+  const r = go({ pr: pr({ files: UI_FILE, comments: [{ body: E2E_PASS }] }) });
+  const d = r.decisions[0];
+  // The e2e field must be a top-level key in the decision log.
+  assert.equal(typeof d.e2e, "string");
+  assert.equal(d.e2e, "pass");
+  // jev/conf are still present (existing contract).
+  assert.equal(d.jev, "pass");
+  assert.equal(d.conf, 0.95);
 });

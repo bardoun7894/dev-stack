@@ -13,7 +13,12 @@
  * reviewer into a verdict, exfiltrate secrets, override instructions, or impersonate the owner; max >= INJECTION_BAR
  * still posts the review but blocks auto-merge. A PR is squash-merged only when the kill switch is off, the injection
  * guard is clean (or skipped), both verdicts are PASS, Jev agrees with confidence >= 0.9, the PR is small and touches no
- * risky path, and mergeCheck's guards hold (see mergeGate). Every decision is appended to $PR_REVIEW_LOG. --no-merge disables.
+ * risky path, mergeCheck's guards hold (see mergeGate), and (for UI PRs) a passing e2e run for the head sha has been
+ * signalled by an `<!-- e2e-pass sha=<sha> -->` comment or a `jev-e2e`/`e2e` commit status/check in success on that
+ * sha. A UI PR is any PR with at least one changed path matching UI_PATH_RE (.tsx/.jsx/.vue/.svelte/.css/.scss/.dart/.html,
+ * .blade.php, resources/views, /components/, /pages/). Missing => skip('e2e-missing'); present but failure =>
+ * skip('e2e-failed'); lookup error/unknown => skip('e2e-unknown') (fail closed, never merge). Every decision is appended
+ * to $PR_REVIEW_LOG. --no-merge disables.
  * One stdout line per PR: repo#N sha7 action seconds.
  * Tests stub every gh/claude call via PR_REVIEW_RUNNER (an executable called as `runner <cmd> <args...>`).
  */
@@ -40,6 +45,7 @@ const B_CHAIN = [
   ["opencode", "opencode-go/deepseek-v4.1-flash"], ["opencode", "opencode-go/glm-5.3-flash"],
 ];
 const RISKY_RE = /\.github\/workflows\/|migrations?\/|\.env|secret|credential|Dockerfile|docker-compose|deploy|k8s\/|helm\/|auth|payment|billing|package-lock\.json|composer\.lock|pnpm-lock\.yaml|yarn\.lock/i;
+const UI_PATH_RE = /\.(tsx|jsx|vue|svelte|css|scss|dart|html)$|\.blade\.php$|resources\/views|\/components\/|\/pages\//;
 const JEV_QUESTION = "Do these code reviews report any blocking problem (bug, security issue, data loss, broken test) that must be fixed before merge?";
 const INJECTION_BAR = 0.7;
 const INJECTION_CHUNK = 24000;
@@ -80,6 +86,7 @@ function exec(cmd, args, { input, cwd, timeout = 60000 } = {}) {
 
 const gh = (args, o) => exec("gh", args, o);
 const isDocs = (p) => /\.(md|mdx|txt|rst)$/.test(p) || p.startsWith("docs/");
+const isUiPath = (p) => UI_PATH_RE.test(p);
 
 function askClaude(input) {
   try {
@@ -291,6 +298,49 @@ function guardCheck(repo, n, sha, dry) {
   return null;
 }
 
+// Returns { status: "pass"|"failed"|"missing", source: "comment"|"check"|null } on a successful lookup;
+// { status: "unknown", reason: "..." } on any gh() failure. A comment containing
+// `<!-- e2e-pass sha=<full sha> -->` counts as pass. A commit status with context "jev-e2e" or "e2e" in
+// state "success" on the same sha counts as pass; any other state from a matching context counts as failed;
+// no matching context at all => missing.
+function e2eCheck(repo, n, sha) {
+  let v, runs, status;
+  try {
+    v = JSON.parse(gh(["pr", "view", String(n), "-R", repo, "--json", "comments,headRefOid"]));
+  } catch (e) {
+    return { status: "unknown", reason: `pr-view:${e.message}` };
+  }
+  if (v.headRefOid && v.headRefOid !== sha) {
+    // Head moved between review and gate; treat as missing (a stale marker must not pass).
+    v = { comments: [] };
+  }
+  const marker = `<!-- e2e-pass sha=${sha} -->`;
+  if ((v.comments ?? []).some((c) => (c.body ?? "").includes(marker))) {
+    return { status: "pass", source: "comment" };
+  }
+  try {
+    runs = JSON.parse(gh(["api", `repos/${repo}/commits/${sha}/check-runs`]));
+  } catch (e) {
+    return { status: "unknown", reason: `check-runs:${e.message}` };
+  }
+  const cr = (runs?.check_runs ?? []).find((c) => c.name === "jev-e2e" || c.name === "e2e");
+  if (cr) {
+    if (cr.status === "completed" && cr.conclusion === "success") return { status: "pass", source: "check" };
+    return { status: "failed", source: "check" };
+  }
+  try {
+    status = JSON.parse(gh(["api", `repos/${repo}/commits/${sha}/status`]));
+  } catch (e) {
+    return { status: "unknown", reason: `status:${e.message}` };
+  }
+  const ctx = (status?.statuses ?? []).find((c) => (c.context === "jev-e2e" || c.context === "e2e"));
+  if (ctx) {
+    if (ctx.state === "success") return { status: "pass", source: "check" };
+    return { status: "failed", source: "check" };
+  }
+  return { status: "missing", source: null };
+}
+
 let jevCount = 0;
 const tail = (t, n = 20000) => (t.length > n ? t.slice(-n) : t);
 
@@ -336,6 +386,20 @@ function mergeGate(repo, n, r, dry) {
   if (r.truncated) return skip("diff-truncated");
   const g = guardCheck(repo, n, r.sha, dry);
   if (g) return skip(g.replace("merge-skipped:", ""));
+  // E2e gate: UI PRs need a passing e2e run for the head sha before auto-merge.
+  if (files.some((f) => isUiPath(f.path))) {
+    const e = e2eCheck(repo, n, r.sha);
+    d.e2e = e.status;
+    d.e2eSource = e.source ?? null;
+    if (e.status === "missing") return skip("e2e-missing");
+    if (e.status === "failed") return skip("e2e-failed");
+    if (e.status === "unknown") {
+      console.error(`pr-review: ${repo}#${n}: e2e: ${e.reason ?? "unknown"}`);
+      return skip("e2e-unknown");
+    }
+  } else {
+    d.e2e = "not-needed";
+  }
   try {
     const j = jevJudge(r.aText, r.bText);
     d.jev = j.choice; d.conf = j.conf;
@@ -453,6 +517,7 @@ function runOne(repo, n, dry, merge) {
       }
       const rec = { at: new Date().toISOString(), repo, pr: Number(n), sha: r.sha, a: r.verdict, b: r.bVerdict, b_model: r.bModel, jev: m.jev, conf: m.conf, lines: m.lines, action: m.action, reason: m.reason,
         injection: m.injection ?? null,
+        e2e: m.e2e ?? null, e2e_source: m.e2eSource ?? null,
         cost: { haiku_usd: r.haikuUsd ?? null, haiku_tokens: r.haikuTokens ?? null, b_model: r.bModel, b_usd: r.bUsd ?? null, b_tokens: r.bTokens ?? null, jev_calls: jevCallsTotal + jevCount } };
       logDecision(rec);
       console.log(`${repo}#${n} ${r.sha7} ${m.action === "merge-skipped" ? `merge-skipped:${m.reason}` : m.action} ${secs()}`);
