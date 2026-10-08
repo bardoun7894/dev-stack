@@ -57,3 +57,7 @@ label/decision, or reads everything to sort it. File refs come from the 2026-09-
   hourly sweep: `noul` "this raw file is worth ingesting".
 - MyContabo / Tokyo `proactive.ts`: `score` log-line severity (routine … outage) in near real time, page on ≥ 2.5
   (the video's on-call example).
+
+## Pattern: several questions, one weighted score, uncertain band to a cheap LLM
+
+Ask one item several questions in a single call (`jev raw` or askJev with several keys: relevance, fit, category, risk). Combine the answers with fixed weights into one score, drop anything below LOW, keep anything above HIGH, and send only the middle band to a cheap LLM (Haiku 5.5 or GLM 5.3 Flash) with the Jev answers attached so the LLM can re-weight them with broader context. Thresholds live as constants next to the code and are retuned with `jev tune TAG` against labelled samples. Duplicate checks lean towards processing: skip only at p >= 0.9, because a missed duplicate costs tokens but a wrong skip loses knowledge. A prompt-injection guard runs on every piece of outside text against four nouls (exfil, memory or settings, override or boundary, owner impersonation), quarantines at max score >= 0.8 for customer messages (Tokyo) and 0.7 for PR text (pr-review), fails closed when an action (merge, send) follows the judgement, and fails open only when the old code path has no tools. Source: Cole Medin, "Jev Can SERIOUSLY Supercharge Your AI Second Brain", 2026-10-08 (38k calls, ~$21/week via OpenRouter decisions).
