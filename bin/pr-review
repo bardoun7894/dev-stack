@@ -48,7 +48,7 @@ The last line of your reply must be exactly "VERDICT: PASS" (no P0 or P1 finding
 `;
 
 const CLAUDE_ARGS = [
-  "-p", "--model", "claude-haiku-5-5", "--effort", "medium",
+  "-p", "--output-format", "json", "--model", "claude-haiku-5-5", "--effort", "medium",
   "--setting-sources", "project,local",
   "--settings", '{"disableAllHooks":true,"autoMemoryEnabled":false,"disableBundledSkills":true}',
   "--strict-mcp-config", "--tools", "",
@@ -78,6 +78,37 @@ function askClaude(input) {
   }
 }
 
+// Parses `claude -p --output-format json`. Throws on anything but a JSON object with a string `result` (fail closed).
+function parseClaude(raw) {
+  let j;
+  try { j = JSON.parse(raw); } catch { throw new Error("claude returned malformed JSON"); }
+  if (!j || typeof j.result !== "string") throw new Error("claude JSON has no result");
+  const u = j.usage ?? {};
+  const toks = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"].map((k) => Number(u[k]) || 0);
+  return { text: j.result, usd: Number.isFinite(Number(j.total_cost_usd)) && j.total_cost_usd != null ? Number(j.total_cost_usd) : null, tokens: j.usage ? toks.reduce((a, b) => a + b, 0) : null };
+}
+
+// Parses `pi --mode json` (one event per line): the last assistant text and the last usage object seen. usd/tokens are null when absent.
+function parsePi(raw) {
+  let text = "", usage = null;
+  const walk = (o) => {
+    if (Array.isArray(o)) return o.forEach(walk);
+    if (!o || typeof o !== "object") return;
+    if (o.role === "assistant" && Array.isArray(o.content)) {
+      const t = o.content.filter((c) => c?.type === "text" && typeof c.text === "string").map((c) => c.text).join("");
+      if (t.trim()) text = t;
+    }
+    if (o.usage && typeof o.usage === "object") usage = o.usage;
+    Object.values(o).forEach(walk);
+  };
+  for (const line of raw.split("\n")) { try { walk(JSON.parse(line)); } catch { /* not an event line */ } }
+  const n = (v) => (Number.isFinite(Number(v)) && v != null ? Number(v) : null);
+  const usd = n(usage?.cost?.total ?? usage?.cost);
+  const parts = ["input", "output", "cacheRead", "cacheWrite"].map((k) => n(usage?.[k]));
+  const tokens = n(usage?.totalTokens) ?? (parts.some((x) => x !== null) ? parts.reduce((a, b) => a + (b ?? 0), 0) : null);
+  return { text: text.trim(), usd, tokens };
+}
+
 // Last non-empty line decides; anything but an exact PASS is BLOCK (fail closed).
 function parseVerdict(text) {
   const lines = String(text).replace(/<!--.*?-->/g, "").split("\n").map((l) => l.trim()).filter(Boolean);
@@ -102,7 +133,7 @@ function modelUsable(ref, exhausted, dead, quota) {
   return !(q && ["five_hour", "weekly", "monthly"].some((w) => typeof q[w] === "number" && q[w] >= MIN_CONF));
 }
 
-// Second reviewer: first usable model in B_CHAIN that answers. Returns { model, out } or null.
+// Second reviewer: first usable model in B_CHAIN that answers. Returns { model, out, usd, tokens } or null.
 function secondReview(prompt) {
   const exhausted = readJson(EXHAUSTED_FILE), dead = readJson(DEAD_FILE), quota = readJson(QUOTA_FILE);
   const have = {};
@@ -117,12 +148,13 @@ function secondReview(prompt) {
       }
       if (!have[tool]) continue;
       const args = tool === "pi"
-        ? ["--mode", "text", "-p", "--no-extensions", "--no-context-files", "--no-skills", "--no-tools", "--no-session", "--model", model,
+        ? ["--mode", "json", "-p", "--no-extensions", "--no-context-files", "--no-skills", "--no-tools", "--no-session", "--model", model,
            `@${file}`, "Follow the instructions in the attached file. Reply with the review only."]
         : ["run", "-m", model, prompt];
       try {
-        const out = exec(tool, args, { input: "", cwd: dir, timeout: B_TIMEOUT_MS }).trim();
-        if (out) return { model, out };
+        const raw = exec(tool, args, { input: "", cwd: dir, timeout: B_TIMEOUT_MS });
+        const r = tool === "pi" ? parsePi(raw) : { text: raw.trim(), usd: null, tokens: null };
+        if (r.text) return { model, out: r.text, usd: r.usd, tokens: r.tokens };
       } catch { /* try the next model */ }
     }
     return null;
@@ -194,12 +226,14 @@ function guardCheck(repo, n, sha, dry) {
   return null;
 }
 
+let jevCount = 0;
 const tail = (t, n = 20000) => (t.length > n ? t.slice(-n) : t);
 
 // Asks Jev whether the reviews report a blocker. Returns { choice, conf }; throws on any failure (no merge).
 function jevJudge(aText, bText) {
   const state = `HAIKU REVIEW:\n${tail(aText)}\n\nSECOND REVIEW:\n${tail(bText)}`;
-  const out = exec("jev", ["choice", JEV_QUESTION, "block=at least one blocking problem is reported", "pass=no blocking problem; only minor notes or none", "-s", state], { timeout: 60000 });
+  jevCount++;
+  const out = exec("jev", ["choice", JEV_QUESTION, "block=at least one blocking problem is reported", "pass=no blocking problem; only minor notes or none", "-s", state, "--log", "pr-review"], { timeout: 60000 });
   const j = JSON.parse(out);
   return { choice: j.choice, conf: Number(j.confidence) };
 }
@@ -273,7 +307,8 @@ function reviewPr(repo, n, dry) {
     note = `> Diff truncated: only the first ${MAX_DIFF} characters were reviewed.\n\n`;
   }
   const prompt = `${PROMPT}PR title: ${pr.title}\n\nPR description:\n${pr.body ?? ""}\n\nDiff:\n${diff}\n`;
-  const out = askClaude(prompt).trim();
+  const a = parseClaude(askClaude(prompt));
+  const out = a.text.trim();
   if (!out) throw new Error("claude returned empty output");
   const second = secondReview(prompt);
   const bSection = second ? `**Second review (${second.model})**\n\n${second.out}` : "**Second review (unavailable)**\n\nsecond reviewer unavailable (no quota)";
@@ -293,7 +328,7 @@ function reviewPr(repo, n, dry) {
   }
   return {
     ...info, action: "reviewed", files: pr.files, verdict: parseVerdict(out), bVerdict: second ? parseVerdict(second.out) : "BLOCK",
-    bModel: second?.model ?? null, aText: out, bText: second?.out ?? "", truncated: Boolean(note),
+    bModel: second?.model ?? null, haikuUsd: a.usd, haikuTokens: a.tokens, bUsd: second?.usd ?? null, bTokens: second?.tokens ?? null, aText: out, bText: second?.out ?? "", truncated: Boolean(note),
   };
 }
 
@@ -306,11 +341,13 @@ function runOne(repo, n, dry, merge) {
     console.log(`${repo}#${n} ${r.sha7} ${r.action} ${secs()}`);
     if (merge && r.verdict) {
       let m;
+      jevCount = 0;
       try { m = mergeGate(repo, n, r, dry); } catch (e) {
         m = { action: "merge-skipped", reason: "error", jev: null, conf: null, lines: null };
         console.error(`pr-review: ${repo}#${n}: merge: ${e.message}`);
       }
-      const rec = { at: new Date().toISOString(), repo, pr: Number(n), sha: r.sha, a: r.verdict, b: r.bVerdict, b_model: r.bModel, jev: m.jev, conf: m.conf, lines: m.lines, action: m.action, reason: m.reason };
+      const rec = { at: new Date().toISOString(), repo, pr: Number(n), sha: r.sha, a: r.verdict, b: r.bVerdict, b_model: r.bModel, jev: m.jev, conf: m.conf, lines: m.lines, action: m.action, reason: m.reason,
+        cost: { haiku_usd: r.haikuUsd ?? null, haiku_tokens: r.haikuTokens ?? null, b_model: r.bModel, b_usd: r.bUsd ?? null, b_tokens: r.bTokens ?? null, jev_calls: jevCount } };
       logDecision(rec);
       console.log(`${repo}#${n} ${r.sha7} ${m.action === "merge-skipped" ? `merge-skipped:${m.reason}` : m.action} ${secs()}`);
       if (dry) console.log(JSON.stringify(rec));
