@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# Tests for scripts/server/server-health.sh.
+#
+# Puts stub binaries on PATH (curl, systemctl, pm2, docker, crontab, df) and
+# points the script at temp fixture dirs for nginx conf, backups, logs and
+# state, plus an isolated ENV_FILE for Telegram credentials and a stub
+# python3 that records messages instead of calling api.telegram.org.
+#
+# Run: bash scripts/server/test_server_health.sh
+
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+SCRIPT="$HERE/server-health.sh"
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+export PATH="$T/bin:$PATH"
+
+# Fixture layout used by every test.
+mkdir -p "$T/bin" "$T/nginx" "$T/backups" "$T/logs" "$T/state" "$T/state/pm2" "$T/state/docker" "$T/state/health" "$T/cron-targets"
+
+pass=0; fail=0
+ok() { echo "PASS $1"; pass=$((pass+1)); }
+bad() { echo "FAIL $1: $2"; fail=$((fail+1)); }
+
+PY_LOG="$T/state/health/py.log"
+touch "$PY_LOG"
+
+# --- ENV_FILE stub ---
+ENV_FILE="$T/state/health/tokyo.env"
+mkdir -p "$(dirname "$ENV_FILE")"
+printf 'TELEGRAM_BOT_TOKEN=tg-FAKE-token-for-test-0123\nTELEGRAM_USER_ID=1234567\n' > "$ENV_FILE"
+
+# Stub installer: writes stub binaries for curl/systemctl/pm2/docker/crontab/df
+# according to features in $HEALTH_STUB.
+stub_install() {
+  rm -rf "$T/bin/curl" "$T/bin/systemctl" "$T/bin/pm2" "$T/bin/docker" "$T/bin/crontab" "$T/bin/df" "$T/bin/chkrootkit" 2>/dev/null
+
+  # curl: per-host map of "name=code"
+  local host_codes="${HEALTH_STUB_HOSTS:-}"
+  cat > "$T/bin/curl" <<CURL
+#!/usr/bin/env bash
+# stub curl: parses -w '%{http_code}' and an https URL arg, picks from HEALTH_STUB_HOSTS.
+code="\${HEALTH_STUB_CODE:-200}"
+for u in "\$@"; do
+  case "\$u" in
+    https://*)
+      host="\${u#https://}"; host="\${host%%/*}"
+      map=\$(printf '%s\n' "\$HEALTH_STUB_HOSTS" | awk -F'=' -v h="\$host" '\$1==h {print \$2; exit}')
+      if [ -n "\$map" ]; then code="\$map"; fi
+      ;;
+  esac
+done
+printf '%s' "\$code"
+exit 0
+CURL
+  chmod +x "$T/bin/curl"
+
+  cat > "$T/bin/systemctl" <<'SYSD'
+#!/usr/bin/env bash
+echo "${HEALTH_STUB_FAILED:-}"
+SYSD
+  chmod +x "$T/bin/systemctl"
+
+  cat > "$T/bin/pm2" <<'PM2'
+#!/usr/bin/env bash
+if [ "${1:-}" = "jlist" ]; then
+  printf '%s\n' "${HEALTH_STUB_PM2LIST:-[]}"
+  exit 0
+fi
+exit 0
+PM2
+  chmod +x "$T/bin/pm2"
+
+  cat > "$T/bin/docker" <<'DOCKER'
+#!/usr/bin/env bash
+# ps --format '{{.Names}}' (one per line)
+printf '%s\n' "${HEALTH_STUB_DOCKER:-}"
+DOCKER
+  chmod +x "$T/bin/docker"
+
+  cat > "$T/bin/crontab" <<'CRON'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-l" ]; then
+  printf '%s\n' "${HEALTH_STUB_CRONTAB:-}"
+fi
+CRON
+  chmod +x "$T/bin/crontab"
+
+  cat > "$T/bin/df" <<'DF'
+#!/usr/bin/env bash
+# df -P (tab-separated). Allow override via env, default a healthy mount.
+printf '%s\n' "${HEALTH_STUB_DF:-Filesystem     1024-blocks    Used Available Capacity Mounted on
+/dev/sda1            10000     3000      7000      30% /}"
+DF
+  chmod +x "$T/bin/df"
+}
+
+export HEALTH_STUB_HOSTS= HEALTH_STUB_FAILED= HEALTH_STUB_PM2LIST= HEALTH_STUB_DOCKER= HEALTH_STUB_CRONTAB= HEALTH_STUB_DF=
+# Set mtime N days ago (portable)
+age_touch() { python3 -c "import os,sys,time; t=time.time()-float(sys.argv[2])*86400; os.utime(sys.argv[1],(t,t))" "$1" "$2"; }
+
+# Helper: run the script with all stubs in place, capture stdout and rc.
+run_script() {
+  stub_install
+  out=$(ENV_FILE="$ENV_FILE" STATE_DIR="$T/state/health" BACKUP_DIRS="$T/backups" \
+    NGINX_CONF_DIR="$T/nginx/sites-enabled" VAR_LOG_CHKROOTKIT="$T/logs/chkrootkit.log" \
+    CRON_LOG_DIR="$T/cron-targets" \
+    HEALTH_PY_LOG="$PY_LOG" \
+    bash "$SCRIPT" --dry-run "$@" 2>&1)
+  rc=$?
+  echo "$out"
+}
+
+# Common environment that points the script at every stub/fixture.
+export ENV_FILE STATE_DIR="$T/state/health" BACKUP_DIRS="$T/backups"
+export NGINX_CONF_DIR="$T/nginx/sites-enabled" VAR_LOG_CHKROOTKIT="$T/logs/chkrootkit.log"
+export CRON_LOG_DIR="$T/cron-targets"
+export HEALTH_PY_LOG="$PY_LOG"
+mkdir -p "$T/nginx/sites-enabled"
+mkdir -p "$T/backups" "$T/cron-targets" "$T/logs"
+
+# Write nginx site confs
+cat > "$T/nginx/sites-enabled/beldify.conf" <<'NG'
+server_name beldify.example.com;
+listen 443 ssl;
+NG
+cat > "$T/nginx/sites-enabled/ostudio.conf" <<'NG'
+server_name ostudio.example.com;
+listen 443 ssl;
+NG
+cat > "$T/nginx/sites-enabled/local.conf" <<'NG'
+server_name localhost;
+NG
+cat > "$T/nginx/sites-enabled/iponly.conf" <<'NG'
+server_name 10.0.0.5;
+NG
+
+# ---- 1. 502 site alerts ----
+HEALTH_STUB_HOSTS="beldify.example.com=502
+ostudio.example.com=200"
+out="$(run_script)"
+echo "$out" | grep -q "site: beldify.example.com 502" && ok "502-beldify" || bad "502-beldify" "missing 502 finding in: $out"
+echo "$out" | grep -q "ostudio.example.com 502" && bad "502-clean" "ostudio flagged despite 200: $out" || ok "502-clean"
+
+# ---- 2. 20-byte backup alerts; normal one does not ----
+head -c 1048576 /dev/zero > "$T/backups/beldify-2026-10-07.sql.gz"; age_touch "$T/backups/beldify-2026-10-07.sql.gz" 1
+printf '%020d' 0 > "$T/backups/beldify-2026-10-08.sql.gz"
+head -c 2000 /dev/zero > "$T/backups/ostudio-2026-10-07.sql.gz"; age_touch "$T/backups/ostudio-2026-10-07.sql.gz" 1
+head -c 1500 /dev/zero > "$T/backups/ostudio-2026-10-08.sql.gz"
+# cartx: only a 3-day-old file, so it is missing
+head -c 5000 /dev/zero > "$T/backups/cartx-2026-10-05.sql.gz"; age_touch "$T/backups/cartx-2026-10-05.sql.gz" 3
+
+HEALTH_STUB_HOSTS="beldify.example.com=200
+ostudio.example.com=200"
+out="$(run_script)"
+echo "$out" | grep -q "backup: beldify .*20 bytes" && ok "backup-20b" || bad "backup-20b" "no 20-byte finding in: $out"
+echo "$out" | grep -q "backup: cartx .*missing" && ok "backup-missing" || bad "backup-missing" "no missing finding in: $out"
+echo "$out" | grep -q "backup: ostudio" && bad "backup-normal" "ostudio (>=1024 bytes) flagged: $out" || ok "backup-normal"
+
+# ---- 3. failed unit ----
+HEALTH_STUB_FAILED="nginx.service failed
+"
+HEALTH_STUB_HOSTS="beldify.example.com=200
+ostudio.example.com=200"
+out="$(run_script)"
+echo "$out" | grep -q "unit: nginx.service failed" && ok "unit" || bad "unit" "missing nginx.service failed finding: $out"
+
+# ---- 4. pm2 restart jump 0 -> 30 alerts; second run without growth does not ----
+PM2_BASE='[{"name":"web","status":"online","restart_time":0},{"name":"db","status":"online","restart_time":1}]'
+HEALTH_STUB_PM2LIST="$PM2_BASE"; run_script >/dev/null
+PM2_BAD='[{"name":"web","status":"online","restart_time":30},{"name":"db","status":"online","restart_time":1}]'
+HEALTH_STUB_PM2LIST="$PM2_BAD"
+HEALTH_STUB_FAILED=""
+HEALTH_STUB_HOSTS="beldify.example.com=200
+ostudio.example.com=200"
+out="$(run_script)"
+echo "$out" | grep -q "pm2: web .*restarts=30" && ok "pm2-jump" || bad "pm2-jump" "no jump finding in: $out"
+echo "$out" | grep -q "pm2: db .*restarts=" && bad "pm2-stable" "stable app flagged: $out" || ok "pm2-stable"
+
+# Second run with the same restart counts (no growth) must be silent.
+PM2_SAME="$PM2_BAD"
+HEALTH_STUB_PM2LIST="$PM2_SAME"
+out="$(run_script)"
+echo "$out" | grep -q "^\[server-health\] pm2:" && bad "pm2-dedupe" "still emitting pm2 findings after stable run: $out" || ok "pm2-dedupe"
+
+# ---- 5. cron log with 30 "No such container" lines alerts ----
+LOGF="$T/cron-targets/app.log"
+: > "$LOGF"
+for i in $(seq 1 50); do
+  printf 'line %s: No such container: nope\n' "$i" >> "$LOGF"
+done
+# Make sure the file mtime is fresh (<= 2h)
+touch "$LOGF"
+HEALTH_STUB_CRONTAB="0 * * * * /usr/local/bin/t.sh >> $T/cron-targets/app.log 2>&1"
+HEALTH_STUB_HOSTS="beldify.example.com=200
+ostudio.example.com=200"
+HEALTH_STUB_FAILED=""
+out="$(run_script)"
+echo "$out" | grep -q "cronlog: .*cron-targets/app.log .*last line:.*No such container" && ok "cronlog" || bad "cronlog" "no cron alert in: $out"
+
+# ---- 6. cron log with only 5 error lines does NOT alert (under 20 / last 50) ----
+LOGF2="$T/cron-targets/quiet.log"
+: > "$LOGF2"
+for i in $(seq 1 50); do
+  [ $((i % 10)) -eq 0 ] && printf 'line %s: Error happened\n' "$i" >> "$LOGF2" || printf 'line %s: ok\n' "$i" >> "$LOGF2"
+done
+touch "$LOGF2"
+HEALTH_STUB_CRONTAB="0 * * * * /usr/local/bin/q.sh >> $T/cron-targets/quiet.log 2>&1"
+out="$(run_script)"
+echo "$out" | grep -q "cronlog: .*cron-targets/quiet.log" && bad "cronlog-quiet" "quiet cron log flagged: $out" || ok "cronlog-quiet"
+
+# ---- 7. dedupe: same finding twice sends only one message ----
+LOGF="$T/cron-targets/app.log"
+touch "$LOGF"
+HEALTH_STUB_CRONTAB="0 * * * * /usr/local/bin/t.sh >> $T/cron-targets/app.log 2>&1"
+HEALTH_STUB_HOSTS="beldify.example.com=200
+ostudio.example.com=200"
+out="$(run_script)"
+echo "$out" | grep -q "cronlog: .*cron-targets/app.log" && ok "dedupe-1" || bad "dedupe-1" "no alert on first run: $out"
+
+# Second run, the same finding MUST NOT be reprinted.
+out="$(run_script)"
+echo "$out" | grep -q "cronlog: .*cron-targets/app.log" && bad "dedupe-2" "duplicated finding on second run: $out" || ok "dedupe-2"
+
+# ---- 8. recovery: when the finding clears, send "recovered: ..." ----
+LOGF="$T/cron-targets/app.log"
+: > "$LOGF"
+for i in $(seq 1 50); do printf 'ok line %s\n' "$i" >> "$LOGF"; done
+touch "$LOGF"
+out="$(run_script)"
+echo "$out" | grep -q "recovered: .*cronlog: .*cron-targets/app.log" && ok "recovery" || bad "recovery" "no recovered: line: $out"
+
+# ---- 9. chkrootkit: ignore /tmp, /usr/lib/python3/.../fail2ban/tests/, and the
+#       runc-process lstat line; alert once per unique /usr/bin path ----
+LOGD="$T/logs/chkrootkit.log"
+mkdir -p "$(dirname "$LOGD")"
+cp /dev/null "$LOGD"
+cat >> "$LOGD" <<CHK
+chkrootkit 0.59
+Searching for suspicious files...
+WARNING: /tmp/evil-bin is suspicious
+WARNING: /usr/lib/python3/dist-packages/fail2ban/tests/data.bin is suspicious
+WARNING: /usr/sbin/runc -> /proc/123/exe lstat() call failed: No such file or directory
+WARNING: /usr/bin/x is suspicious
+WARNING: /usr/bin/x is suspicious
+CHK
+touch "$LOGD"
+HEALTH_STUB_HOSTS="beldify.example.com=200
+ostudio.example.com=200"
+HEALTH_STUB_FAILED=""
+out="$(run_script)"
+echo "$out" | grep -q "chkrootkit: /usr/bin/x is suspicious" && ok "chkrootkit" || bad "chkrootkit" "no /usr/bin/x alert in: $out"
+[ "$(echo "$out" | grep -c "chkrootkit: /usr/bin/x is suspicious")" = "1" ] && ok "chkrootkit-dedupe" || bad "chkrootkit-dedupe" "found multiple /usr/bin/x alerts: $out"
+echo "$out" | grep -q "chkrootkit: /tmp/" && bad "chkrootkit-tmp" "/tmp/ flagged: $out" || ok "chkrootkit-tmp"
+echo "$out" | grep -q "fail2ban/tests" && bad "chkrootkit-fail2ban" "fail2ban path flagged: $out" || ok "chkrootkit-fail2ban"
+echo "$out" | grep -q "runc-process" && bad "chkrootkit-runc" "runc flagged: $out" || ok "chkrootkit-runc"
+
+# ---- 10. --dry-run never invokes curl to api.telegram.org ----
+# Re-do a clean site alert + check curl never touches api.telegram.
+HEALTH_STUB_HOSTS="beldify.example.com=502
+ostudio.example.com=200"
+HEALTH_STUB_FAILED=""
+HEALTH_STUB_CRONTAB=""
+out="$(ENV_FILE="$ENV_FILE" STATE_DIR="$T/state/dry" BACKUP_DIRS="$T/backups" \
+  NGINX_CONF_DIR="$T/nginx/sites-enabled" VAR_LOG_CHKROOTKIT="$T/logs/chkrootkit.log" \
+  CRON_LOG_DIR="$T/cron-targets" \
+  HEALTH_PY_LOG="$PY_LOG" \
+  DOCKER_IGNORE='^(ostudio-dev-|board-test-)' \
+  bash "$SCRIPT" --dry-run 2>&1)"
+echo "$out" | grep -q "site: beldify.example.com 502" && ok "dryrun-banner" || bad "dryrun-banner" "no finding printed: $out"
+# Ensure our curl stub never received a url for api.telegram.org
+echo "$out" | grep -q "api.telegram.org" && bad "dryrun-no-api" "dry-run still mentioned api.telegram.org: $out" || ok "dryrun-no-api"
+
+# Direct check: hook curl to fail loudly if it sees api.telegram.org during --dry-run.
+cat > "$T/bin/curl" <<'CURLFAIL'
+#!/usr/bin/env bash
+for u in "$@"; do
+  case "$u" in
+    *api.telegram.org*) echo "TELEGRAM CALL IN DRY-RUN: $u" >&2; exit 9;;
+  esac
+done
+# benign default
+printf '%s' "${HEALTH_STUB_CODE:-200}"
+exit 0
+CURLFAIL
+chmod +x "$T/bin/curl"
+out="$(ENV_FILE="$ENV_FILE" STATE_DIR="$T/state/dry" BACKUP_DIRS="$T/backups" \
+  NGINX_CONF_DIR="$T/nginx/sites-enabled" VAR_LOG_CHKROOTKIT="$T/logs/chkrootkit.log" \
+  CRON_LOG_DIR="$T/cron-targets" \
+  HEALTH_PY_LOG="$PY_LOG" \
+  DOCKER_IGNORE='^(ostudio-dev-|board-test-)' \
+  bash "$SCRIPT" --dry-run 2>&1)"
+echo "$out" | grep -q "TELEGRAM CALL IN DRY-RUN" && bad "dryrun-guard" "curl stub was hit with api.telegram.org: $out" || ok "dryrun-guard"
+
+# ---- summary ----
+echo "---"
+echo "tests: pass=$pass fail=$fail"
+exit $fail
