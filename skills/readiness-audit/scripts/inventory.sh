@@ -114,20 +114,22 @@ if [ -d "$specs_dir" ]; then
 fi
 
 # --- signals ---------------------------------------------------------------
-# tests:        any test dir / test config file
-# ci:           .github/workflows/*.yml or .gitlab-ci.yml or .circleci/config.yml
-# env_example:  .env.example or env.example
-# dockerfile:    Dockerfile or docker-compose*.yml
-# health_route: any tracked file matching /health (excluded dirs)
-# migrations:   migrations/ db/migrations/ alembic/ prisma/ schema.sql
-# i18n:         locales/ l10n/ lang/ messages/ *.arb
-# error_tracking: sentry|bugsnag|rollbar mentioned in package manifests / requirements
-# legal_pages:  privacy|terms files / routes
-# backups:      backup in scripts/ ops/ infra/ dirs
-# stubs:        count of TODO|FIXME|NotImplemented in source files (excluded dirs)
-#
-# Each signal is computed via git grep when possible, else a bounded find+grep.
+# Each signal is computed against the entire tracked tree (git ls-files in a
+# git repo, bounded find otherwise). Patterns match path segments anywhere in
+# the tree, not only at the repo root — so monorepos with backend/, frontend/,
+# services/, etc. are detected correctly.
 lsf="$(git_ls_files)"
+
+# When not in a git repo, build a bounded file list with heavy dirs pruned.
+# This is used by signals below via the `lsf` var (overridden here only if
+# git_ls_files returned nothing AND we're not in a git repo).
+if [ ! -d "$REPO/.git" ] && [ -z "$lsf" ]; then
+  lsf="$(find "$REPO" \
+    -type d \( -name node_modules -o -name vendor -o -name .git \
+              -o -name build -o -name dist -o -name .next \
+              -o -name .cache -o -name __pycache__ \) -prune -o \
+    -type f -print 2>/dev/null | sed "s|^$REPO/||")"
+fi
 
 has_path() { # has_path <needle>
   local needle="$1"
@@ -139,51 +141,67 @@ has_path() { # has_path <needle>
 bool_signal() { # bool_signal <name> -> "true"|"false"
   case "$1" in
     tests)
-      echo "$lsf" | grep -qE '(^|/)(tests?|__tests__|spec|specs)/.*' 2>/dev/null && echo true && return
+      # any path segment: tests/ test/ __tests__/ spec/ specs/
+      # or filename pattern: *Test.php, *_test.*, *.test.*, *.spec.*
+      echo "$lsf" | grep -qE '(^|/)(tests?|__tests__|spec|specs)/' 2>/dev/null && echo true && return
+      echo "$lsf" | grep -qE 'Test\.php$' 2>/dev/null && echo true && return
+      echo "$lsf" | grep -qE '_(test|tests)\.[a-z]+$' 2>/dev/null && echo true && return
       echo "$lsf" | grep -qE '\.(test|spec)\.[a-z]+$' 2>/dev/null && echo true && return
       echo false ;;
     ci)
-      echo "$lsf" | grep -qE '^\.github/workflows/.*\.ya?ml$' 2>/dev/null && echo true && return
+      echo "$lsf" | grep -qE '(^|/)\.github/workflows/.*\.ya?ml$' 2>/dev/null && echo true && return
       has_path ".gitlab-ci.yml" && echo true && return
       has_path ".circleci/config.yml" && echo true && return
       echo false ;;
     env_example)
-      has_path ".env.example" && echo true && return
-      has_path "env.example" && echo true && return
+      # any .env.example / .env.sample / env.example anywhere
+      echo "$lsf" | grep -qE '(^|/)\.env\.(example|sample)$' 2>/dev/null && echo true && return
+      echo "$lsf" | grep -qE '(^|/)env\.example$' 2>/dev/null && echo true && return
       echo false ;;
     dockerfile)
-      has_path "Dockerfile" && echo true && return
-      echo "$lsf" | grep -qE '^docker-compose.*\.yml$' 2>/dev/null && echo true && return
+      # any Dockerfile* or docker-compose*.yml anywhere
+      echo "$lsf" | grep -qE '(^|/)Dockerfile[a-zA-Z0-9._-]*$' 2>/dev/null && echo true && return
+      echo "$lsf" | grep -qE '(^|/)docker-compose[a-zA-Z0-9._-]*\.ya?ml$' 2>/dev/null && echo true && return
       echo false ;;
     health_route)
       hits="$(git_grep '/health' || true)"
       [ -n "$hits" ] && echo true || echo false ;;
     migrations)
-      echo "$lsf" | grep -qE '(^|/)(migrations|db/migrations|alembic|prisma)/' 2>/dev/null && echo true && return
+      # any path containing /migrations/ (covers backend/database/migrations,
+      # db/migrations, prisma/migrations, alembic/versions is matched by content
+      # via git_grep below), plus prisma/, alembic/, schema.sql
+      echo "$lsf" | grep -qE '/migrations/' 2>/dev/null && echo true && return
+      echo "$lsf" | grep -qE '(^|/)(prisma|alembic|db)/' 2>/dev/null && echo true && return
       has_path "schema.sql" && echo true && return
+      # alembic versions/ directory
+      echo "$lsf" | grep -qE '(^|/)versions/[0-9a-f]{8,}_.*\.py$' 2>/dev/null && echo true && return
       echo false ;;
     i18n)
-      echo "$lsf" | grep -qE '(^|/)(locales|l10n|lang|messages)/' 2>/dev/null && echo true && return
+      # any path segment: locales/ l10n/ lang/ messages/ i18n/
+      # or filename: *.arb
+      echo "$lsf" | grep -qE '(^|/)(locales|l10n|lang|messages|i18n)/' 2>/dev/null && echo true && return
       echo "$lsf" | grep -qE '\.arb$' 2>/dev/null && echo true && return
       echo false ;;
     error_tracking)
       manifest_grep="$(git_grep -e 'sentry|bugsnag|rollbar' -- 'package.json' 'requirements*.txt' 'pyproject.toml' 'go.mod' 'Cargo.toml' 'Gemfile' 2>/dev/null)"
       [ -n "$manifest_grep" ] && echo true || echo false ;;
     legal_pages)
-      echo "$lsf" | grep -qiE '(^|/)(privacy|terms|privacy-policy|terms-of-service)(\.[a-z]+|\.md)?$' 2>/dev/null && echo true && return
-      # routes mention
-      hits="$(git_grep -e 'privacy|terms' -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.py' '*.rb' '*.go' 2>/dev/null | head -5)"
+      # any tracked path containing privacy|terms|legal as a segment
+      echo "$lsf" | grep -qiE '(^|/)(privacy|terms|legal)' 2>/dev/null && echo true && return
+      # content mention in code files
+      hits="$(git_grep -iE 'privacy|terms[-_ ]of[-_ ]service' -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.py' '*.rb' '*.go' '*.php' 2>/dev/null | head -5)"
       [ -n "$hits" ] && echo true || echo false ;;
     backups)
-      echo "$lsf" | grep -qiE '(^|/)(scripts|ops|infra)/.*backup' 2>/dev/null && echo true && return
-      echo "$lsf" | grep -qiE 'backup.*\.(sh|ps1|sql)$' 2>/dev/null && echo true && return
+      # any path containing "backup" under scripts/ ops/ infra/ deploy/
+      echo "$lsf" | grep -qiE '(^|/)(scripts|ops|infra|deploy)/.*backup' 2>/dev/null && echo true && return
+      echo "$lsf" | grep -qiE 'backup[^/]*\.(sh|ps1|sql)$' 2>/dev/null && echo true && return
       echo false ;;
   esac
 }
 
 
 
-# stubs count
+# stubs count (top-level field, not nested in signals)
 stubs=0
 stub_hits="$(git_grep -e 'TODO|FIXME|NotImplemented' 2>/dev/null || true)"
 if [ -n "$stub_hits" ]; then
@@ -227,7 +245,7 @@ jq -n \
       i18n:           $i18n,
       error_tracking: $error_tracking,
       legal_pages:    $legal_pages,
-      backups:        $backups,
-      stubs:          $stubs
-    }
+      backups:        $backups
+    },
+    stubs: $stubs
   }'

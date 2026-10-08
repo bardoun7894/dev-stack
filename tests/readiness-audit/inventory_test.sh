@@ -94,5 +94,48 @@ if [ "$stubs" -lt 1 ] 2>/dev/null; then echo "FAIL stubs want>=1 got=$stubs"; fa
 ts=$(echo "$out" | jq -r .generated_at)
 echo "$ts" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || { echo "FAIL generated_at shape: $ts"; fail=1; }
 
+# 9. Monorepo fixture — signals must be detected in nested paths
+M="$(mktemp -d)"; trap 'rm -rf "$T" "$M"' EXIT
+mkdir -p "$M/repo"
+cd "$M/repo" || exit 1
+git init -q
+git config user.email test@example.com
+git config user.name "Test"
+# monorepo tree: backend (Laravel-ish) + frontend (Next-ish) + infra
+mkdir -p backend/tests/Feature backend/database/migrations \
+         frontend/tests frontend/messages frontend/src/app/privacy infra
+cat > backend/tests/FooTest.php <<'E'
+<?php class FooTest {}
+E
+cat > backend/database/migrations/2024_01_01_create_x.php <<'E'
+<?php // migration
+E
+cat > frontend/.env.example <<'E'
+KEY=val
+E
+cat > frontend/messages/en.json <<'E'
+{ "greeting": "hi" }
+E
+cat > frontend/src/app/privacy/page.tsx <<'E'
+export default function Page() { return null; }
+E
+cat > infra/docker-compose.yml <<'E'
+services: {}
+E
+git add -A
+git commit -q -m "monorepo fixture"
+out_m="$("$SCRIPT" "$M/repo")"; rc=$?
+if [ "$rc" -ne 0 ]; then echo "FAIL monorepo inventory exit=$rc"; fail=1; fi
+echo "$out_m" | jq . >/dev/null 2>&1 || { echo "FAIL monorepo output not JSON"; fail=1; }
+[ "$(echo "$out_m" | jq -r .signals.tests)"        = "true" ] || { echo "FAIL monorepo .signals.tests want=true got=$(echo "$out_m" | jq -r .signals.tests)"; fail=1; }
+[ "$(echo "$out_m" | jq -r .signals.migrations)"   = "true" ] || { echo "FAIL monorepo .signals.migrations want=true got=$(echo "$out_m" | jq -r .signals.migrations)"; fail=1; }
+[ "$(echo "$out_m" | jq -r .signals.env_example)"  = "true" ] || { echo "FAIL monorepo .signals.env_example want=true"; fail=1; }
+[ "$(echo "$out_m" | jq -r .signals.i18n)"         = "true" ] || { echo "FAIL monorepo .signals.i18n want=true"; fail=1; }
+[ "$(echo "$out_m" | jq -r .signals.legal_pages)"  = "true" ] || { echo "FAIL monorepo .signals.legal_pages want=true"; fail=1; }
+[ "$(echo "$out_m" | jq -r .signals.dockerfile)"   = "true" ] || { echo "FAIL monorepo .signals.dockerfile want=true"; fail=1; }
+# stubs is a top-level number
+stubs_top=$(echo "$out_m" | jq -r .stubs)
+echo "$stubs_top" | grep -qE '^[0-9]+$' || { echo "FAIL monorepo .stubs not a number: $stubs_top"; fail=1; }
+
 if [ "$fail" -eq 0 ]; then echo "PASS all inventory_test.sh assertions"; fi
 exit $fail
