@@ -64,7 +64,10 @@ else if (args[0] === "api") {
   else if (m) out(JSON.stringify({ content: Buffer.from(sc.workflows[m[1]]).toString("base64") }));
 }
 else if (args[0] === "pr" && (args[1] === "merge" || args[1] === "comment")) out("");
-else if (args[0] === "pr" && args[1] === "diff") out(sc.diff ?? "diff --git a/x.js b/x.js\\n+1\\n");
+else if (args[0] === "pr" && args[1] === "diff") {
+  if (sc.diffTooLarge) { process.stderr.write("gh: the diff exceeded the maximum number of files (300) (HTTP 406); PullRequest.diff too_large"); process.exit(1); }
+  out(sc.diff ?? "diff --git a/x.js b/x.js\\n+1\\n");
+}
 else if (args[0] === "pr" && args[1] === "review") out("");
 `;
 
@@ -87,7 +90,7 @@ function run(argv, scenario) {
   const decisions = existsSync(lf) ? readFileSync(lf, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
   const f = join(dir, "calls.jsonl");
   const calls = existsSync(f) ? readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
-  return { ...r, calls, decisions, posts: calls.filter((c) => c.args[0] === "pr" && c.args[1] === "review"), claudes: calls.filter((c) => c.cmd === "claude") };
+  return { ...r, calls, decisions, posts: calls.filter((c) => c.args[0] === "pr" && c.args[1] === "review"), comments: calls.filter((c) => c.args[0] === "pr" && c.args[1] === "comment"), claudes: calls.filter((c) => c.cmd === "claude") };
 }
 
 const pr = (over = {}) => ({
@@ -533,4 +536,41 @@ test("cost.jev_calls still 0 when no review happens (claude BLOCK short-circuits
   const r = go({ claudeOut: "P1 a.js:1 bad\nVERDICT: BLOCK" });
   assert.equal(guardCalls(r).length, 1, "guard runs unconditionally before claude");
   assert.equal(r.decisions[0].cost.jev_calls, 1, "only guard called, gate never reached");
+});
+
+// ---- diff too large (GitHub 300-file cap) ----
+const DIFF_TOO_LARGE_MSG = "gh: the diff exceeded the maximum number of files (300) (HTTP 406); PullRequest.diff too_large";
+
+test("gh pr diff 406 too_large -> skipped-too-large, comment posted once with marker, no merge, no throw", () => {
+  const r = run(["o/r", "1"], { pr: pr(), diffTooLarge: true });
+  assert.equal(r.status, 0, "must not throw");
+  assert.match(r.stdout, /skipped-too-large/);
+  // Posted via `gh pr comment`, not `gh pr review`.
+  assert.equal(r.posts.length, 0, "no review post");
+  assert.equal(r.comments.length, 1, "one comment posted");
+  const body = r.comments[0].bodyFile;
+  assert.match(body, /Too large for automatic review \(diff over GitHub's 300-file limit\)\. Needs a human\./);
+  assert.match(body, /VERDICT: BLOCK/);
+  assert.ok(body.includes(`<!-- haiku-review sha=${SHA} -->`), "must include the seen-marker so later sweeps hit skipped-seen");
+  assert.equal(merges(r).length, 0, "no merge");
+  // No Claude call needed: the diff never reached the models.
+  assert.equal(r.claudes.length, 0);
+});
+
+test("gh pr diff 406 too_large in dry-run -> skipped-too-large, no comment posted", () => {
+  const r = run(["o/r", "1", "--dry-run"], { pr: pr(), diffTooLarge: true });
+  assert.equal(r.status, 0, "must not throw");
+  assert.match(r.stdout, /skipped-too-large/);
+  assert.equal(r.posts.length, 0, "--dry-run never posts a review");
+  assert.equal(r.comments.length, 0, "--dry-run never posts a comment");
+  assert.match(r.stdout, /Too large for automatic review/);
+});
+
+test("gh pr diff 406 too_large on already-reviewed PR -> skipped-too-large, no duplicate comment", () => {
+  // The seen-marker is missing for the current sha: later sweep should hit skipped-seen after we post.
+  const r = run(["o/r", "1"], { pr: pr(), diffTooLarge: true });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /skipped-too-large/);
+  assert.equal(r.comments.length, 1, "one comment posted so future sweeps find the marker");
+  assert.ok(r.comments[0].bodyFile.includes(`<!-- haiku-review sha=${SHA} -->`));
 });
