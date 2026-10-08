@@ -2,11 +2,13 @@
 /**
  * pr-review — Haiku 5.5 PR reviewer (replaces the CodeRabbit GitHub App).
  *
- *   pr-review <owner/repo> <number> [--dry-run]     review one PR
- *   pr-review --sweep [--max 5] [--dry-run]         review open PRs on bardoun7894's repos with no review for the current head sha
+ *   pr-review <owner/repo> <number> [--dry-run] [--no-merge]     review one PR
+ *   pr-review --sweep [--max 5] [--dry-run] [--no-merge]         review open PRs on bardoun7894's repos with no review for the current head sha
  *
  * Skips drafts, docs-only PRs, and PRs whose head sha already carries the marker
  * `<!-- haiku-review sha=<sha> -->`. Fails closed: claude error/timeout/empty output posts nothing.
+ * The review ends with `VERDICT: PASS|BLOCK` (last non-empty line; missing = BLOCK). After a PASS the PR is merged
+ * when checks are green and no deploy workflow runs on push to the base branch (see mergeCheck); --no-merge disables.
  * One stdout line per PR: repo#N sha7 action seconds.
  * Tests stub every gh/claude call via PR_REVIEW_RUNNER (an executable called as `runner <cmd> <args...>`).
  */
@@ -22,8 +24,9 @@ const RUNNER = process.env.PR_REVIEW_RUNNER;
 
 const PROMPT = `You are reviewing a GitHub pull request diff (supplied below). Review for correctness bugs, security issues, broken tests, and missing error handling.
 Label each finding P0, P1 or P2, give file:line and a one-line fix. At most 10 findings, most severe first.
-If there is nothing blocking, reply exactly "No blocking issues".
+If there is nothing blocking, write "No blocking issues".
 No praise and no summary of the PR.
+The last line of your reply must be exactly "VERDICT: PASS" (no P0 or P1 findings) or "VERDICT: BLOCK" (any P0 or P1 finding), with nothing after it.
 
 `;
 
@@ -58,15 +61,78 @@ function askClaude(input) {
   }
 }
 
+// Last non-empty line decides; anything but an exact PASS is BLOCK (fail closed).
+function parseVerdict(text) {
+  const lines = String(text).replace(/<!--.*?-->/g, "").split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] === "VERDICT: PASS" ? "PASS" : "BLOCK";
+}
+
+const DEPLOY_RE = /deploy|release|production|prod\b/i;
+const PUSH_RE = /(^|\n)\s*["']?on["']?\s*:\s*(\[[^\]]*\bpush\b|push\b)|(^|\n)\s+push\s*:|(^|\n)\s*-\s*push\b/;
+
+// Returns { deploy: file|null }; throws on non-404 errors.
+function deployWorkflow(repo, base) {
+  let list;
+  try {
+    list = JSON.parse(gh(["api", `repos/${repo}/contents/.github/workflows?ref=${base}`]));
+  } catch (e) {
+    if (/404|not found/i.test(e.message)) return null;
+    throw e;
+  }
+  for (const f of list) {
+    if (!/\.ya?ml$/.test(f.name)) continue;
+    const j = JSON.parse(gh(["api", `repos/${repo}/contents/.github/workflows/${f.name}?ref=${base}`]));
+    const content = Buffer.from(j.content ?? "", "base64").toString("utf8");
+    if (PUSH_RE.test(content) && (DEPLOY_RE.test(f.name) || DEPLOY_RE.test(content))) return f.name;
+  }
+  return null;
+}
+
+function postComment(repo, n, text) {
+  const dir = mkdtempSync(join(tmpdir(), "pr-review-"));
+  try {
+    const f = join(dir, "body.md");
+    writeFileSync(f, text);
+    gh(["pr", "comment", String(n), "-R", repo, "--body-file", f]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// Returns "merged" | "would-merge" | "merge-skipped:<reason>". Only called after a PASS verdict on `sha`.
+function mergeCheck(repo, n, sha, dry) {
+  const v = JSON.parse(gh(["pr", "view", String(n), "-R", repo, "--json", "isDraft,mergeable,mergeStateStatus,labels,baseRefName,statusCheckRollup,headRefOid,comments"]));
+  if (v.isDraft) return "merge-skipped:draft";
+  if (v.mergeable !== "MERGEABLE") return "merge-skipped:not-mergeable";
+  if (!["CLEAN", "HAS_HOOKS"].includes(v.mergeStateStatus)) return `merge-skipped:state-${String(v.mergeStateStatus).toLowerCase()}`;
+  const ok = (c) => (c.state !== undefined && c.conclusion === undefined ? c.state === "SUCCESS"
+    : c.__typename === "StatusContext" ? c.state === "SUCCESS" : ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(c.conclusion));
+  if (!(v.statusCheckRollup ?? []).every(ok)) return "merge-skipped:checks-not-green";
+  if ((v.labels ?? []).some((l) => l.name === "no-automerge")) return "merge-skipped:no-automerge-label";
+  if (v.headRefOid !== sha) return "merge-skipped:new-commit";
+  const file = deployWorkflow(repo, v.baseRefName);
+  if (file) {
+    const marker = `<!-- haiku-merge-skip sha=${sha} -->`;
+    if (!dry && !(v.comments ?? []).some((c) => (c.body ?? "").includes(marker))) {
+      postComment(repo, n, `Haiku review passed; not merged automatically: merging into ${v.baseRefName} runs a deploy workflow (${file}). Merge by hand after you approve the deploy.\n\n${marker}`);
+    }
+    return "merge-skipped:deploy-workflow";
+  }
+  if (dry) return "would-merge";
+  gh(["pr", "merge", String(n), "-R", repo, "--merge", "--match-head-commit", sha]);
+  return "merged";
+}
+
 // Returns the action; throws on error.
 function reviewPr(repo, n, dry) {
   const pr = JSON.parse(gh(["pr", "view", String(n), "-R", repo, "--json", "headRefOid,files,comments,reviews,title,body,isDraft"]));
   const sha = pr.headRefOid;
-  const info = { sha7: sha.slice(0, 7) };
+  const info = { sha7: sha.slice(0, 7), sha };
   if (pr.isDraft) return { ...info, action: "skipped-draft" };
   const marker = `<!-- haiku-review sha=${sha} -->`;
   const bodies = [...(pr.comments ?? []), ...(pr.reviews ?? [])].map((x) => x.body ?? "");
-  if (bodies.some((b) => b.includes(marker))) return { ...info, action: "skipped-seen" };
+  const seen = bodies.find((b) => b.includes(marker));
+  if (seen) return { ...info, action: "skipped-seen", verdict: parseVerdict(seen) };
   const files = (pr.files ?? []).map((f) => f.path);
   if (files.length && files.every(isDocs)) return { ...info, action: "skipped-docs" };
 
@@ -92,16 +158,24 @@ function reviewPr(repo, n, dry) {
       rmSync(dir, { recursive: true, force: true });
     }
   }
-  return { ...info, action: "reviewed" };
+  return { ...info, action: "reviewed", verdict: parseVerdict(out) };
 }
 
 // Logs one line; returns the action, or null on error.
-function runOne(repo, n, dry) {
+function runOne(repo, n, dry, merge) {
   const t0 = Date.now();
   const secs = () => ((Date.now() - t0) / 1000).toFixed(1);
   try {
     const r = reviewPr(repo, n, dry);
     console.log(`${repo}#${n} ${r.sha7} ${r.action} ${secs()}`);
+    if (merge && r.verdict) {
+      let m;
+      if (r.verdict !== "PASS") m = "merge-skipped:verdict-block";
+      else {
+        try { m = mergeCheck(repo, n, r.sha, dry); } catch (e) { m = "merge-skipped:error"; console.error(`pr-review: ${repo}#${n}: merge: ${e.message}`); }
+      }
+      console.log(`${repo}#${n} ${r.sha7} ${dry && m === "merge-skipped:verdict-block" ? "would-not-merge:verdict-block" : m} ${secs()}`);
+    }
     return r.action;
   } catch (e) {
     console.log(`${repo}#${n} ------- error ${secs()}`);
@@ -113,8 +187,9 @@ function runOne(repo, n, dry) {
 function main() {
   const argv = process.argv.slice(2);
   const dry = argv.includes("--dry-run");
+  const merge = !argv.includes("--no-merge");
   if (argv.includes("--help") || argv.length === 0) {
-    console.log("usage: pr-review <owner/repo> <number> [--dry-run]\n       pr-review --sweep [--max 5] [--dry-run]");
+    console.log("usage: pr-review <owner/repo> <number> [--dry-run] [--no-merge]\n       pr-review --sweep [--max 5] [--dry-run] [--no-merge]");
     return 0;
   }
   if (argv.includes("--sweep")) {
@@ -131,7 +206,7 @@ function main() {
     for (const p of list) {
       if (done >= max) break;
       const repo = p.repository.nameWithOwner ?? `${OWNER}/${p.repository.name}`;
-      const action = runOne(repo, p.number, dry);
+      const action = runOne(repo, p.number, dry, merge);
       if (action === null || action === "reviewed") done++;
     }
     return 0;
@@ -141,7 +216,7 @@ function main() {
     console.error("usage: pr-review <owner/repo> <number> [--dry-run]");
     return 2;
   }
-  return runOne(pos[0], pos[1], dry) === null ? 1 : 0;
+  return runOne(pos[0], pos[1], dry, merge) === null ? 1 : 0;
 }
 
 process.exit(main());

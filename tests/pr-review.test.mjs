@@ -23,7 +23,13 @@ appendFileSync(dir + "/calls.jsonl", JSON.stringify({ cmd, args, stdin, bodyFile
 const out = (s) => process.stdout.write(s);
 if (cmd === "claude") { if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); } out(sc.claudeOut ?? "No blocking issues"); }
 else if (args[0] === "search") out(JSON.stringify(sc.search ?? []));
-else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(sc.pr));
+else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(args.join(" ").includes("mergeStateStatus") ? (sc.prMerge ?? sc.pr) : sc.pr));
+else if (args[0] === "api") {
+  const m = args[1].match(/contents\\/\\.github\\/workflows(?:\\/([^?]+))?/);
+  if (m && !m[1]) { if (!sc.workflows) { process.stderr.write("gh: Not Found (HTTP 404)"); process.exit(1); } out(JSON.stringify(Object.keys(sc.workflows).map((name) => ({ name })))); }
+  else if (m) out(JSON.stringify({ content: Buffer.from(sc.workflows[m[1]]).toString("base64") }));
+}
+else if (args[0] === "pr" && (args[1] === "merge" || args[1] === "comment")) out("");
 else if (args[0] === "pr" && args[1] === "diff") out(sc.diff ?? "diff --git a/x.js b/x.js\\n+1\\n");
 else if (args[0] === "pr" && args[1] === "review") out("");
 `;
@@ -135,4 +141,100 @@ test("sweep continues past a failing PR", () => {
   const r = run(["--sweep"], { search, pr: pr(), claudeFail: true });
   assert.equal(r.claudes.length, 2);
   assert.equal(r.posts.length, 0);
+});
+
+// ---- auto-merge on VERDICT: PASS ----
+const PASS = "No blocking issues\nVERDICT: PASS";
+const green = (over = {}) => ({
+  isDraft: false, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", labels: [], baseRefName: "main",
+  statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }, { __typename: "StatusContext", state: "SUCCESS" }],
+  headRefOid: SHA, comments: [], ...over,
+});
+const merges = (r) => r.calls.filter((c) => c.args[0] === "pr" && c.args[1] === "merge");
+const skipComments = (r) => r.calls.filter((c) => c.args[0] === "pr" && c.args[1] === "comment");
+const go = (sc, extra = []) => run(["o/r", "1", ...extra], { pr: pr(), prMerge: green(), claudeOut: PASS, ...sc });
+
+test("PASS + all green -> merge with --match-head-commit", () => {
+  const r = go({});
+  assert.equal(r.status, 0);
+  assert.equal(merges(r).length, 1);
+  assert.deepEqual(merges(r)[0].args, ["pr", "merge", "1", "-R", "o/r", "--merge", "--match-head-commit", SHA]);
+  assert.match(r.stdout, /merged/);
+  assert.ok(r.posts[0].bodyFile.includes("VERDICT: PASS"));
+});
+
+test("BLOCK -> no merge", () => {
+  const r = go({ claudeOut: "P1 a.js:1 bad\nVERDICT: BLOCK" });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.posts.length, 1);
+});
+
+test("missing or garbled verdict -> no merge", () => {
+  for (const claudeOut of ["No blocking issues", "VERDICT: PASS\nthanks", "verdict: pass maybe"]) {
+    assert.equal(merges(go({ claudeOut })).length, 0, claudeOut);
+  }
+});
+
+test("pending check -> no merge", () => {
+  const r = go({ prMerge: green({ statusCheckRollup: [{ __typename: "CheckRun", status: "IN_PROGRESS", conclusion: "" }] }) });
+  assert.equal(merges(r).length, 0);
+  const r2 = go({ prMerge: green({ statusCheckRollup: [{ __typename: "StatusContext", state: "PENDING" }] }) });
+  assert.equal(merges(r2).length, 0);
+});
+
+test("failed check -> no merge", () => {
+  const r = go({ prMerge: green({ statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE" }] }) });
+  assert.equal(merges(r).length, 0);
+});
+
+test("label no-automerge -> no merge", () => {
+  assert.equal(merges(go({ prMerge: green({ labels: [{ name: "no-automerge" }] }) })).length, 0);
+});
+
+test("draft, conflicting, UNSTABLE -> no merge", () => {
+  assert.equal(merges(go({ prMerge: green({ isDraft: true }) })).length, 0);
+  assert.equal(merges(go({ prMerge: green({ mergeable: "CONFLICTING" }) })).length, 0);
+  assert.equal(merges(go({ prMerge: green({ mergeStateStatus: "UNSTABLE" }) })).length, 0);
+  assert.equal(merges(go({ prMerge: green({ mergeStateStatus: "HAS_HOOKS" }) })).length, 1);
+});
+
+test("new head sha since review -> no merge", () => {
+  assert.equal(merges(go({ prMerge: green({ headRefOid: "ffffffffff" }) })).length, 0);
+});
+
+test("deploy workflow on push -> no merge, skip comment posted once", () => {
+  const workflows = { "ci.yml": "name: CI\non: [pull_request]\n", "deploy.yml": "name: Deploy\non:\n  push:\n    branches: [main]\n" };
+  const r = go({ workflows });
+  assert.equal(merges(r).length, 0);
+  assert.equal(skipComments(r).length, 1);
+  assert.match(skipComments(r)[0].bodyFile, /not merged automatically: merging into main runs a deploy workflow \(deploy\.yml\)/);
+  assert.ok(skipComments(r)[0].bodyFile.includes(`<!-- haiku-merge-skip sha=${SHA} -->`));
+  const r2 = go({ workflows, prMerge: green({ comments: [{ body: `x <!-- haiku-merge-skip sha=${SHA} -->` }] }) });
+  assert.equal(skipComments(r2).length, 0);
+  assert.equal(merges(r2).length, 0);
+});
+
+test("workflow without deploy -> merge", () => {
+  const r = go({ workflows: { "ci.yml": "name: CI\non:\n  push:\n  pull_request:\njobs: {}\n" } });
+  assert.equal(merges(r).length, 1);
+});
+
+test("already-reviewed PASS unmerged -> merge re-check, no new review", () => {
+  const body = `**Haiku 5.5 review**\n\nok\nVERDICT: PASS\n\n<!-- haiku-review sha=${SHA} -->`;
+  const r = run(["--sweep"], {
+    search: [{ repository: { nameWithOwner: "bardoun7894/r" }, number: 3, updatedAt: "2026-10-01T00:00:00Z" }],
+    pr: pr({ comments: [{ body }] }), prMerge: green(),
+  });
+  assert.equal(r.claudes.length, 0);
+  assert.equal(r.posts.length, 0);
+  assert.equal(merges(r).length, 1);
+});
+
+test("--dry-run and --no-merge -> no merge", () => {
+  const d = go({}, ["--dry-run"]);
+  assert.equal(merges(d).length, 0);
+  assert.match(d.stdout, /would-merge/);
+  const n = go({}, ["--no-merge"]);
+  assert.equal(merges(n).length, 0);
+  assert.equal(n.posts.length, 1);
 });
