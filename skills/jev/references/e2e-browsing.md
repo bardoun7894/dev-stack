@@ -362,15 +362,13 @@ Mapping to the ladder:
 
 **Jev first for agent steps** (verified in e2e's decision-models docs). Through e2e's decision executor,
 `agent.act` and `agent.assert` run on Jev (`@e2e-dev/decision`, `decisionExecutor`). The text model writes the
-`type` values and handles `waitFor` and `extract`. The text model is Haiku 5.5 by default; GPT-6 Luna only for
-Arabic text and language structure (owner rule, 2026-10-08).
+`type` values and handles `waitFor` and `extract`. The text model is Haiku 5.5 for every step, Arabic included (owner rule 2026-10-08).
 
 ```ts
 import { decisionExecutor } from '@e2e-dev/decision';
 import { typeSafeAi } from '@ai-sdk/typesafe-ai';
 import { anthropic } from '@ai-sdk/anthropic';
 // text model is Haiku 5.5: pass its AI SDK model object as textModel
-// for Arabic-language steps use a GPT-6 Luna model as textModel instead
 // agents: { default: { executor: decisionExecutor({ model: typeSafeAi.decisionModel('jev-latest'), textModel: anthropic('claude-haiku-5-5') }) } }
 ```
 
