@@ -261,8 +261,6 @@ WARNING: The following suspicious files and directories were found:
 /tmp/evil-bin
 /usr/lib/python3/dist-packages/fail2ban/tests/data.bin
 /usr/lib/python3/dist-packages/twisted/x.py
-/usr/bin/x
-/usr/bin/x
 Possible Linux.Xor.DDoS installed:
 lstat(/tmp/runc-process123) failed
 Checking \`ifpromisc'... 
@@ -273,6 +271,11 @@ CHK
 touch "$LOGD"
 HEALTH_STUB_HOSTS="beldify.example.com=200
 ostudio.example.com=200"
+out="$(run_script)"
+echo "$out" | grep -q "chkrootkit:" && bad "chkrootkit-seed" "first run not silent: $out" || ok "chkrootkit-seed"
+printf '/usr/bin/x\n/usr/bin/x\n' >> "$LOGD"
+HEALTH_STUB_HOSTS="beldify.example.com=200
+ostudio.example.com=200"
 HEALTH_STUB_FAILED=""
 out="$(run_script)"
 echo "$out" | grep -q "chkrootkit: /usr/bin/x$" && ok "chkrootkit" || bad "chkrootkit" "no /usr/bin/x alert in: $out"
@@ -280,6 +283,10 @@ echo "$out" | grep -q "chkrootkit: /usr/bin/x$" && ok "chkrootkit" || bad "chkro
 echo "$out" | grep -q "chkrootkit: /tmp/" && bad "chkrootkit-tmp" "/tmp/ flagged: $out" || ok "chkrootkit-tmp"
 echo "$out" | grep -q "fail2ban/tests" && bad "chkrootkit-fail2ban" "fail2ban path flagged: $out" || ok "chkrootkit-fail2ban"
 echo "$out" | grep -q "runc-process" && bad "chkrootkit-runc" "runc flagged: $out" || ok "chkrootkit-runc"
+
+out="$(run_script --rebaseline)"
+out="$(run_script)"
+echo "$out" | grep -q "chkrootkit: /usr/bin/x" && bad "chkrootkit-rebaseline" "rebaseline did not absorb: $out" || ok "chkrootkit-rebaseline"
 
 # ---- 10. --dry-run never invokes curl to api.telegram.org ----
 # Re-do a clean site alert + check curl never touches api.telegram.
