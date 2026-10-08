@@ -31,5 +31,13 @@ echo "$out" | grep -q 'grok unavailable' || { echo "FAIL message"; fail=1; }
 stub 'echo "429" >&2; exit 1'
 PATH="$T/bin:$PATH" bash "$SCRIPT" "$T/posts.md" >/dev/null 2>&1; [ $? -eq 3 ] || { echo "FAIL nonzero rc want=3"; fail=1; }
 
+stub 'sleep 5; echo late'
+start=$(date +%s)
+out="$(X_SUMMARIZE_TIMEOUT=1 PATH="$T/bin:$PATH" bash "$SCRIPT" "$T/posts.md" 2>&1)"; rc=$?
+el=$(( $(date +%s) - start ))
+[ "$rc" -eq 3 ] || { echo "FAIL timeout rc want=3 got=$rc"; fail=1; }
+[ "$el" -le 3 ] || { echo "FAIL timeout took ${el}s"; fail=1; }
+echo "$out" | grep -q 'grok unavailable (timeout)' || { echo "FAIL timeout message"; fail=1; }
+
 [ "$fail" -eq 0 ] && echo "PASS all market-swot x_summarize_test.sh assertions"
 exit $fail
