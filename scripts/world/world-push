@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""world-push — collector run by launchd every 5 minutes.
+
+Reads each source family, emits contract events, deduplicates by id against the
+local sent-id cache, and POSTs batches (<=500) to the godhome ingest endpoint.
+
+Idempotent re-runs are safe — server dedupes by id.
+
+Flags:
+  WORLD_DRY_RUN=1          print counts per source/kind, do not POST or write cache
+  WORLD_BACKFILL_DAYS=90   (advanced) change the time horizon for git/tasks/etc.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import lib_world
+import world_push_sources as wps
+
+
+def bucket(events, sources=wps.SOURCES):
+    by_source: dict[str, list[dict]] = {s: [] for s in sources}
+    by_source.setdefault("track", [])
+    for ev in events:
+        by_source.setdefault(ev.get("source", "track"), []).append(ev)
+    return by_source
+
+
+def main(argv: list[str]) -> int:
+    dry_run = bool(int(os.environ.get("WORLD_DRY_RUN", "0")))
+    url = os.environ.get("WORLD_URL", lib_world.DEFAULT_URL)
+    token = os.environ.get("WORLD_TOKEN", "")
+    timeout = float(os.environ.get("WORLD_TIMEOUT", "5"))
+    state_dir = Path(os.environ.get("WORLD_STATE_DIR", str(Path.home() / ".local/state/world")))
+
+    collectors = [
+        ("session-tasks", wps.collect_session_tasks),
+        ("spec-kit",      wps.collect_specs),
+        ("jdelegate",     wps.collect_jdelegate),
+        ("git",           wps.collect_git),
+        ("gh-prs",        wps.collect_prs),
+        ("skills",        wps.collect_skills),
+        ("market-swot",   wps.collect_swot),
+        ("kb",            wps.collect_kb),
+        ("herdr",         wps.collect_herdr),
+        ("claude-sessions", wps.collect_transcripts),
+    ]
+
+    all_events: list[dict] = []
+    by_source_counts: dict[str, int] = {}
+    by_kind_counts: dict[str, int] = {}
+
+    for src_name, fn in collectors:
+        try:
+            events = list(fn())
+        except Exception as e:
+            print(f"[{src_name}] ERROR: {e}", file=sys.stderr)
+            events = []
+        by_source_counts[src_name] = len(events)
+        for ev in events:
+            by_kind_counts[ev["kind"]] = by_kind_counts.get(ev["kind"], 0) + 1
+        all_events.extend(events)
+
+    # Heartbeats per source.
+    hb = wps.heartbeat_counts(bucket(all_events))
+    all_events.extend(hb)
+    for ev in hb:
+        by_kind_counts["source"] = by_kind_counts.get("source", 0) + 1
+
+    # Dedupe vs local sent cache.
+    sent = lib_world.sent_ids_load() if not dry_run else set()
+    new_events = [ev for ev in all_events if ev["id"] not in sent]
+    skipped = len(all_events) - len(new_events)
+
+    if dry_run:
+        print("# world-push DRY RUN")
+        print(f"events total: {len(all_events)} (new after dedupe: {len(new_events)}, cached: {skipped})")
+        print("# by source:")
+        for k, v in sorted(by_source_counts.items()):
+            print(f"  {k}: {v}")
+        print("# by kind:")
+        for k, v in sorted(by_kind_counts.items()):
+            print(f"  {k}: {v}")
+        return 0
+
+    try:
+        rep = lib_world.send(new_events, url=url, timeout=timeout, token=token)
+        print(f"sent={rep.get('accepted',0)} dup={rep.get('duplicate',0)} new={len(new_events)} skipped={skipped}")
+    except Exception as e:
+        # Network/server failure → outbox whatever's new.
+        lib_world.outbox_append(new_events)
+        print(f"network failed, queued {len(new_events)} to outbox: {e}", file=sys.stderr)
+        return 2
+
+    # Persist full id set (existing + new).
+    lib_world.sent_ids_save(list(sent | {ev["id"] for ev in all_events if ev["id"] not in sent}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
