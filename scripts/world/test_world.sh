@@ -309,6 +309,86 @@ PY
 assert_eq "deep nested session-tasks file ignored" "0" "$NDEEP"
 
 # ---------------------------------------------------------------------------
+echo "## 8) scrub_title removes server-secret-like patterns" | tee -a "$LOG"
+SCRUB_OUT="$(WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - <<'PY' 2>&1
+import json, sys
+sys.path.insert(0, '$ROOT')
+import lib_world
+import re
+
+# Server regexes (must stay in sync with src/server/world.ts:51).
+server_res = [
+    re.compile(r'sk-[A-Za-z0-9_-]{6,}', re.IGNORECASE),
+    re.compile(r'ghp_[A-Za-z0-9]{6,}', re.IGNORECASE),
+    re.compile(r'gh[ousr]_[A-Za-z0-9]{6,}', re.IGNORECASE),
+    re.compile(r'xox[abprs]- ', re.IGNORECASE),
+    re.compile(r'bearer\s+\S+', re.IGNORECASE),
+    re.compile(r'[A-Za-z0-9+/=_-]{33,}'),
+]
+
+cases = {
+    "long_path":   "fixed /Users/mohamed/projects/some-very-long-path-segment-name-here-1234/build",
+    "sk_key":      "deploy with sk-abcdefghijklmnopqrstuv to staging",
+    "bearer_hdr":  "auth header: Bearer xoxb-1234567890abcdefghij token here",
+    "normal":      "ran tests ok",
+}
+out = {}
+for name, raw in cases.items():
+    scrubbed = lib_world.scrub_title(raw)
+    matches = [r.pattern for r in server_res if r.search(scrubbed)]
+    out[name] = {"raw": raw, "scrubbed": scrubbed, "matches": matches}
+print(json.dumps(out))
+PY
+)"
+
+# Hard guard: for every case, scrubbed text matches NO server regex.
+ANY_HIT="$(printf '%s' "$SCRUB_OUT" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(any(d[k]["matches"] for k in d))')"
+if [ "$ANY_HIT" = "False" ]; then
+  echo "PASS  scrub_title clears every server regex across all cases"; pass=$((pass+1))
+else
+  echo "FAIL  scrub_title left a match in: $SCRUB_OUT"; fail=$((fail+1))
+fi
+
+# Per-case checks: each scrubbed output must equal its raw OR contain '…' (the scrub marker),
+# and must not retain any original secret token. We assert per case in Python.
+PER_CASE_OK="$(printf '%s' "$SCRUB_OUT" | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+ok = True
+for k, v in d.items():
+    if v["matches"]:
+        ok = False; print(f"{k}: still has match"); continue
+    if k == "normal":
+        if v["scrubbed"] != v["raw"]:
+            ok = False; print(f"{k}: changed when it should not: {v!r}")
+    else:
+        if v["scrubbed"] == v["raw"]:
+            ok = False; print(f"{k}: unchanged when it should be scrubbed")
+        if "\u2026" not in v["scrubbed"]:
+            ok = False; print(f"{k}: no ellipsis marker")
+print("ok" if ok else "bad")
+')"
+assert_eq "scrub_title per-case invariants" "ok" "$PER_CASE_OK"
+
+# Confirm event() also scrubs (so the constructor route is covered).
+EV_OUT="$(WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - <<'PY' 2>&1
+import json, sys
+sys.path.insert(0, '$ROOT')
+import lib_world
+ev = lib_world.event(
+    id="x", ts=lib_world.now_utc_iso(), project="p", kind="task", status="done",
+    title="ran with sk-abcdefghijklmnopqrstuv token", source="track",
+)
+print(ev["title"])
+PY
+)"
+if printf '%s' "$EV_OUT" | grep -Eq 'sk-[A-Za-z0-9_-]{6,}'; then
+  echo "FAIL  event() did not scrub sk- in title: $EV_OUT"; fail=$((fail+1))
+else
+  echo "PASS  event() scrubs sk- in title"; pass=$((pass+1))
+fi
+
+# ---------------------------------------------------------------------------
 echo | tee -a "$LOG"
 echo "RESULT: pass=$pass fail=$fail" | tee -a "$LOG"
 exit $fail

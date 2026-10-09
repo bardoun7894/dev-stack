@@ -71,6 +71,35 @@ def trim_title(s: str, limit: int = 140) -> str:
     s = (s or "").replace("\n", " ").strip()
     return s if len(s) <= limit else s[: limit - 1] + "…"
 
+# Server-side secret filters (src/server/world.ts). Copy exactly so any
+# title that would 400 a batch gets neutralised before it leaves the box.
+# Flags: only `xox[abprs]-` and `bearer` are case-insensitive on the server.
+_SCRUB_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{6,}", re.IGNORECASE),
+    re.compile(r"ghp_[A-Za-z0-9]{6,}", re.IGNORECASE),
+    re.compile(r"gh[ousr]_[A-Za-z0-9]{6,}", re.IGNORECASE),
+    re.compile(r"xox[abprs]- ", re.IGNORECASE),
+    re.compile(r"bearer\s+\S+", re.IGNORECASE),
+    re.compile(r"[A-Za-z0-9+/=_-]{33,}"),
+)
+
+def scrub_title(s: str) -> str:
+    """Replace every match of the server secret regexes with '…'.
+
+    Loops because a single replacement can create a new longer alnum run
+    that itself qualifies under the 33+ char fallback. Returns the scrubbed
+    string unchanged in shape (no truncation) — caller decides the cap.
+    """
+    if not s:
+        return s
+    prev = None
+    out = s
+    while out != prev:
+        prev = out
+        for pat in _SCRUB_PATTERNS:
+            out = pat.sub("…", out)
+    return out
+
 # --- JSON helpers ------------------------------------------------------------
 
 def json_dumps(obj: Any) -> str:
@@ -241,7 +270,7 @@ def event(*, id: str, ts: str, project: str, kind: str, status: str, title: str,
         "project": slug(project),
         "kind": kind,
         "status": status,
-        "title": trim_title(title),
+        "title": trim_title(scrub_title(title)),
         "ref": ref,
         "url": url,
         "actor": actor,

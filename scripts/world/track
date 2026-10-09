@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(__import__("os").path.dirname(__import__("os").path.realpath(__file__))))
 from lib_world import (
     SRC_TRACK, event, json_dumps, outbox_append, outbox_load, outbox_rewrite,
-    post_events, slug,
+    post_events, scrub_title, slug,
 )
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -66,6 +66,12 @@ def cmd_flush(dry_run: bool) -> int:
     if not pending:
         print("outbox empty")
         return 0
+    # Neutralise server-secret-like patterns in titles before send, so
+    # already-queued events (which pre-date scrub_title on the producer
+    # path) don't 400 a whole batch.
+    for ev in pending:
+        if isinstance(ev.get("title"), str):
+            ev["title"] = scrub_title(ev["title"])
     if dry_run:
         print(f"would flush {len(pending)} events")
         return 0
