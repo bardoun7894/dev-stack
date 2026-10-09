@@ -10,7 +10,7 @@ DO NOT TOUCH: <paths owned by other running jobs>
 ACCEPTANCE (write these tests first, they must fail before the fix):
 - <test file> :: <test name> — behaviour
 
-LIMITS: run scoped tests only via `~/code/dev-stack/scripts/gate/testcap.sh <outfile> -- <cmd>` (2 per branch, enforced; a 3rd exits 3 without running); one lint/type check at the end. No full test suite, no full build (a script runs the full gate from .gate.conf). Never reformat whole directories. If still red after the second run: commit, stop, report the names and your diagnosis.
+LIMITS: run scoped tests only via `~/code/dev-stack/scripts/gate/testcap.sh <outfile> -- <cmd>` (2 per branch, enforced; a 3rd exits 3 without running; call it with the Bash tool, not ctx_shell); one lint/type check at the end. No full test suite, no full build (a script runs the full gate from .gate.conf). Never reformat whole directories. If still red after the second run: commit, stop, report the names and your diagnosis.
 
 LOCAL ENV: <services, ports, per-job DB/slot names, things never to stop>
 
