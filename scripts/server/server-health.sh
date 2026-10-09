@@ -66,33 +66,30 @@ send_telegram() {
     printf '%s\n' "$msg"
     return 0
   fi
-  [ -r "$ENV_FILE" ] || return 0
+  [ -r "$ENV_FILE" ] || return 1
   local token chatid
   token=$(. "$ENV_FILE" 2>/dev/null && printf '%s' "${TELEGRAM_BOT_TOKEN:-}")
   chatid=$(. "$ENV_FILE" 2>/dev/null && printf '%s' "${TELEGRAM_USER_ID:-}")
-  [ -n "$token" ] && [ -n "$chatid" ] || return 0
-  TEK="$token" CID="$chatid" MSG="$msg" python3 -c '
+  [ -n "$token" ] && [ -n "$chatid" ] || return 1
+  CID="$chatid" MSG="$msg" python3 -c '
 import json, os
 print(json.dumps({"chat_id": os.environ["CID"], "text": os.environ["MSG"]}))
-' | curl -sS -H "Content-Type: application/json" -X POST \
-    --data-binary @- "https://api.telegram.org/bot${TEK}/sendMessage" >/dev/null
+' | curl -sS -f -m 20 -H "Content-Type: application/json" -X POST \
+    --data-binary @- "https://api.telegram.org/bot${token}/sendMessage" >/dev/null 2>&1
+  return "${PIPESTATUS[1]}"
 }
 
-# Returns 0 if finding already sent within 6h (skip); 1 if newly sent.
-should_send() {
+# Returns 0 if the finding is due (not sent within 6h); 1 if it was sent recently.
+# Recording happens in mark_sent, only after a successful send.
+finding_due() {
   local key="$1" now last
   now=$(date +%s)
   last=$(awk -F'\t' -v k="$key" '$2 == k {t=$1} END {print t}' "$DEDUPE_FILE" 2>/dev/null)
-  if [ -z "$last" ]; then
-    printf '%s\t%s\n' "$now" "$key" >> "$DEDUPE_FILE"
-    return 1
-  fi
-  if [ $((now - last)) -ge 21600 ]; then
-    printf '%s\t%s\n' "$now" "$key" >> "$DEDUPE_FILE"
-    return 1
-  fi
-  return 0
+  [ -z "$last" ] && return 0
+  [ $((now - last)) -ge 21600 ] && return 0
+  return 1
 }
+mark_sent() { printf '%s\t%s\n' "$(date +%s)" "$1" >> "$DEDUPE_FILE"; }
 
 # --- a. sites ---
 check_sites() {
@@ -341,8 +338,8 @@ ${FINDINGS}"
   # dedupe: send only findings not sent in last 6h
   while IFS= read -r finding; do
     [ -z "$finding" ] && continue
-    if should_send "$finding"; then continue; fi
-    send_telegram "[server-health] ${finding}"
+    finding_due "$finding" || continue
+    send_telegram "[server-health] ${finding}" && mark_sent "$finding"
   done <<<"$FINDINGS"
 
   # recovery: a previously-sent finding that no longer appears
@@ -351,7 +348,7 @@ ${FINDINGS}"
     while IFS= read -r key; do
       [ -z "$key" ] && continue
       printf '%s\n' "$FINDINGS" | grep -Fxq -- "$key" && continue
-      send_telegram "[server-health] recovered: ${key}"
+      send_telegram "[server-health] recovered: ${key}" || continue
       awk -F'\t' -v k="$key" '$2 != k' "$DEDUPE_FILE" > "$DEDUPE_FILE.new" && mv "$DEDUPE_FILE.new" "$DEDUPE_FILE"
     done < <(awk -F'\t' '{print $2}' "$DEDUPE_FILE" | sort -u)
   fi
