@@ -29,6 +29,7 @@ DEFAULT_URL = "http://100.64.0.1:8000/api/godhome/world/event"
 STATE_DIR = Path(os.environ.get("WORLD_STATE_DIR", str(Path.home() / ".local/state/world")))
 OUTBOX_PATH = STATE_DIR / "outbox.jsonl"
 SENT_IDS_PATH = STATE_DIR / "sent.ids"
+REJECTED_PATH = STATE_DIR / "rejected.jsonl"
 
 # Source names. Keep stable — server treats these as collector identifiers.
 SRC_TRACK = "track"
@@ -67,9 +68,47 @@ def make_id(source: str, key: str) -> str:
     """sha1('source:key') — same scheme as described in the contract."""
     return sha1(f"{source}:{key}".encode("utf-8")).hexdigest()
 
+def _cap_utf16_units(s: str, n: int) -> str:
+    """Return `s` truncated to <= n UTF-16 code units, never splitting a surrogate pair.
+
+    Uses the well-defined boundary that JS .length sees: each code unit is 2 bytes
+    in UTF-16-LE, surrogate pairs count as 2. If cutting at exactly n would land
+    between the high and low surrogate of a non-BMP code point, drop the pair.
+    """
+    if not s:
+        return ""
+    enc = s.encode("utf-16-le")
+    max_bytes = n * 2
+    if len(enc) <= max_bytes:
+        return s
+    cand = enc[:max_bytes]
+    # Surrogate pair split? UTF-16 high surrogates live in 0xD800–0xDBFF, low in
+    # 0xDC00–0xDFFF. In little-endian, the high surrogate is the LAST 2 bytes of
+    # the slice when a split occurs.
+    if len(cand) >= 2:
+        hi = cand[-2] | (cand[-1] << 8)
+        if 0xD800 <= hi <= 0xDBFF:
+            cand = cand[:-2]
+    return cand.decode("utf-16-le")
+
 def trim_title(s: str, limit: int = 140) -> str:
+    """Cap title by UTF-16 code units (server measures with JS .length).
+
+    Empty result after the cap is replaced with '(untitled)'. When truncation
+    actually happens, the result is `limit - 1` chars + 1 ellipsis, fitting
+    exactly within `limit` UTF-16 code units.
+    """
     s = (s or "").replace("\n", " ").strip()
-    return s if len(s) <= limit else s[: limit - 1] + "…"
+    if not s:
+        return "(untitled)"
+    in_units = len(s.encode("utf-16-le")) // 2
+    if in_units <= limit:
+        return s
+    # Truncated: take limit-1 units, then append '…' (1 unit) -> exactly `limit`.
+    out = _cap_utf16_units(s, limit - 1)
+    if not out:
+        return "(untitled)"
+    return out + "…"
 
 # Server-side secret filters (src/server/world.ts). Copy exactly so any
 # title that would 400 a batch gets neutralised before it leaves the box.
@@ -140,6 +179,35 @@ def outbox_rewrite(events: list[dict]) -> None:
         for ev in events:
             fh.write(json_dumps(ev) + "\n")
     tmp.replace(OUTBOX_PATH)
+
+def rejected_append(event: dict, error: str) -> None:
+    """Append a rejected event (with the server error) to rejected.jsonl."""
+    ensure_state_dir()
+    with REJECTED_PATH.open("a", encoding="utf-8") as fh:
+        fh.write(json_dumps({"event": event, "error": error,
+                             "ts": now_utc_iso()}) + "\n")
+
+# Server-side length caps (JS .length → UTF-16 code units). Keep in sync with
+# the server's validateEvent.
+CAP_TITLE = 140
+CAP_REF = 200
+CAP_URL = 500
+CAP_MODEL = 120
+CAP_PROJECT = 80
+
+def normalise_event_lengths(ev: dict) -> None:
+    """In-place: scrub server-secret-like patterns and cap every length-limited
+    field by UTF-16 code units. Apply to every event before send.
+    """
+    if isinstance(ev.get("title"), str):
+        ev["title"] = trim_title(scrub_title(ev["title"]), CAP_TITLE)
+    for k, cap in (("ref", CAP_REF), ("url", CAP_URL), ("model", CAP_MODEL)):
+        v = ev.get(k)
+        if isinstance(v, str) and v:
+            ev[k] = _cap_utf16_units(v, cap)
+    if isinstance(ev.get("project"), str) and ev["project"]:
+        # project is already slugged; just cap.
+        ev["project"] = _cap_utf16_units(ev["project"], CAP_PROJECT)
 
 def sent_ids_load() -> set[str]:
     if not SENT_IDS_PATH.exists():
@@ -263,14 +331,14 @@ def event(*, id: str, ts: str, project: str, kind: str, status: str, title: str,
         raise ValueError(f"bad kind: {kind}")
     if status not in VALID_STATUSES:
         raise ValueError(f"bad status: {status}")
-    return {
+    ev = {
         "id": id,
         "ts": ts,
         "host": host,
         "project": slug(project),
         "kind": kind,
         "status": status,
-        "title": trim_title(scrub_title(title)),
+        "title": title,
         "ref": ref,
         "url": url,
         "actor": actor,
@@ -279,6 +347,8 @@ def event(*, id: str, ts: str, project: str, kind: str, status: str, title: str,
         "dur_s": dur_s,
         "source": source,
     }
+    normalise_event_lengths(ev)
+    return ev
 
 # --- Filesystem helpers ------------------------------------------------------
 

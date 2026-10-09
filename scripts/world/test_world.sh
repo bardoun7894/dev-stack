@@ -389,6 +389,357 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "## 9) trim_title caps by UTF-16 units (surrogate-safe)" | tee -a "$LOG"
+UTF_OUT="$(WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - <<PY 2>&1
+import json, sys
+sys.path.insert(0, "$ROOT")
+import lib_world
+
+# 139 ASCII + 1 emoji (4-byte codepoint, 2 utf-16 units) -> 141 utf-16 units.
+# After trim_title(140) it must be <=140 utf-16 units, must not split the surrogate pair,
+# and must end with the ellipsis marker.
+title = 'a' * 139 + '\U0001F4A9'
+trimmed = lib_world.trim_title(title, 140)
+utf16 = len(trimmed.encode('utf-16-le')) // 2
+
+# All-emoji string trimmed to 1 utf-16 unit => empty after safe cut => '(untitled)'.
+emoji_only = '\U0001F4A9' * 200
+emoji_trim = lib_world.trim_title(emoji_only, 1)
+
+# Surrogate-safe: an emoji right at the cap boundary must be wholly kept or wholly dropped.
+boundary = 'a' * 138 + '\U0001F4A9'  # utf-16 units = 140
+b_trim = lib_world.trim_title(boundary, 140)
+boundary_utf16 = len(b_trim.encode('utf-16-le')) // 2
+
+# No truncation needed (139 ascii + emoji = 141 utf-16 > 140, so ellipsis appended).
+# Verify the trimmed string is still valid utf-16 (no orphan surrogate).
+def has_orphan_surrogate(s):
+    enc = s.encode('utf-16-le')
+    try:
+        enc.decode('utf-16-le')
+        return False
+    except UnicodeDecodeError:
+        return True
+
+print(json.dumps({
+    "trimmed": trimmed,
+    "trimmed_utf16": utf16,
+    "trimmed_orphan": has_orphan_surrogate(trimmed),
+    "emoji_only": emoji_trim,
+    "boundary": b_trim,
+    "boundary_utf16": boundary_utf16,
+    "boundary_orphan": has_orphan_surrogate(b_trim),
+}))
+PY
+)"
+
+# Decode and assert. (Use a temp script so python's stdin stays the piped JSON.)
+UTF_DECODE_SCRIPT="$(mktemp -t utfdec.XXXXXX.py)"
+cat > "$UTF_DECODE_SCRIPT" <<'PY'
+import json, sys
+d = json.loads(sys.stdin.read())
+ok = True
+if d["trimmed_utf16"] > 140:
+    ok = False; print("trimmed too long: " + str(d["trimmed_utf16"]))
+if d["trimmed_orphan"]:
+    ok = False; print("trimmed has orphan surrogate")
+if not d["trimmed"].endswith("\u2026"):
+    ok = False; print("trimmed missing ellipsis: " + repr(d["trimmed"]))
+if d["emoji_only"] != "(untitled)":
+    ok = False; print("empty result not (untitled): " + repr(d["emoji_only"]))
+if d["boundary_utf16"] > 140:
+    ok = False; print("boundary too long: " + str(d["boundary_utf16"]))
+if d["boundary_orphan"]:
+    ok = False; print("boundary has orphan surrogate")
+print("ok" if ok else "bad")
+PY
+UTF_RESULT="$(printf '%s' "$UTF_OUT" | PYTHONPATH="$ROOT" python3 "$UTF_DECODE_SCRIPT" 2>&1)"
+rm -f "$UTF_DECODE_SCRIPT"
+assert_eq "trim_title UTF-16 surrogate-safe" "ok" "$UTF_RESULT"
+
+# Also: event() with an oversize emoji title must produce title with utf-16 <=140.
+# Use a long title that breaks the alnum runs (so scrub_title doesn't collapse it).
+EV_UTF="$(WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - <<PY 2>&1
+import json, sys
+sys.path.insert(0, "$ROOT")
+import lib_world
+# 5 groups of 'a' * 28 separated by spaces = 28*5 + 4 = 144 ASCII chars, + 1 emoji.
+# utf-16 = 144 + 2 = 146. Sliced to <=140 by trim_title.
+title = " ".join("a" * 28 for _ in range(5)) + " " + "\U0001F4A9"
+ev = lib_world.event(
+    id="x", ts=lib_world.now_utc_iso(), project="p", kind="task", status="done",
+    title=title, source="track",
+)
+print(json.dumps({
+    "title": ev["title"],
+    "title_utf16": len(ev["title"].encode("utf-16-le")) // 2,
+}))
+PY
+)"
+EV_UTF_LEN="$(printf '%s' "$EV_UTF" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["title_utf16"])')"
+if [ "$EV_UTF_LEN" -le 140 ]; then
+  echo "PASS  event() title utf-16 <=140 (got $EV_UTF_LEN)"; pass=$((pass+1))
+else
+  echo "FAIL  event() title utf-16 >140: $EV_UTF_LEN"; fail=$((fail+1))
+fi
+
+# ---------------------------------------------------------------------------
+echo "## 10) flush moves a 400'd event to rejected.jsonl; rest retry" | tee -a "$LOG"
+
+STUB_DIR="$(mktemp -d -t stub.XXXXXX)"
+STUB_LOG="$STUB_DIR/stub.log"
+STUB_PID=""
+
+# Compute the bad id and write the stub.py in one Python step, so the value
+# is inlined as a Python literal (no shell placeholder).
+WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - "$STUB_DIR" <<'PY' 2>&1 | tee -a "$LOG"
+import sys, pathlib, socket
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import lib_world
+out = pathlib.Path(sys.argv[1])
+bad_id = lib_world.make_id("track", "bad-emoji-title")
+(out / "bad_id.txt").write_text(bad_id)
+# Pick a port now and pass it via argv later, but write the stub with no port arg.
+stub_src = '''
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+BAD_ID = %r
+class H(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        sys.stderr.write("[stub] " + (fmt %% args) + "\\n")
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b""
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            self.send_error(400, "bad json"); return
+        events = [payload] if isinstance(payload, dict) and payload.get("id") else (payload.get("events") or [])
+        for i, ev in enumerate(events):
+            if ev.get("id") == BAD_ID:
+                body = ("event %%d: title must be 1-140 chars" %% i).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        body = json.dumps({"accepted": len(events), "duplicate": 0}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+''' % bad_id
+(out / "stub.py").write_text(stub_src)
+
+# Pick a free port.
+s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+(out / "port.txt").write_text(str(port))
+print("BAD_ID=" + bad_id)
+print("PORT=" + str(port))
+PY
+
+BAD_ID="$(cat "$STUB_DIR/bad_id.txt")"
+STUB_PORT="$(cat "$STUB_DIR/port.txt")"
+echo "BAD_ID=$BAD_ID STUB_PORT=$STUB_PORT" | tee -a "$LOG"
+
+python3 "$STUB_DIR/stub.py" "$STUB_PORT" >"$STUB_LOG" 2>&1 &
+STUB_PID=$!
+# Wait for the port to be ready (up to ~3 s).
+READY=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  if python3 - "$STUB_PORT" <<'PY' >/dev/null 2>&1
+import socket, sys
+s = socket.socket(); s.settimeout(0.5)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1]))); s.close(); sys.exit(0)
+except Exception: sys.exit(1)
+PY
+  then READY=1; break; fi
+  sleep 0.1
+done
+if [ "$READY" != "1" ]; then
+  echo "FAIL  stub server did not start on port $STUB_PORT"; fail=$((fail+1))
+fi
+
+# Seed the outbox: 3 good events + 1 bad event (oversize emoji title).
+WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - "$BAD_ID" <<'PY' 2>&1 | tee -a "$LOG"
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import lib_world
+bad_id = sys.argv[1]
+ts = lib_world.now_utc_iso()
+events = []
+for i in range(3):
+    events.append({
+        "id": lib_world.make_id("track", f"good-{i}"),
+        "ts": ts, "host": "mac", "project": "p", "kind": "task",
+        "status": "done", "title": f"good event {i}",
+        "ref": "", "url": "", "actor": "owner",
+        "model": "", "cost": None, "dur_s": None, "source": "track",
+    })
+# Bad event: 139 ASCII + 1 emoji = 141 utf-16 units (server rejects).
+events.append({
+    "id": bad_id, "ts": ts, "host": "mac", "project": "p", "kind": "task",
+    "status": "done", "title": "a" * 139 + "\U0001F4A9",
+    "ref": "", "url": "", "actor": "owner",
+    "model": "", "cost": None, "dur_s": None, "source": "track",
+})
+lib_world.outbox_append(events)
+print("seeded " + str(len(events)) + " events in outbox")
+PY
+
+OB_BEFORE=$(wc -l < "$WORLD_STATE_DIR/outbox.jsonl" 2>/dev/null | tr -d ' ')
+assert_eq "outbox seeded with 4 events" "4" "$OB_BEFORE"
+
+# Run the flush.
+WORLD_STATE_DIR="$WORLD_STATE_DIR" WORLD_URL="http://127.0.0.1:$STUB_PORT/api/godhome/world/event" \
+  WORLD_TOKEN="" "$TRACK" flush > "$WORLD_STATE_DIR/flush.out" 2> "$WORLD_STATE_DIR/flush.err"
+FLUSH_RC=$?
+FLUSH_OUT="$(cat "$WORLD_STATE_DIR/flush.out")"
+echo "flush rc=$FLUSH_RC out=$FLUSH_OUT" | tee -a "$LOG"
+
+# The bad event must be in rejected.jsonl, the others accepted, outbox empty.
+OB_AFTER=$(wc -l < "$WORLD_STATE_DIR/outbox.jsonl" 2>/dev/null | tr -d ' ')
+[ -z "$OB_AFTER" ] && OB_AFTER="0"
+assert_eq "outbox empty after flush with one rejection" "0" "$OB_AFTER"
+
+# rejected.jsonl must exist and contain exactly the bad event.
+if [ -f "$WORLD_STATE_DIR/rejected.jsonl" ]; then
+  REJ_LINES=$(wc -l < "$WORLD_STATE_DIR/rejected.jsonl" | tr -d ' ')
+  assert_eq "rejected.jsonl has 1 entry" "1" "$REJ_LINES"
+  REJ_CONTENT="$(cat "$WORLD_STATE_DIR/rejected.jsonl")"
+  if printf '%s' "$REJ_CONTENT" | grep -Fq "$BAD_ID"; then
+    echo "PASS  rejected.jsonl contains the bad event id"; pass=$((pass+1))
+  else
+    echo "FAIL  rejected.jsonl missing bad id: $REJ_CONTENT"; fail=$((fail+1))
+  fi
+  if printf '%s' "$REJ_CONTENT" | grep -Eq 'event [0-9]+:'; then
+    echo "PASS  rejected.jsonl records the server error"; pass=$((pass+1))
+  else
+    echo "FAIL  rejected.jsonl missing server error text: $REJ_CONTENT"; fail=$((fail+1))
+  fi
+else
+  echo "FAIL  rejected.jsonl not created"; fail=$((fail+1))
+fi
+
+# flush output should show accepted=3.
+if printf '%s' "$FLUSH_OUT" | grep -Eq '"accepted":\s*3'; then
+  echo "PASS  flush reports accepted=3"; pass=$((pass+1))
+else
+  echo "FAIL  flush did not report accepted=3: $FLUSH_OUT"; fail=$((fail+1))
+fi
+
+# Tidy up stub.
+if [ -n "$STUB_PID" ] && kill -0 "$STUB_PID" 2>/dev/null; then
+  kill "$STUB_PID" 2>/dev/null || true
+  wait "$STUB_PID" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+echo "## 10b) flush caps rejections at 50, keeps the rest in outbox" | tee -a "$LOG"
+# Fresh state dir so we don't pollute the previous test.
+WORLD_STATE_DIR2="$(mktemp -d -t worldcap.XXXXXX)"
+
+# Stub that 400s on EVERY event (always bad) — so the flush keeps hitting the
+# rejection path until the 50-cap is reached.
+STUB2_DIR="$(mktemp -d -t stub2.XXXXXX)"
+WORLD_STATE_DIR="$WORLD_STATE_DIR2" PYTHONPATH="$ROOT" python3 - "$STUB2_DIR" <<'PY' 2>&1 | tee -a "$LOG"
+import sys, pathlib, socket
+out = pathlib.Path(sys.argv[1])
+stub_src = '''
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args): pass
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b""
+        try: payload = json.loads(raw.decode("utf-8"))
+        except Exception: self.send_error(400, "bad json"); return
+        events = [payload] if isinstance(payload, dict) and payload.get("id") else (payload.get("events") or [])
+        if events:
+            body = ("event 0: title must be 1-140 chars").encode("utf-8")
+            self.send_response(400)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(200); self.send_header("Content-Length","2"); self.end_headers(); self.wfile.write(b"{}")
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+'''
+(out / "stub.py").write_text(stub_src)
+s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+(out / "port.txt").write_text(str(port))
+print("PORT=" + str(port))
+PY
+STUB2_PORT="$(cat "$STUB2_DIR/port.txt")"
+python3 "$STUB2_DIR/stub.py" "$STUB2_PORT" >/dev/null 2>&1 &
+STUB2_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if python3 - "$STUB2_PORT" <<'PY' >/dev/null 2>&1
+import socket, sys
+s = socket.socket(); s.settimeout(0.5)
+try: s.connect(("127.0.0.1", int(sys.argv[1]))); s.close(); sys.exit(0)
+except Exception: sys.exit(1)
+PY
+  then break; fi
+  sleep 0.1
+done
+
+# Seed 60 events, each with the same id-key so the stub 400s on all.
+WORLD_STATE_DIR="$WORLD_STATE_DIR2" PYTHONPATH="$ROOT" python3 - <<'PY' 2>&1 | tee -a "$LOG"
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import lib_world
+ts = lib_world.now_utc_iso()
+events = []
+for i in range(60):
+    events.append({
+        "id": lib_world.make_id("track", f"cap-{i}"),
+        "ts": ts, "host": "mac", "project": "p", "kind": "task",
+        "status": "done", "title": f"event {i}",
+        "ref": "", "url": "", "actor": "owner",
+        "model": "", "cost": None, "dur_s": None, "source": "track",
+    })
+lib_world.outbox_append(events)
+print("seeded 60 events")
+PY
+
+# Run the flush.
+WORLD_STATE_DIR="$WORLD_STATE_DIR2" WORLD_URL="http://127.0.0.1:$STUB2_PORT/api/godhome/world/event" \
+  WORLD_TOKEN="" "$TRACK" flush > "$WORLD_STATE_DIR2/flush.out" 2> "$WORLD_STATE_DIR2/flush.err" || true
+FLUSH2_OUT="$(cat "$WORLD_STATE_DIR2/flush.out")"
+echo "flush out: $FLUSH2_OUT" | tee -a "$LOG"
+
+# rejected.jsonl must have at most 50 entries.
+REJ2_LINES=0
+[ -f "$WORLD_STATE_DIR2/rejected.jsonl" ] && REJ2_LINES=$(wc -l < "$WORLD_STATE_DIR2/rejected.jsonl" | tr -d ' ')
+if [ "$REJ2_LINES" = "50" ]; then
+  echo "PASS  50-rejection cap hit exactly"; pass=$((pass+1))
+else
+  echo "FAIL  expected 50 rejections, got $REJ2_LINES"; fail=$((fail+1))
+fi
+
+# Outbox must contain the remaining events (60 - 50 = 10).
+OB2_AFTER=$(wc -l < "$WORLD_STATE_DIR2/outbox.jsonl" 2>/dev/null | tr -d ' ')
+if [ "$OB2_AFTER" = "10" ]; then
+  echo "PASS  outbox keeps the 10 unsent events"; pass=$((pass+1))
+else
+  echo "FAIL  expected 10 in outbox, got $OB2_AFTER"; fail=$((fail+1))
+fi
+
+if [ -n "$STUB2_PID" ] && kill -0 "$STUB2_PID" 2>/dev/null; then
+  kill "$STUB2_PID" 2>/dev/null || true
+  wait "$STUB2_PID" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
 echo | tee -a "$LOG"
 echo "RESULT: pass=$pass fail=$fail" | tee -a "$LOG"
 exit $fail

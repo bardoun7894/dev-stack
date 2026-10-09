@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -17,9 +19,18 @@ from datetime import datetime, timezone
 # Allow running both as `scripts/world/track` and `python -m world.track`.
 sys.path.insert(0, str(__import__("os").path.dirname(__import__("os").path.realpath(__file__))))
 from lib_world import (
-    SRC_TRACK, event, json_dumps, outbox_append, outbox_load, outbox_rewrite,
-    post_events, scrub_title, slug,
+    SRC_TRACK, event, json_dumps, normalise_event_lengths,
+    outbox_append, outbox_load, outbox_rewrite, post_events,
+    rejected_append, slug,
 )
+
+# Per-flush cap on server rejections (one bad event per rejection, so the
+# rest of the batch can still be retried).
+REJECT_LIMIT_PER_FLUSH = 50
+
+# Matches the server's "event N: <reason>" error body (e.g. on title length).
+_REJECTED_BODY_RE = re.compile(r"event (\d+):")
+
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="track", add_help=True)
@@ -66,27 +77,60 @@ def cmd_flush(dry_run: bool) -> int:
     if not pending:
         print("outbox empty")
         return 0
-    # Neutralise server-secret-like patterns in titles before send, so
-    # already-queued events (which pre-date scrub_title on the producer
-    # path) don't 400 a whole batch.
+    # Scrub + cap every length-limited field by UTF-16 code units, so the
+    # server (which measures with JS .length) never sees a 141-codepoint title
+    # it would reject with a 400 for the whole batch.
     for ev in pending:
-        if isinstance(ev.get("title"), str):
-            ev["title"] = scrub_title(ev["title"])
+        normalise_event_lengths(ev)
     if dry_run:
         print(f"would flush {len(pending)} events")
         return 0
-    from lib_world import send
-    try:
-        rep = send(pending)
-    except Exception as e:
-        outbox_rewrite(pending)
-        print(f"flush failed, kept {len(pending)}: {e}", file=sys.stderr)
-        return 2
-    accepted = int(rep.get("accepted", 0)) + int(rep.get("duplicate", 0))
-    remaining = pending[accepted:] if accepted > 0 else []
-    outbox_rewrite(remaining)
-    print(json_dumps({**rep, "remaining": len(remaining)}))
-    return 0 if not remaining else 1
+    import lib_world
+    url = os.environ.get("WORLD_URL", lib_world.DEFAULT_URL)
+    token = os.environ.get("WORLD_TOKEN", "")
+    timeout = float(os.environ.get("WORLD_TIMEOUT", "5"))
+    chunk = 500
+    accepted = 0
+    duplicate = 0
+    rejected_count = 0
+    remaining = list(pending)
+    while remaining:
+        batch = remaining[:chunk]
+        try:
+            rep = post_events(batch, url=url, timeout=timeout, token=token)
+            accepted += int(rep.get("accepted", 0) or 0)
+            duplicate += int(rep.get("duplicate", 0) or 0)
+            remaining = remaining[len(batch):]
+            continue
+        except RuntimeError as e:
+            # 4xx → try to identify the bad event by index, move it to
+            # rejected.jsonl, and retry the rest of the batch.
+            msg = str(e)
+            m = _REJECTED_BODY_RE.search(msg)
+            if not m or rejected_count >= REJECT_LIMIT_PER_FLUSH:
+                outbox_rewrite(remaining)
+                print(f"flush failed, kept {len(remaining)}: {msg}", file=sys.stderr)
+                return 2
+            idx = int(m.group(1))
+            if not (0 <= idx < len(batch)):
+                outbox_rewrite(remaining)
+                print(f"flush failed, bad index in error: {msg}", file=sys.stderr)
+                return 2
+            bad = batch[idx]
+            rejected_append(bad, msg)
+            rejected_count += 1
+            # Retry the rest of THIS batch (drop the bad event).
+            rest = batch[:idx] + batch[idx + 1:]
+            remaining = rest + remaining[len(batch):]
+            continue
+        except Exception as e:
+            outbox_rewrite(remaining)
+            print(f"flush failed, kept {len(remaining)}: {e}", file=sys.stderr)
+            return 2
+    outbox_rewrite(remaining)  # empty list clears the outbox
+    print(json_dumps({"accepted": accepted, "duplicate": duplicate,
+                      "rejected": rejected_count, "remaining": len(remaining)}))
+    return 0
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
