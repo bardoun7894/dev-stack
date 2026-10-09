@@ -310,6 +310,35 @@ echo "$out" | grep -q "docker: web-nobind .*not bound" && ok "docker-noports" ||
 echo "$out" | grep -Eq "docker: (web-ok|manual-job)" && bad "docker-clean" "clean container flagged: $out" || ok "docker-clean"
 HEALTH_STUB_DOCKER_ALL=""; HEALTH_STUB_INSPECT=""; HEALTH_STUB_PORTS=""
 
+# ---- 9c. real send: curl hit with bot URL; findings.sent written only on success ----
+cat > "$T/bin/curl" <<'CURLSEND'
+#!/usr/bin/env bash
+for u in "$@"; do
+  case "$u" in
+    https://api.telegram.org/bot*/sendMessage) echo "$u" >> "$CURL_LOG"; cat >/dev/null; exit "${CURL_RC:-0}" ;;
+    https://sendtest.example.com/*) printf '502'; exit 0 ;;
+    https://*) printf '200'; exit 0 ;;
+  esac
+done
+printf '200'
+CURLSEND
+chmod +x "$T/bin/curl"
+export CURL_LOG="$T/curl.log"
+sendrun() { ENV_FILE="$ENV_FILE" STATE_DIR="$T/state/send" BACKUP_DIRS="$T/none" NGINX_CONF_DIR="$T/nginx/sites-enabled" \
+  VAR_LOG_CHKROOTKIT="$T/none" bash "$SCRIPT" 2>&1; }
+rm -rf "$T/state/send" "$CURL_LOG"; : > "$CURL_LOG"
+printf 'server_name sendtest.example.com;\n' > "$T/nginx/sites-enabled/sendtest.conf"
+HEALTH_STUB_HOSTS="sendtest.example.com=502"
+CURL_RC=22 sendrun >/dev/null
+grep -q "bottg-FAKE-token-for-test-0123/sendMessage" "$CURL_LOG" && ok "send-url" || bad "send-url" "curl not called with bot URL: $(cat "$CURL_LOG")"
+[ -s "$T/state/send/findings.sent" ] && bad "send-fail-unrecorded" "finding recorded after failed send" || ok "send-fail-unrecorded"
+CURL_RC=0 sendrun >/dev/null
+grep -q "sendtest.example.com 502" "$T/state/send/findings.sent" 2>/dev/null && ok "send-ok-recorded" || bad "send-ok-recorded" "finding not recorded after successful send"
+: > "$CURL_LOG"; CURL_RC=0 sendrun >/dev/null
+[ -s "$CURL_LOG" ] && bad "send-deduped" "resent within 6h" || ok "send-deduped"
+rm -f "$T/nginx/sites-enabled/sendtest.conf"
+stub_install
+
 # ---- 10. --dry-run never invokes curl to api.telegram.org ----
 # Re-do a clean site alert + check curl never touches api.telegram.
 HEALTH_STUB_HOSTS="beldify.example.com=502
