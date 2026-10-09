@@ -12,6 +12,7 @@ Loops, queues and watchers live in bash. The AI acts only on a result (PASS / FA
 - `gaterun.sh <repo-root>`: queue runner; pops `gateq.txt` lines `<name> <worktree-dir>`, honours `MAX_PARALLEL`.
 - `monitor.sh [repo-name...]`: exits on the first PASS / FAIL / STALL (all repos when none given).
   Env: `STALL_SECS` (1800), `POLL` (60). A finished gate fires once.
+- `testcap.sh <outfile> -- <cmd>`: caps scoped test runs at TESTCAP_MAX (2) per worktree+branch, full output to <outfile>, exit 3 when capped; `--reset` (orchestrator, per fix round), `--status`.
 - `failsum.sh <lines-file>`: 3-line cheap-model diagnosis; "HARD" (>5 lines, timeouts, compile errors, conflicts) skips it.
 - `overlap.sh <repo-root> <branches...>`: files two or more branches both change.
 - `brief-template.md`: worker brief.
