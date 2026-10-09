@@ -42,4 +42,6 @@ Composes existing skills; it does not redo their work. Scripts live in `skills/f
 
 - `scripts/active.sh`, `scripts/triage.sh`, `scripts/recommend.sh`, `config/customers.txt`
 - Tests: `tests/finish-apps/active_test.sh`, `tests/finish-apps/triage_test.sh`, `tests/finish-apps/recommend_test.sh`
+- Mac snapshot: `scripts/push-mac-snapshot.sh` pushes the Mac scan to the server (`/root/.tokyo/finish-apps/mac-latest.json`); server-mode `active.sh` reads it (flagged `snapshot: true`) when `ssh mac` fails and it is under 24h old.
+- Installer: `bash scripts/install-mac-push.sh` loads the launchd agent (every 2h) from `launchd/dev.mbardouni.finish-apps-push.plist`.
 - Env: `FINISH_APPS_MAC_ROOTS`, `FINISH_APPS_SERVER_ROOTS`, `FINISH_APPS_SSH_HOST`, `FINISH_APPS_SELF`, `FINISH_APPS_MAC_ROOTS_REMOTE`, `JEV_BIN`, `FINISH_APPS_LLM`

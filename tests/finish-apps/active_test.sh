@@ -98,7 +98,7 @@ cp -R "$P/up" "$M/up"; git -C "$M/up" commit -q --allow-empty -m macextra
 mkdir -p "$M/maconly"; git -C "$M/maconly" init -q -b work; echo m > "$M/maconly/f"
 git -C "$M/maconly" add -A; git -C "$M/maconly" commit -q -m c
 export STUB_LOG="$T/ssh.log"; : > "$STUB_LOG"
-srv() { PATH="$B:$PATH" FINISH_APPS_SELF=server FINISH_APPS_SERVER_ROOTS="$P/*" \
+srv() { PATH="$B:$PATH" FINISH_APPS_MAC_SNAPSHOT="${FINISH_APPS_MAC_SNAPSHOT:-$T/none.json}" FINISH_APPS_SELF=server FINISH_APPS_SERVER_ROOTS="$P/*" \
         FINISH_APPS_MAC_ROOTS_REMOTE="$M/*" bash "$SCRIPT" "$@"; }
 so="$(srv --host server)"
 echo "$so" | jq -e 'length==2 and all(.[]; .host=="server")' >/dev/null \
@@ -120,6 +120,29 @@ echo "$so" | jq -e 'length==2 and all(.[]; .host=="server")' >/dev/null || { ech
 so="$(PATH="$B:$PATH" FINISH_APPS_SELF=mac FINISH_APPS_SSH_HOST= FINISH_APPS_MAC_ROOTS="$P/*" bash "$SCRIPT" --host mac)"
 echo "$so" | jq -e 'length==2 and all(.[]; .host=="mac")' >/dev/null || { echo "FAIL SELF=mac unchanged"; fail=1; }
 [ ! -s "$STUB_LOG" ] || { echo "FAIL SELF=mac must not call stub ssh"; fail=1; }
+
+# --- server mode with the Mac unreachable: fall back to the pushed snapshot ---
+SNAP="$T/mac-latest.json"
+FINISH_APPS_SELF=mac FINISH_APPS_SSH_HOST= FINISH_APPS_MAC_ROOTS="$M/*" bash "$SCRIPT" --host mac > "$SNAP"
+snap() { STUB_FAIL=1 FINISH_APPS_MAC_SNAPSHOT="$SNAP" srv --days 7 2>"$T/err"; }
+so="$(snap)"; rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL snapshot exit=$rc"; fail=1; }
+echo "$so" | jq -e '[.[]|select(.name=="maconly")][0]|.host=="mac" and .snapshot==true and (.snapshot_at|test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T"))' >/dev/null   || { echo "FAIL fresh snapshot should add mac entries with snapshot:true"; echo "$so"; fail=1; }
+echo "$so" | jq -e '[.[]|select(.name=="up")]|length==1 and (.[0].also_at|length==1) and .[0].snapshot==true' >/dev/null   || { echo "FAIL snapshot entries should dedupe like live ones"; echo "$so"; fail=1; }
+echo "$so" | jq -e '[.[]|select(.name=="alpha")][0]|.host=="server" and (has("snapshot")|not)' >/dev/null   || { echo "FAIL server entries must not be marked snapshot"; fail=1; }
+touch -t 202001010000 "$SNAP"
+so="$(snap)"; rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL stale snapshot exit=$rc"; fail=1; }
+echo "$so" | jq -e 'length==2 and all(.[]; .host=="server")' >/dev/null || { echo "FAIL stale snapshot must add no mac entries"; fail=1; }
+[ "$(grep -ci warn "$T/err")" -ge 1 ] || { echo "FAIL stale snapshot needs a warning"; fail=1; }
+echo '{not json' > "$SNAP"
+so="$(snap)"; rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL invalid snapshot exit=$rc"; fail=1; }
+echo "$so" | jq -e 'length==2 and all(.[]; .host=="server")' >/dev/null || { echo "FAIL invalid snapshot must add no mac entries"; fail=1; }
+[ "$(grep -ci 'warn.*snapshot' "$T/err")" -ge 1 ] || { echo "FAIL invalid snapshot needs a warning"; cat "$T/err"; fail=1; }
+rm -f "$SNAP"
+so="$(snap)"; rc=$?
+[ "$rc" -eq 0 ] && echo "$so" | jq -e 'length==2' >/dev/null || { echo "FAIL missing snapshot"; fail=1; }
 
 [ "$fail" -eq 0 ] && echo "PASS active_test"
 exit "$fail"

@@ -4,6 +4,7 @@
 # Env: FINISH_APPS_MAC_ROOTS, FINISH_APPS_SERVER_ROOTS (space-separated globs),
 #      FINISH_APPS_SSH_HOST (default MyContabo; empty = skip server),
 #      FINISH_APPS_SELF (mac|server; auto-detected), FINISH_APPS_MAC_ROOTS_REMOTE (used on the server).
+#      FINISH_APPS_MAC_SNAPSHOT (server mode fallback), FINISH_APPS_SNAPSHOT_MAX_AGE (hours, default 24).
 # Internal: --scan-local --label L --roots "globs"  (runs on the server via ssh, prints local entries).
 set -u
 
@@ -94,7 +95,24 @@ if [ "$SELF" = server ]; then
           --label mac --roots "'$MAC_REMOTE'" < "$0" 2>/dev/null)" && printf '%s' "$mac" | jq -e 'type=="array"' >/dev/null 2>&1; then
       all="$(jq -n --argjson a "$all" --argjson b "$mac" '$a + $b')"
     else
-      echo "warn: mac unreachable or scan failed; continuing with server results" >&2
+      snap="${FINISH_APPS_MAC_SNAPSHOT-/root/.tokyo/finish-apps/mac-latest.json}"
+      maxh="${FINISH_APPS_SNAPSHOT_MAX_AGE-24}"
+      if [ -n "$snap" ] && [ -f "$snap" ]; then
+        mt="$(stat -c %Y "$snap" 2>/dev/null || stat -f %m "$snap" 2>/dev/null || echo 0)"
+        age=$(( $(date +%s) - mt ))
+        if [ "$age" -gt $(( maxh * 3600 )) ]; then
+          echo "warn: mac unreachable and snapshot $snap is stale ($((age/3600))h > ${maxh}h); continuing with server results" >&2
+        elif ! sj="$(jq -c 'select(type=="array")' "$snap" 2>/dev/null)" || [ -z "$sj" ]; then
+          echo "warn: mac unreachable and snapshot $snap is invalid; continuing with server results" >&2
+        else
+          at="$(date -u -d "@$mt" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$mt" +%Y-%m-%dT%H:%M:%SZ)"
+          sj="$(printf '%s' "$sj" | jq --arg at "$at" 'map(. + {snapshot:true, snapshot_at:$at})')"
+          all="$(jq -n --argjson a "$all" --argjson b "$sj" '$a + $b')"
+          echo "warn: mac unreachable; using snapshot from $at" >&2
+        fi
+      else
+        echo "warn: mac unreachable or scan failed and no snapshot; continuing with server results" >&2
+      fi
     fi
   fi
 else
