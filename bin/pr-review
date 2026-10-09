@@ -22,7 +22,7 @@
  * One stdout line per PR: repo#N sha7 action seconds.
  * Tests stub every gh/claude call via PR_REVIEW_RUNNER (an executable called as `runner <cmd> <args...>`).
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
@@ -417,6 +417,18 @@ function mergeGate(repo, n, r, dry) {
   return { ...d, action: "merged", reason: "" };
 }
 
+// World live hook: `track add` in the background, 3 s cap, silent. WORLD_TRACK=0 disables; a missing track is a no-op.
+function worldTrack(kind, repo, n, decision) {
+  if (process.env.WORLD_TRACK === "0") return;
+  try {
+    const c = spawn("track", ["add", "--kind", kind, "--project", String(repo).split("/").pop(), "--status", "done",
+      "--title", `${kind} ${repo}#${n} ${decision}`, "--ref", `${repo}#${n}`, "--source", "live", "--key", `${kind}:${repo}#${n}:${decision}`],
+    { stdio: "ignore", detached: true, timeout: 3000 });
+    c.on("error", () => {});
+    c.unref();
+  } catch { /* the world feed never affects a review */ }
+}
+
 function logDecision(rec) {
   try {
     mkdirSync(dirname(LOG_FILE), { recursive: true });
@@ -520,6 +532,10 @@ function runOne(repo, n, dry, merge) {
         e2e: m.e2e ?? null, e2e_source: m.e2eSource ?? null,
         cost: { haiku_usd: r.haikuUsd ?? null, haiku_tokens: r.haikuTokens ?? null, b_model: r.bModel, b_usd: r.bUsd ?? null, b_tokens: r.bTokens ?? null, jev_calls: jevCallsTotal + jevCount } };
       logDecision(rec);
+      if (!dry && (m.action === "merged" || m.action === "merge-skipped" || m.action === "would-merge")) {
+        worldTrack("review", repo, n, r.verdict === "PASS" && r.bVerdict === "PASS" ? "approve" : "request-changes");
+        if (m.action === "merged") worldTrack("merge", repo, n, "merged");
+      }
       console.log(`${repo}#${n} ${r.sha7} ${m.action === "merge-skipped" ? `merge-skipped:${m.reason}` : m.action} ${secs()}`);
       if (dry) console.log(JSON.stringify(rec));
     }

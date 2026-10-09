@@ -79,7 +79,7 @@ else if (args[0] === "pr" && args[1] === "diff") {
 else if (args[0] === "pr" && args[1] === "review") out("");
 `;
 
-function run(argv, scenario) {
+function run(argv, scenario, extraEnv = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-test-"));
   writeFileSync(join(dir, "stub.mjs"), STUB);
   chmodSync(join(dir, "stub.mjs"), 0o755);
@@ -91,7 +91,7 @@ function run(argv, scenario) {
     env: {
       ...process.env, PR_REVIEW_RUNNER: join(dir, "stub.mjs"), STUB_DIR: dir, PR_REVIEW_CFG: join(dir, "cfg"),
       JEV_EXHAUSTED_FILE: join(dir, "exhausted.json"), PR_REVIEW_DEAD: join(dir, "dead.json"), PR_REVIEW_QUOTA: join(dir, "quota.json"),
-      PR_REVIEW_LOG: join(dir, "log", "decisions.jsonl"),
+      PR_REVIEW_LOG: join(dir, "log", "decisions.jsonl"), ...extraEnv,
     },
   });
   const lf = join(dir, "log", "decisions.jsonl");
@@ -685,4 +685,56 @@ test("UI PR + decision log includes e2e field next to jev/conf", () => {
   // jev/conf are still present (existing contract).
   assert.equal(d.jev, "pass");
   assert.equal(d.conf, 0.95);
+});
+
+// ---- world live hooks: `track add` after a decision is written ----
+function fakeTrack() {
+  const d = mkdtempSync(join(tmpdir(), "pr-review-track-"));
+  const log = join(d, "track.log");
+  writeFileSync(join(d, "track"), `#!/bin/bash\nl=$(printf '%s\\t' "$@"); printf '%s\\n' "$l" >> ${log}\n`);
+  chmodSync(join(d, "track"), 0o755);
+  const calls = () => {
+    for (let i = 0; i < 40 && !existsSync(log); i++) spawnSync("sleep", ["0.1"]);
+    spawnSync("sleep", ["0.3"]);
+    return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => l.split("\t").slice(0, -1)) : [];
+  };
+  return { env: { PATH: `${d}:${process.env.PATH}` }, calls };
+}
+const flag = (c, k) => c[c.indexOf(k) + 1];
+
+test("world hook: merged PR emits a review and a merge track call", () => {
+  const t = fakeTrack();
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS }, t.env);
+  assert.equal(r.status, 0);
+  const c = t.calls();
+  const review = c.find((x) => flag(x, "--kind") === "review");
+  const merge = c.find((x) => flag(x, "--kind") === "merge");
+  assert.ok(review && merge, JSON.stringify(c));
+  assert.equal(flag(merge, "--key"), "merge:o/r#1:merged");
+  assert.equal(flag(merge, "--ref"), "o/r#1");
+  assert.equal(flag(merge, "--project"), "r");
+  assert.equal(flag(merge, "--status"), "done");
+  assert.equal(flag(review, "--key"), "review:o/r#1:approve");
+});
+
+test("world hook: blocking second review emits request-changes, no merge call", () => {
+  const t = fakeTrack();
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS, bOut: "P1 a.js:1 bad\nVERDICT: BLOCK" }, t.env);
+  assert.equal(r.status, 0);
+  const c = t.calls();
+  assert.equal(c.filter((x) => flag(x, "--kind") === "merge").length, 0);
+  assert.equal(flag(c.find((x) => flag(x, "--kind") === "review"), "--key"), "review:o/r#1:request-changes");
+});
+
+test("world hook: WORLD_TRACK=0 emits nothing", () => {
+  const t = fakeTrack();
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS }, { ...t.env, WORLD_TRACK: "0" });
+  assert.equal(r.status, 0);
+  assert.equal(t.calls().length, 0);
+});
+
+test("world hook: no track on PATH does not change exit or output", () => {
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS }, {});
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /merged/);
 });
