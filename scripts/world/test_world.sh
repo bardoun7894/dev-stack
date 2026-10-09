@@ -224,6 +224,91 @@ assert_contains "dry-run prints event" '"source":"track"' "$(cat "$WORLD_STATE_D
 } || { echo "FAIL  dry-run wrote to outbox"; fail=$((fail+1)); }
 
 # ---------------------------------------------------------------------------
+echo "## 6) spec-kit per-repo scan + id key includes counts" | tee -a "$LOG"
+SPEC_BASE="$(mktemp -d -t specbase.XXXXXX)"
+mkdir -p "$SPEC_BASE/repoA/specs/001-x"
+cat > "$SPEC_BASE/repoA/specs/001-x/tasks.md" <<'EOF'
+# Spec 001-x
+- [x] step one
+- [x] step two
+- [ ] step three
+EOF
+# Worktree copy of repoA — must be skipped, otherwise it would emit a 2nd event.
+mkdir -p "$SPEC_BASE/repoA.worktrees/specs/001-x"
+cp "$SPEC_BASE/repoA/specs/001-x/tasks.md" "$SPEC_BASE/repoA.worktrees/specs/001-x/tasks.md"
+# Session dir under repoA/specs/_session — must be skipped.
+mkdir -p "$SPEC_BASE/repoA/specs/_session"
+cp "$SPEC_BASE/repoA/specs/001-x/tasks.md" "$SPEC_BASE/repoA/specs/_session/tasks.md"
+
+OUT_SPEC="$(mktemp)"
+OUT_SUM="$(mktemp)"
+PYTHONPATH="$ROOT" python3 - "$SPEC_BASE" "$OUT_SPEC" "$OUT_SUM" <<'PY' 2>&1 | tee -a "$LOG"
+import sys, json, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import world_push_sources
+from task_lines import parse_spec_tasks
+
+base = pathlib.Path(sys.argv[1])
+# Run the collector against our fixture base.
+world_push_sources._SESSION_GLOBS = [base]
+events = list(world_push_sources.collect_specs())
+with open(sys.argv[2], 'w') as fh:
+    for e in events: fh.write(json.dumps(e)+'\n')
+
+# Independently exercise parse_spec_tasks so the id-changes-with-counts check
+# is independent of the scan logic.
+path_a = base / "repoA" / "specs" / "001-x" / "tasks.md"
+text_a = path_a.read_text(encoding='utf-8')
+ev_a = next(iter(parse_spec_tasks(path_a, text_a, "repoA")))
+text_b = text_a.replace("- [ ] step three", "- [x] step three")
+ev_b = next(iter(parse_spec_tasks(path_a, text_b, "repoA")))
+with open(sys.argv[3], 'w') as fh:
+    fh.write(json.dumps({"id_a": ev_a["id"], "id_b": ev_b["id"],
+                          "proj_a": ev_a["project"], "title_a": ev_a["title"],
+                          "status_a": ev_a["status"]}) + '\n')
+PY
+
+LINES_SPEC=$(wc -l < "$OUT_SPEC" | tr -d ' ')
+assert_eq "spec-kit collector yields 1 event" "1" "$LINES_SPEC"
+
+SPEC_EV="$(cat "$OUT_SPEC")"
+assert_contains "spec-kit project = repoa" '"project": "repoa"' "$SPEC_EV"
+assert_contains "spec-kit status = pending" '"status": "pending"' "$SPEC_EV"
+assert_contains "spec-kit title has 2/3 done" 'feature 001-x: 2/3 done' "$SPEC_EV"
+if grep -F 'worktrees' "$OUT_SPEC" >/dev/null; then
+  echo "FAIL  worktree copy leaked into spec-kit events"; fail=$((fail+1))
+else
+  echo "PASS  worktree copy skipped in spec-kit"; pass=$((pass+1))
+fi
+
+SUMMARY_LINE="$(cat "$OUT_SUM")"
+ID_A="$(printf '%s' "$SUMMARY_LINE" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["id_a"])')"
+ID_B="$(printf '%s' "$SUMMARY_LINE" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["id_b"])')"
+if [ "$ID_A" != "$ID_B" ]; then
+  echo "PASS  spec-kit id changes when counts change"; pass=$((pass+1))
+else
+  echo "FAIL  spec-kit id did not change when counts changed"; fail=$((fail+1))
+fi
+
+# Restore _SESSION_GLOBS so subsequent tests in a re-run aren't affected.
+PYTHONPATH="$ROOT" python3 -c "import pathlib, world_push_sources; world_push_sources._SESSION_GLOBS = [pathlib.Path.home()/'projects', pathlib.Path.home()/'code']"
+
+# ---------------------------------------------------------------------------
+echo "## 7) session-task discovery ignores deep nested matches" | tee -a "$LOG"
+SB="$(mktemp -d -t sessbase.XXXXXX)"
+mkdir -p "$SB/repo/specs/_session" "$SB/repo/node_modules/x/specs/_session"
+printf '# s\n- [x] a\n- [ ] b\n' > "$SB/repo/specs/_session/2026-01-02-tasks.md"
+printf '# s\n- [x] deep\n' > "$SB/repo/node_modules/x/specs/_session/2026-01-01-tasks.md"
+NDEEP="$(PYTHONPATH="$ROOT" python3 - "$SB" <<'PY'
+import sys, pathlib, world_push_sources as w
+w._SESSION_GLOBS = [pathlib.Path(sys.argv[1])]
+evs = list(w.collect_session_tasks())
+print(sum(1 for e in evs if "deep" in e.get("title","") or "node_modules" in str(e)))
+PY
+)"
+assert_eq "deep nested session-tasks file ignored" "0" "$NDEEP"
+
+# ---------------------------------------------------------------------------
 echo | tee -a "$LOG"
 echo "RESULT: pass=$pass fail=$fail" | tee -a "$LOG"
 exit $fail

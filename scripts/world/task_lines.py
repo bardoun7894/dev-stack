@@ -111,7 +111,7 @@ def parse_spec_tasks(path: Path, text: str, project: str) -> Iterable[dict]:
     title = f"feature {fcode}: {done}/{total} done"
     proj = slug(project)
     yield event(
-        id=make_id(SRC_SPEC, f"{path}:counts"),
+        id=make_id(SRC_SPEC, f"{path}:{done}/{total}"),
         ts=_ts_from_date_and_time(fdate, "00:00"),
         project=proj, kind="task", status="done" if pending == 0 else "pending",
         title=title, source=SRC_SPEC,

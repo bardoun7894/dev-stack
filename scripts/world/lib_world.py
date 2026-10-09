@@ -288,6 +288,9 @@ def iter_git_roots(roots: Iterable[str], max_depth: int = 3) -> Iterable[Path]:
                 yield cur
                 dirs[:] = []  # don't descend into nested git worktrees
 
+_WALK_SKIP = {"node_modules", "vendor", "venv", "__pycache__", "dist", "build",
+              "target", "Pods", "site-packages"}
+
 def _walk(root: Path, max_depth: int):
     depth = 0
     stack = [(root, depth)]
@@ -295,10 +298,14 @@ def _walk(root: Path, max_depth: int):
         p, d = stack.pop()
         try:
             for entry in sorted(p.iterdir()):
-                if entry.name.startswith("."):
+                if entry.name.startswith(".") or entry.name in _WALK_SKIP:
                     continue
                 if entry.is_dir():
-                    yield (entry, [e.name for e in entry.iterdir() if e.is_dir()], [])
+                    try:
+                        subdirs = [e.name for e in entry.iterdir() if e.is_dir()]
+                    except OSError:
+                        subdirs = []
+                    yield (entry, subdirs, [])
                     if d + 1 <= max_depth:
                         stack.append((entry, d + 1))
         except (PermissionError, OSError):

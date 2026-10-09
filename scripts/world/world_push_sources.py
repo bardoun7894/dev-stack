@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
@@ -46,10 +47,8 @@ def collect_session_tasks() -> Iterable[dict]:
     for base in _SESSION_GLOBS:
         if not base.exists():
             continue
-        for p in base.rglob("*-tasks.md"):
+        for p in sorted(base.glob("*/specs/_session/*-tasks.md")):
             if "/.worktrees/" in str(p) or "/.claude/worktrees/" in str(p):
-                continue
-            if not str(p).endswith("-tasks.md") or "/specs/_session/" not in str(p):
                 continue
             if looks_like_worktree(p):
                 continue
@@ -78,17 +77,25 @@ def collect_session_tasks() -> Iterable[dict]:
 # --- spec-kit --------------------------------------------------------------
 
 def _spec_root(base: Path) -> Iterable[Path]:
-    spec_dir = base / "specs"
-    if not spec_dir.exists():
+    if not base.exists():
         return
-    for p in spec_dir.glob("*/tasks.md"):
-        if "/.worktrees/" in str(p) or looks_like_worktree(p):
+    # Scan one level of repos: <base>/<repo>/specs/<NNN-...>/tasks.md.
+    # Skip worktree copies and the session-logs dir under each repo.
+    for repo_dir in sorted(base.iterdir()):
+        if not repo_dir.is_dir():
             continue
-        # Spec dirs may include session logs already collected; skip those.
-        parts = p.parts
-        if "_session" in parts:
+        if looks_like_worktree(repo_dir):
             continue
-        yield p
+        spec_dir = repo_dir / "specs"
+        if not spec_dir.exists():
+            continue
+        for p in sorted(spec_dir.glob("*/tasks.md")):
+            if looks_like_worktree(p):
+                continue
+            parts = p.parts
+            if "_session" in parts:
+                continue
+            yield p
 
 def collect_specs() -> Iterable[dict]:
     out: list[dict] = []
@@ -123,38 +130,51 @@ def collect_jdelegate() -> Iterable[dict]:
 
 # --- git commits ------------------------------------------------------------
 
-def _git_log(repo: Path, since: str) -> list[tuple[str, str]]:
-    """Return [(short_sha, subject)] from `git log` since `since` (ISO date)."""
+STATE_DIR = Path(os.environ.get("WORLD_STATE_DIR", str(Path.home() / ".local/state/world")))
+_PENDING_STATE: dict[Path, str] = {}
+
+
+def _state_read(p: Path) -> str:
     try:
-        cp = subprocess.run(
-            ["git", "-C", str(repo), "log", f"--since={since}",
-             "--pretty=format:%h %s", "-n", "5000"],
-            capture_output=True, text=True, timeout=20,
-        )
+        return p.read_text().strip()
     except Exception:
+        return ""
+
+
+def commit_state() -> None:
+    """Persist per-repo last-seen shas; call after a successful send."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        for p, v in _PENDING_STATE.items():
+            p.write_text(v + "\n")
+    except Exception:
+        pass
+    _PENDING_STATE.clear()
+
+
+def _git_out(repo: Path, args: list[str], timeout: int = 20) -> str | None:
+    try:
+        cp = subprocess.run(["git", "-C", str(repo), *args],
+                            capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    return cp.stdout if cp.returncode == 0 else None
+
+
+def _git_log(repo: Path, since: str, rev: str = "") -> list[tuple[str, str, str]]:
+    """Return [(short_sha, committer_iso, subject)]; rev like 'abc..HEAD' or ''."""
+    args = ["log", "--pretty=format:%h %cI %s", "-n", "5000"]
+    args += [rev] if rev else [f"--since={since}"]
+    out_s = _git_out(repo, args)
+    if out_s is None:
         return []
-    if cp.returncode != 0:
-        return []
-    out: list[tuple[str, str]] = []
-    for ln in cp.stdout.splitlines():
-        ln = ln.strip()
-        if not ln:
-            continue
-        sha, _, rest = ln.partition(" ")
-        out.append((sha, rest))
+    out: list[tuple[str, str, str]] = []
+    for ln in out_s.splitlines():
+        parts = ln.strip().split(" ", 2)
+        if len(parts) >= 2:
+            out.append((parts[0], parts[1], parts[2] if len(parts) > 2 else ""))
     return out
 
-def _git_committer_date(repo: Path, sha: str) -> str | None:
-    try:
-        cp = subprocess.run(
-            ["git", "-C", str(repo), "show", "-s", "--format=%cI", sha],
-            capture_output=True, text=True, timeout=5,
-        )
-    except Exception:
-        return None
-    if cp.returncode != 0:
-        return None
-    return cp.stdout.strip() or None
 
 def collect_git() -> Iterable[dict]:
     cutoff = _cutoff().strftime("%Y-%m-%d")
@@ -162,10 +182,19 @@ def collect_git() -> Iterable[dict]:
     for repo in iter_git_roots([str(Path.home() / "projects"),
                                  str(Path.home() / "code")]):
         project = slug(repo.name)
-        for sha, subject in _git_log(repo, cutoff):
-            ts = _git_committer_date(repo, sha) or ""
-            if not ts:
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sf = STATE_DIR / f"git.{slug(str(repo))}.sha"
+        head = (_git_out(repo, ["rev-parse", "HEAD"], 5) or "").strip()
+        if not head:
+            continue
+        last = _state_read(sf)
+        if last == head:
+            continue
+        commits = _git_log(repo, cutoff, f"{last}..HEAD") if last else []
+        if not commits:
+            commits = _git_log(repo, cutoff)
+        _PENDING_STATE[sf] = head
+        for sha, ts, subject in commits:
+            ts = ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             out.append(event(
                 id=make_id(SRC_GIT, f"{repo}:{sha}"),
                 ts=ts, project=project, kind="commit", status="done",
@@ -178,6 +207,12 @@ def collect_git() -> Iterable[dict]:
 # --- PRs (gh) ---------------------------------------------------------------
 
 def collect_prs() -> Iterable[dict]:
+    pf = STATE_DIR / "gh-prs.ts"
+    try:
+        if time.time() - float(_state_read(pf) or 0) < 3600:
+            return []
+    except Exception:
+        pass
     try:
         cp = subprocess.run(
             ["gh", "search", "prs", "--author", "@me", "--limit", "200",
@@ -188,6 +223,7 @@ def collect_prs() -> Iterable[dict]:
         return []
     if cp.returncode != 0 or not cp.stdout.strip():
         return []
+    _PENDING_STATE[pf] = str(int(time.time()))
     try:
         data = json.loads(cp.stdout)
     except Exception:
@@ -350,15 +386,19 @@ def collect_transcripts() -> Iterable[dict]:
     if not root.exists():
         return
     buckets: dict[tuple[str, str], int] = {}
-    for p in root.rglob("*.jsonl"):
-        try:
-            mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
-        except Exception:
-            continue
-        day = mtime.strftime("%Y-%m-%d")
-        # project = immediate child dir name; stripping leading dashes that come from -encoded paths.
-        proj = slug(p.parts[-2] if len(p.parts) >= 2 else "unknown")
-        buckets[(proj, day)] = buckets.get((proj, day), 0) + 1
+    for dirpath, dirnames, filenames in os.walk(root):
+        proj = None
+        for fn in filenames:
+            if not fn.endswith(".jsonl"):
+                continue
+            try:
+                mt = os.stat(os.path.join(dirpath, fn)).st_mtime
+            except Exception:
+                continue
+            if proj is None:
+                proj = slug(os.path.basename(dirpath) or "unknown")
+            day = datetime.fromtimestamp(mt, tz=timezone.utc).strftime("%Y-%m-%d")
+            buckets[(proj, day)] = buckets.get((proj, day), 0) + 1
     for (proj, day), n in sorted(buckets.items()):
         out.append(event(
             id=make_id(SRC_TRANSCRIPTS, f"{proj}:{day}"),

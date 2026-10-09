@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,11 +57,14 @@ def main(argv: list[str]) -> int:
     by_kind_counts: dict[str, int] = {}
 
     for src_name, fn in collectors:
+        t0 = time.time()
         try:
             events = list(fn())
         except Exception as e:
             print(f"[{src_name}] ERROR: {e}", file=sys.stderr)
             events = []
+        if dry_run:
+            print(f"[timing] {src_name}: {time.time()-t0:.1f}s n={len(events)}", file=sys.stderr)
         by_source_counts[src_name] = len(events)
         for ev in events:
             by_kind_counts[ev["kind"]] = by_kind_counts.get(ev["kind"], 0) + 1
@@ -86,6 +90,8 @@ def main(argv: list[str]) -> int:
         print("# by kind:")
         for k, v in sorted(by_kind_counts.items()):
             print(f"  {k}: {v}")
+        if os.environ.get("WORLD_DRY_RUN_WRITE_STATE"):
+            wps.commit_state()
         return 0
 
     try:
@@ -97,6 +103,7 @@ def main(argv: list[str]) -> int:
         print(f"network failed, queued {len(new_events)} to outbox: {e}", file=sys.stderr)
         return 2
 
+    wps.commit_state()
     # Persist full id set (existing + new).
     lib_world.sent_ids_save(list(sent | {ev["id"] for ev in all_events if ev["id"] not in sent}))
     return 0
