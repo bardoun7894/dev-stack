@@ -13,7 +13,7 @@ while IFS= read -r p; do
   completeness=null; next='"needs-llm"'
   if r="$("$JEV" score "How finished is this app for production?" "0 skeleton" "1 core flows missing" \
         "2 core flows work, gaps remain" "3 feature-complete, polish/defects left" "4 production-ready" \
-        --log finish-apps -s "$p" --min "$MIN" 2>/dev/null)"; then
+        --log finish-apps -s "$p" 2>/dev/null)"; then
     completeness="$(printf '%s' "$r" | jq -c '.score // null' 2>/dev/null || echo null)"
   fi
   if r="$("$JEV" choice "What should happen next for this app?" \
