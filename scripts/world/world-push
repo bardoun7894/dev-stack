@@ -46,6 +46,7 @@ def main(argv: list[str]) -> int:
         ("git",           wps.collect_git),
         ("gh-prs",        wps.collect_prs),
         ("skills",        wps.collect_skills),
+        ("skill-use",     wps.collect_skill_use),
         ("market-swot",   wps.collect_swot),
         ("kb",            wps.collect_kb),
         ("herdr",         wps.collect_herdr),

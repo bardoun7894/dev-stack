@@ -740,6 +740,401 @@ if [ -n "$STUB2_PID" ] && kill -0 "$STUB2_PID" 2>/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
+echo "## 11) canonical_project resolves worktrees to base repo" | tee -a "$LOG"
+# Build a temp "base repo" with a linked worktree, then verify both map to the
+# same canonical project slug.
+CANON_BASE="$(mktemp -d -t canonbase.XXXXXX)"
+mkdir -p "$CANON_BASE/repos/FashionVerse"
+cd "$CANON_BASE/repos/FashionVerse" && git init -q -b main . >/dev/null
+# Need an initial commit so worktrees can be added.
+git -C "$CANON_BASE/repos/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+# Add a worktree under FashionVerse-g-pricing — uses git's worktree machinery so
+# rev-parse --git-common-dir returns the main repo's .git.
+git -C "$CANON_BASE/repos/FashionVerse" worktree add -q -b feat \
+  "$CANON_BASE/repos/FashionVerse-g-pricing" >/dev/null
+
+# Sanity: git-common-dir on the worktree should point at the main repo.
+COMMON_DIR="$(git -C "$CANON_BASE/repos/FashionVerse-g-pricing" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+assert_contains "git-common-dir points to base repo" "/FashionVerse/.git" "$COMMON_DIR"
+
+CANON_OUT="$(PYTHONPATH="$ROOT" python3 - "$CANON_BASE" <<'PY' 2>&1
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import lib_world
+base = pathlib.Path(sys.argv[1])
+main = base / "repos" / "FashionVerse"
+wt   = base / "repos" / "FashionVerse-g-pricing"
+print("MAIN=" + lib_world.canonical_project(main))
+print("WT="   + lib_world.canonical_project(wt))
+# Also exercise a non-git dir → falls back to dir name slug.
+plain = base / "repos" / "Some Cool Project"
+print("PLAIN=" + lib_world.canonical_project(plain))
+# Truly missing path: the *input* is empty/None.
+print("NONE=" + lib_world.canonical_project(None))
+print("EMPTY=" + lib_world.canonical_project(""))
+PY
+)"
+assert_contains "canonical_project: main FashionVerse -> fashionverse" "MAIN=fashionverse" "$CANON_OUT"
+assert_contains "canonical_project: worktree -> fashionverse" "WT=fashionverse" "$CANON_OUT"
+assert_contains "canonical_project: non-git dir falls back to slug" "PLAIN=some-cool-project" "$CANON_OUT"
+assert_contains "canonical_project: None is 'unknown'" "NONE=unknown" "$CANON_OUT"
+assert_contains "canonical_project: empty string is 'unknown'" "EMPTY=unknown" "$CANON_OUT"
+
+# ---------------------------------------------------------------------------
+echo "## 12) session-tasks collector canonicalises the project" | tee -a "$LOG"
+# Build a base repo with a worktree; drop a -tasks.md under the worktree's
+# specs/_session. The collector should emit events with project='fashionverse',
+# not 'fashionverse-g-pricing'.
+TASKS_BASE="$(mktemp -d -t tasksbase.XXXXXX)"
+mkdir -p "$TASKS_BASE/FashionVerse"
+cd "$TASKS_BASE/FashionVerse" && git init -q -b main . >/dev/null
+git -C "$TASKS_BASE/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$TASKS_BASE/FashionVerse" worktree add -q -b feat \
+  "$TASKS_BASE/FashionVerse-g-pricing" >/dev/null
+mkdir -p "$TASKS_BASE/FashionVerse-g-pricing/specs/_session"
+cat > "$TASKS_BASE/FashionVerse-g-pricing/specs/_session/2026-10-05-tasks.md" <<'EOF'
+# Session task log — 2026-10-05
+- [x] 09:30 — Canonical test ✓ 09:55 [green: passes]
+- [ ] 10:00 — Pending canonical
+EOF
+# Also drop one in the main repo to be sure BOTH map to the same project.
+mkdir -p "$TASKS_BASE/FashionVerse/specs/_session"
+cat > "$TASKS_BASE/FashionVerse/specs/_session/2026-10-06-tasks.md" <<'EOF'
+# Session task log — 2026-10-06
+- [x] 09:30 — Main repo task ✓ 09:55 [green: ok]
+EOF
+
+TASKS_OUT="$(PYTHONPATH="$ROOT" python3 - "$TASKS_BASE" <<'PY' 2>&1
+import sys, json, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+import pathlib
+w._SESSION_GLOBS = [pathlib.Path(sys.argv[1])]
+events = list(w.collect_session_tasks())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+assert_contains "session-tasks: worktree task -> project=fashionverse" '"project": "fashionverse"' "$TASKS_OUT"
+assert_contains "session-tasks: worktree task has correct title" "Canonical test" "$TASKS_OUT"
+# Count distinct projects — must be 1.
+DISTINCT_PROJ="$(printf '%s\n' "$TASKS_OUT" | PYTHONPATH="$ROOT" python3 -c '
+import json, sys
+ps = set()
+for ln in sys.stdin:
+    ln = ln.strip()
+    if not ln: continue
+    ps.add(json.loads(ln)["project"])
+print(",".join(sorted(ps)))
+')"
+assert_eq "session-tasks: only one distinct project across main+worktree" "fashionverse" "$DISTINCT_PROJ"
+
+# ---------------------------------------------------------------------------
+echo "## 13) spec-kit collector canonicalises the project" | tee -a "$LOG"
+SPEC_BASE2="$(mktemp -d -t specbase2.XXXXXX)"
+mkdir -p "$SPEC_BASE2/FashionVerse"
+cd "$SPEC_BASE2/FashionVerse" && git init -q -b main . >/dev/null
+git -C "$SPEC_BASE2/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$SPEC_BASE2/FashionVerse" worktree add -q -b feat \
+  "$SPEC_BASE2/FashionVerse-g-pricing" >/dev/null
+mkdir -p "$SPEC_BASE2/FashionVerse-g-pricing/specs/001-x"
+cat > "$SPEC_BASE2/FashionVerse-g-pricing/specs/001-x/tasks.md" <<'EOF'
+# Spec 001-x
+- [x] step one
+- [ ] step two
+EOF
+# Put a worktree-style "copy" under the worktree too (e.g. edunex-0NN-*).
+SPEC_BASE3="$(mktemp -d -t specbase3.XXXXXX)"
+mkdir -p "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0"
+cd "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0" && git init -q -b main . >/dev/null
+git -C "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0" worktree add -q -b feat \
+  "$SPEC_BASE3/edunex-056-rewards" >/dev/null
+mkdir -p "$SPEC_BASE3/edunex-056-rewards/specs/002-y"
+cat > "$SPEC_BASE3/edunex-056-rewards/specs/002-y/tasks.md" <<'EOF'
+# Spec 002-y
+- [x] only step
+EOF
+
+SPEC_OUT="$(PYTHONPATH="$ROOT" python3 - "$SPEC_BASE2" "$SPEC_BASE3" <<'PY' 2>&1
+import sys, json, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+import pathlib
+w._SESSION_GLOBS = [pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])]
+events = list(w.collect_specs())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+assert_contains "spec-kit: FashionVerse worktree -> fashionverse" '"project": "fashionverse"' "$SPEC_OUT"
+assert_contains "spec-kit: edunex-056-rewards worktree -> edunex-golden-master-v1-0-0" '"project": "edunex-golden-master-v1-0-0"' "$SPEC_OUT"
+
+# ---------------------------------------------------------------------------
+echo "## 14) git collector canonicalises per-repo project" | tee -a "$LOG"
+# Build a fresh state dir + a single worktree repo.
+GIT_BASE="$(mktemp -d -t gitbase.XXXXXX)"
+mkdir -p "$GIT_BASE/FashionVerse"
+cd "$GIT_BASE/FashionVerse" && git init -q -b main . >/dev/null
+git -C "$GIT_BASE/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$GIT_BASE/FashionVerse" worktree add -q -b feat \
+  "$GIT_BASE/FashionVerse-g-pricing" >/dev/null
+git -C "$GIT_BASE/FashionVerse-g-pricing" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m "feature commit" >/dev/null
+
+GIT_STATE="$(mktemp -d -t gitstate.XXXXXX)"
+GIT_OUT="$(PYTHONPATH="$ROOT" python3 - "$GIT_BASE" "$GIT_STATE" <<'PY' 2>&1
+import sys, json, pathlib, os
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+import lib_world
+base = pathlib.Path(sys.argv[1])
+os.environ["WORLD_STATE_DIR"] = sys.argv[2]
+# Use isolated state + iterate just the repos under base.
+projects = [base]
+events = list(w.collect_git())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+# The worktree IS its own git root (it has a .git file pointing back). Since
+# it should be EXCLUDED by looks_like_worktree, only the main repo should emit.
+DISTINCT_GIT_PROJ="$(printf '%s\n' "$GIT_OUT" | PYTHONPATH="$ROOT" python3 -c '
+import json, sys
+ps = set()
+for ln in sys.stdin:
+    ln = ln.strip()
+    if not ln: continue
+    ps.add(json.loads(ln)["project"])
+print(",".join(sorted(ps)))
+')"
+assert_contains "git: project=fashionverse" "fashionverse" "$DISTINCT_GIT_PROJ"
+# Crucially: it must NOT emit 'fashionverse-g-pricing' as a project (worktree
+# must be excluded at the iter_git_roots layer).
+if printf '%s\n' "$GIT_OUT" | grep -Fq '"project": "fashionverse-g-pricing"'; then
+  echo "FAIL  git collector emitted worktree as its own project"; fail=$((fail+1))
+else
+  echo "PASS  git collector excluded worktree from emission"; pass=$((pass+1))
+fi
+
+# ---------------------------------------------------------------------------
+echo "## 15) herdr: project from cwd is canonicalised" | tee -a "$LOG"
+HERDR_STATE="$(mktemp -d -t herdrstate.XXXXXX)"
+HERDR_OUT="$(PYTHONPATH="$ROOT" python3 - "$HERDR_STATE" "$TASKS_BASE" <<'PY' 2>&1
+import sys, json, pathlib, os
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+import lib_world
+os.environ["WORLD_STATE_DIR"] = sys.argv[1]
+# Patch herdr to a controlled subprocess that emits a known JSON payload.
+bin_dir = pathlib.Path(sys.argv[1]) / "bin"
+bin_dir.mkdir(parents=True, exist_ok=True)
+fake = bin_dir / "herdr"
+fake.write_text("#!/bin/sh\necho '{\"result\":{\"panes\":[{\"pane_id\":\"p1\",\"terminal_title_stripped\":\"t\",\"cwd\":\"%s\",\"agent\":\"claude\"}]}}'\n" % (sys.argv[2] + "/FashionVerse-g-pricing"))
+fake.chmod(0o755)
+os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH","")
+events = list(w.collect_herdr())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+assert_contains "herdr: cwd in worktree -> project=fashionverse" '"project": "fashionverse"' "$HERDR_OUT"
+
+# ---------------------------------------------------------------------------
+echo "## 16) jdelegate: cwd-derived project is canonicalised" | tee -a "$LOG"
+# jdelegate_runs doesn't itself key on cwd today, so this verifies the
+# canonicalisation helper is wired in for paths the collector does see
+# (e.g. via run.sh). Here we sanity-check the helper alone, since the
+# collector doesn't take a cwd per-run yet.
+JD_CANON_OUT="$(PYTHONPATH="$ROOT" python3 - "$TASKS_BASE" <<'PY' 2>&1
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import lib_world
+base = pathlib.Path(sys.argv[1])
+print("WT=" + lib_world.canonical_project(base / "FashionVerse-g-pricing"))
+print("MAIN=" + lib_world.canonical_project(base / "FashionVerse"))
+PY
+)"
+assert_contains "jdelegate helper: worktree cwd -> fashionverse" "WT=fashionverse" "$JD_CANON_OUT"
+assert_contains "jdelegate helper: main repo -> fashionverse" "MAIN=fashionverse" "$JD_CANON_OUT"
+
+# ---------------------------------------------------------------------------
+echo "## 17) claude-sessions: project from transcript folder is canonicalised" | tee -a "$LOG"
+CS_BASE="$(mktemp -d -t csbase.XXXXXX)"
+# Build a tree mimicking ~/.claude/projects for a worktree-derived project.
+# The collector walks $HOME/.claude/projects/<encoded-folder>/*.jsonl.
+mkdir -p "$CS_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse-g-pricing"
+mkdir -p "$CS_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse"
+mkdir -p "$CS_BASE/.claude/projects/-Users-mohamedbardouni-projects-beldify"
+mkdir -p "$CS_BASE/.claude/projects/-Users-mohamedbardouni"  # home-level (no projects segment)
+mkdir -p "$CS_BASE/.claude/projects/-tmp-scratch"
+# Need a real FashionVerse base repo under the fake $HOME/projects so
+# canonical_project resolves FashionVerse-g-pricing -> fashionverse.
+mkdir -p "$CS_BASE/projects/FashionVerse"
+(cd "$CS_BASE/projects/FashionVerse" && git init -q -b main .) >/dev/null
+git -C "$CS_BASE/projects/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$CS_BASE/projects/FashionVerse" worktree add -q -b feat \
+  "$CS_BASE/projects/FashionVerse-g-pricing" >/dev/null
+# Drop one transcript file in each dir, all touched 'now'.
+touch "$CS_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse-g-pricing/sess1.jsonl"
+touch "$CS_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse/sess2.jsonl"
+touch "$CS_BASE/.claude/projects/-Users-mohamedbardouni-projects-beldify/sess3.jsonl"
+touch "$CS_BASE/.claude/projects/-Users-mohamedbardouni/sess4.jsonl"
+touch "$CS_BASE/.claude/projects/-tmp-scratch/sess5.jsonl"
+
+CS_OUT="$(PYTHONPATH="$ROOT" HOME="$CS_BASE" python3 - <<'PY' 2>&1
+import sys, json, pathlib, os
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+events = list(w.collect_transcripts())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+# Every FashionVerse-g-pricing transcript must collapse into project='fashionverse'.
+assert_contains "claude-sessions: worktree folder -> fashionverse" "fashionverse" "$CS_OUT"
+# beldify stays 'beldify' (not a worktree).
+assert_contains "claude-sessions: non-worktree folder -> beldify" "beldify" "$CS_OUT"
+# Home-level folder (no projects segment) must be 'me' under new rule.
+assert_contains "claude-sessions: home-level folder -> me" "me 2 transcript files" "$CS_OUT"
+
+# ---------------------------------------------------------------------------
+echo "## 18) skill-use collector: incremental, one event per (skill,project,day)" | tee -a "$LOG"
+SK_BASE="$(mktemp -d -t skbase.XXXXXX)"
+SK_STATE="$(mktemp -d -t skstate.XXXXXX)"
+# Fake a transcript dir + a single .jsonl with several Skill tool_use blocks.
+TX_DIR="$SK_BASE/.claude/projects/-Users-mohamedbardouni-projects-beldify"
+mkdir -p "$TX_DIR"
+cat > "$TX_DIR/2026-01-01.jsonl" <<'EOF'
+{"role":"user","content":"hi"}
+{"role":"assistant","content":[{"type":"tool_use","name":"Skill","input":{"skill":"kb-spec"}},{"type":"text","text":"ok"}]}
+{"role":"user","content":"go"}
+{"role":"assistant","content":[{"type":"tool_use","name":"Skill","input":{"skill":"kb-spec"}},{"type":"text","text":"ok"}]}
+{"role":"assistant","content":[{"type":"tool_use","name":"Skill","input":{"skill":"cso"}},{"type":"text","text":"ok"}]}
+{"role":"user","content":"now kb-spec again"}
+{"role":"assistant","content":[{"type":"tool_use","name":"Skill","input":{"skill":"kb-spec"}},{"type":"text","text":"ok"}]}
+EOF
+# Touch an older transcript that is OUTSIDE the 90-day window — should be
+# skipped on first run. (mtime back-dated via utimes.)
+TX_OLD="$SK_BASE/.claude/projects/-Users-mohamedbardouni-projects-beldify/2024-01-01.jsonl"
+echo '{"role":"assistant","content":[{"type":"tool_use","name":"Skill","input":{"skill":"old-skill"}}]}' > "$TX_OLD"
+touch -t 202401011200 "$TX_OLD" 2>/dev/null || true
+
+SK_OUT="$(PYTHONPATH="$ROOT" HOME="$SK_BASE" WORLD_STATE_DIR="$SK_STATE" python3 - <<'PY' 2>&1
+import sys, json, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+events = list(w.collect_skill_use())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+# Project must be 'beldify' (canonicalised from folder name).
+assert_contains "skill-use: project= beldify" '"project": "beldify"' "$SK_OUT"
+# One event per (skill, project, day). 3 kb-spec + 1 cso on 2026-01-01 -> 2 events.
+COUNT_KB_SPEC="$(printf '%s\n' "$SK_OUT" | grep -F '"skill"' | grep -F 'kb-spec' | grep -c 'kb-spec used' || true)"
+COUNT_CSO="$(printf '%s\n' "$SK_OUT" | grep -F '"cso"' | grep -c 'cso used' || true)"
+# Count actual emitted events (one per (skill,project,day) line).
+EMITTED="$(printf '%s\n' "$SK_OUT" | grep -c '"source": "skill-use"' || true)"
+assert_eq "skill-use: 2 unique (skill,project,day) events" "2" "$EMITTED"
+# Title for kb-spec should report '3x'.
+KB_TITLE="$(printf '%s\n' "$SK_OUT" | grep -F 'kb-spec' | head -1 | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["title"])' 2>/dev/null || true)"
+assert_contains "skill-use: kb-spec count in title" "3x" "$KB_TITLE"
+# Old transcript (mtime > 90d) should NOT contribute on first run.
+if printf '%s\n' "$SK_OUT" | grep -Fq "old-skill"; then
+  echo "FAIL  skill-use: stale transcript (>90d) was read on first run"; fail=$((fail+1))
+else
+  echo "PASS  skill-use: stale transcript skipped on first run"; pass=$((pass+1))
+fi
+
+# State file must exist now and remember the offset of the file we scanned.
+CURSOR_FILE="$SK_STATE/skill-scan.json"
+if [ -f "$CURSOR_FILE" ]; then
+  CURSOR_CONTENT="$(cat "$CURSOR_FILE")"
+  assert_contains "skill-use: cursor file remembers scanned file size" "size" "$CURSOR_CONTENT"
+  # A second run with the same transcript should be a no-op (offset = size).
+  SK_OUT2="$(PYTHONPATH="$ROOT" HOME="$SK_BASE" WORLD_STATE_DIR="$SK_STATE" python3 - <<'PY' 2>&1
+import sys, json, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+events = list(w.collect_skill_use())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+  EMITTED2="$(printf '%s\n' "$SK_OUT2" | grep -c '"source": "skill-use"' || true)"
+  assert_eq "skill-use: second run is a no-op (offset = size)" "0" "$EMITTED2"
+else
+  echo "FAIL  skill-use: cursor file not written"; fail=$((fail+1))
+fi
+
+# ---------------------------------------------------------------------------
+echo "## 19) gh-prs: dedupe author + reviewed-by, project canonicalised" | tee -a "$LOG"
+# Stub `gh` in PATH and have it emit one author PR + one reviewed-by PR.
+GH_STUB_DIR="$(mktemp -d -t ghstub.XXXXXX)"
+GH_STATE="$(mktemp -d -t ghstate.XXXXXX)"
+cat > "$GH_STUB_DIR/gh" <<'EOF'
+#!/bin/sh
+# Return 2 PRs — one authored, one reviewed, in different repos (worktree-style
+# "feature/FashionVerse-g-pricing" repo name should canonicalise to 'fashionverse').
+cat <<JSON
+[
+  {"number":1,"title":"authored in FashionVerse-g-pricing","state":"open","repository":{"nameWithOwner":"me/FashionVerse-g-pricing"},"url":"u1","createdAt":"2026-01-01T00:00:00Z","closedAt":null},
+  {"number":2,"title":"reviewed in FashionVerse-p2-gateway","state":"merged","repository":{"nameWithOwner":"me/FashionVerse-p2-gateway"},"url":"u2","createdAt":"2026-01-02T00:00:00Z","closedAt":"2026-01-03T00:00:00Z"},
+  {"number":3,"title":"reviewed in FashionVerse-p2-gateway","state":"open","repository":{"nameWithOwner":"me/FashionVerse-p2-gateway"},"url":"u3","createdAt":"2026-01-04T00:00:00Z","closedAt":null}
+]
+JSON
+EOF
+chmod +x "$GH_STUB_DIR/gh"
+
+GH_OUT="$(PYTHONPATH="$ROOT" PATH="$GH_STUB_DIR:$PATH" WORLD_STATE_DIR="$GH_STATE" python3 - <<'PY' 2>&1
+import sys, json, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+# First call: full discovery (author + reviewed-by, both stubbed). Deduped by
+# (repo, number) so PR #2 and #3 (both reviewed in the same repo) stay distinct.
+events_first = list(w.collect_prs())
+print("# first=" + str(len(events_first)))
+for e in events_first:
+    print(json.dumps(e))
+PY
+)"
+assert_contains "gh-prs: author + reviewed PR both emitted" "fashionverse" "$GH_OUT"
+# Local dedupe: PR #2 + #3 are both in me/FashionVerse-p2-gateway with different
+# numbers — we expect 3 unique events (1 authored, 2 reviewed), not 4.
+if printf '%s' "$GH_OUT" | grep -q 'first=3'; then
+  echo "PASS  gh-prs: local dedupe of author+reviewed yielded 3 unique"; pass=$((pass+1))
+else
+  echo "FAIL  gh-prs: local dedupe of author+reviewed wrong; first line: $(printf '%s' "$GH_OUT" | head -1)"; fail=$((fail+1))
+fi
+
+# Hourly cache: write a fresh timestamp (now) to the state file, then re-call.
+# collect_prs reads the cache on entry, so the second call should be empty.
+GH_OUT2="$(PYTHONPATH="$ROOT" PATH="$GH_STUB_DIR:$PATH" WORLD_STATE_DIR="$GH_STATE" python3 - <<'PY' 2>&1
+import sys, json, pathlib, time
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+# Write the cache as if commit_state() had just been called.
+import os
+state = pathlib.Path(os.environ["WORLD_STATE_DIR"])
+(state / "gh-prs.ts").write_text(str(int(time.time())))
+events_cached = list(w.collect_prs())
+print("# cached=" + str(len(events_cached)))
+PY
+)"
+if printf '%s' "$GH_OUT2" | grep -q 'cached=0'; then
+  echo "PASS  gh-prs: hourly cache hit on second call"; pass=$((pass+1))
+else
+  echo "FAIL  gh-prs: hourly cache did not hit; got: $(printf '%s' "$GH_OUT2" | head -1)"; fail=$((fail+1))
+fi
+
+# ---------------------------------------------------------------------------
 echo | tee -a "$LOG"
 echo "RESULT: pass=$pass fail=$fail" | tee -a "$LOG"
 exit $fail

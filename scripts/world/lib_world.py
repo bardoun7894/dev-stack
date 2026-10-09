@@ -354,17 +354,116 @@ def event(*, id: str, ts: str, project: str, kind: str, status: str, title: str,
 
 WORKTREE_NEEDLES = (".worktrees/", "/.claude/worktrees/")
 
+# Cache for canonical_project: maps absolute dir -> slug of the base repo.
+# Lifetime: per-process; cleared on restart, which is fine — sub-second cost.
+_CANONICAL_CACHE: dict[str, str] = {}
+
+
+def canonical_project(p: Path | str) -> str:
+    """Return the canonical project slug for a directory.
+
+    For git repos (or worktrees), resolves the base repo via
+    `git -C <dir> rev-parse --path-format=absolute --git-common-dir` and
+    returns slug(parent_dir_name). This collapses
+    `~/projects/FashionVerse-g-pricing` -> `fashionverse`,
+    `~/projects/edunex-056-rewards` -> `edunex-golden-master-v1-0-0`, etc.
+
+    For non-git dirs, falls back to slug(dir.name). Returns 'unknown' for
+    empty / nonexistent / non-path inputs.
+    """
+    if p is None or p == "":
+        return "unknown"
+    try:
+        path = Path(p).expanduser()
+    except Exception:
+        return "unknown"
+    if not str(path) or str(path) in ("/", "."):
+        return "unknown"
+    if not path.exists():
+        # The path might be a worktree's checkout whose .git is a file that
+        # git can still resolve — try git first, then bail to slug of name.
+        try:
+            cp = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--path-format=absolute",
+                 "--git-common-dir"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if cp.returncode == 0 and cp.stdout.strip():
+                common = cp.stdout.strip()
+                base = Path(common).parent
+                return slug(base.name) if base.name else "unknown"
+        except Exception:
+            pass
+        if path.name:
+            return slug(path.name) if path.name else "unknown"
+        return "unknown"
+    real = str(path.resolve())
+    if real in _CANONICAL_CACHE:
+        return _CANONICAL_CACHE[real]
+    proj = "unknown"
+    try:
+        cp = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if cp.returncode == 0 and cp.stdout.strip():
+            common = cp.stdout.strip()
+            base = Path(common).parent
+            proj = slug(base.name) if base.name else slug(path.name)
+        else:
+            proj = slug(path.name) if path.name else "unknown"
+    except Exception:
+        proj = slug(path.name) if path.name else "unknown"
+    if proj and proj != "unknown":
+        _CANONICAL_CACHE[real] = proj
+    return proj
+
+
+def project_from_transcript_folder(folder: str) -> str:
+    """Map a ~/.claude/projects/<encoded-path> folder to a project slug.
+
+    Encoded paths look like `-Users-mohamedbardouni-projects-FashionVerse-g-pricing`
+    (leading dash, slashes -> dashes). If the encoded path has no `projects`
+    segment (e.g. `-Users-mohamedbardouni`, `-private-var-...`), the project is
+    'me' (home-level / catch-all). Otherwise we canonicalise the last segment
+    via canonical_project against a reconstructed path under the current home.
+    """
+    name = (folder or "").lstrip("-")
+    if not name:
+        return "me"
+    parts = name.split("-")
+    # No 'projects' segment in the path -> home-level folder -> 'me'.
+    if "projects" not in parts:
+        return "me"
+    try:
+        idx = parts.index("projects")
+    except ValueError:
+        return "me"
+    # Skip a sub-segment right after 'projects' (e.g. scratchpad, private-var).
+    if idx + 1 >= len(parts):
+        return "me"
+    last = parts[idx + 1:]
+    if not last or not any(c.isalnum() for c in last[0]):
+        return "me"
+    reconstructed = Path.home() / "projects" / "-".join(last)
+    return canonical_project(reconstructed)
+
+
 def looks_like_worktree(path: Path) -> bool:
+    """True for *true* worktree paths (the .worktrees/ shadow dirs and the
+    `-wt` suffix convention). Feature copies like `FashionVerse-g-pricing`
+    or `edunex-056-rewards` are NOT considered worktrees here — they are
+    git worktrees of a base repo and should be canonicalised via
+    `canonical_project` rather than skipped.
+    """
     s = str(path)
     for n in WORKTREE_NEEDLES:
         if n in s:
             return True
     parts = s.split("/")
     for p in parts:
-        if p.endswith("-wt") or p.endswith("-wt/") or p.startswith("FashionVerse-"):
-            return True
-        # Conservative: any directory that begins with 'FashionVerse-' anywhere
-        if p.startswith("FashionVerse-"):
+        if p.endswith("-wt") or p.endswith("-wt/"):
             return True
     return False
 

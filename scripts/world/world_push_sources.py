@@ -22,7 +22,8 @@ from typing import Iterable
 from lib_world import (
     HOST, SRC_GIT, SRC_HERDR, SRC_JDELEGATE, SRC_KB, SRC_PR, SRC_SKILLS,
     SRC_SPEC, SRC_SWOT, SRC_TASKS, SRC_TRANSCRIPTS, SRC_TRACK, VALID_KINDS,
-    VALID_STATUSES, event, iter_git_roots, looks_like_worktree, make_id, slug,
+    VALID_STATUSES, canonical_project, event, iter_git_roots,
+    looks_like_worktree, make_id, project_from_transcript_folder, slug,
 )
 from task_lines import parse_session_tasks, parse_spec_tasks
 from jdelegate_runs import iter_runs
@@ -52,12 +53,14 @@ def collect_session_tasks() -> Iterable[dict]:
                 continue
             if looks_like_worktree(p):
                 continue
-            # id path: include a stable project slug.
+            # Canonicalise via git-common-dir so worktrees / feature copies
+            # collapse to the base repo (FashionVerse-g-pricing -> fashionverse).
             try:
                 parent_parts = list(p.relative_to(base).parts)
             except ValueError:
                 parent_parts = p.parts
-            project_slug = parent_parts[0] if parent_parts else "unknown"
+            repo_dir = base / parent_parts[0] if parent_parts else p
+            project_slug = canonical_project(repo_dir)
             try:
                 mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
             except Exception:
@@ -108,7 +111,8 @@ def collect_specs() -> Iterable[dict]:
                 parent_parts = list(spec_path.relative_to(base).parts)
             except ValueError:
                 parent_parts = spec_path.parts
-            project_slug = parent_parts[0] if parent_parts else "unknown"
+            repo_dir = base / parent_parts[0] if parent_parts else spec_path
+            project_slug = canonical_project(repo_dir)
             try:
                 text = spec_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
@@ -181,7 +185,9 @@ def collect_git() -> Iterable[dict]:
     out: list[dict] = []
     for repo in iter_git_roots([str(Path.home() / "projects"),
                                  str(Path.home() / "code")]):
-        project = slug(repo.name)
+        # Use canonical_project so commits from a worktree/feature-copy folder
+        # still report the base repo's project slug.
+        project = canonical_project(repo)
         sf = STATE_DIR / f"git.{slug(str(repo))}.sha"
         head = (_git_out(repo, ["rev-parse", "HEAD"], 5) or "").strip()
         if not head:
@@ -213,27 +219,46 @@ def collect_prs() -> Iterable[dict]:
             return []
     except Exception:
         pass
-    try:
-        cp = subprocess.run(
-            ["gh", "search", "prs", "--author", "@me", "--limit", "200",
-             "--json", "number,title,state,repository,url,createdAt,closedAt"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except Exception:
-        return []
-    if cp.returncode != 0 or not cp.stdout.strip():
-        return []
-    _PENDING_STATE[pf] = str(int(time.time()))
-    try:
-        data = json.loads(cp.stdout)
-    except Exception:
-        return []
+    def _run(query_flag: str) -> list[dict]:
+        try:
+            cp = subprocess.run(
+                ["gh", "search", "prs", query_flag, "@me", "--limit", "1000",
+                 "--json", "number,title,state,repository,url,createdAt,closedAt"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except Exception:
+            return []
+        if cp.returncode != 0 or not cp.stdout.strip():
+            return []
+        try:
+            return json.loads(cp.stdout)
+        except Exception:
+            return []
+    seen: set[tuple[str, str]] = set()  # (repo, number)
     out: list[dict] = []
-    for pr in data:
-        state = (pr.get("state") or "").lower()
+    # Author first, then reviewed-by. The server dedupes by id; we also
+    # dedupe locally so a PR that is BOTH authored and reviewed doesn't get
+    # two events.
+    for pr in _run("--author") + _run("--reviewed-by"):
         repo = (pr.get("repository") or {}).get("nameWithOwner") or "unknown/unknown"
-        proj = slug(repo.split("/", 1)[1] if "/" in repo else repo)
-        title = pr.get("title") or f"PR #{pr.get('number')}"
+        num = pr.get("number")
+        if num is None:
+            continue
+        key = (repo, str(num))
+        if key in seen:
+            continue
+        seen.add(key)
+        state = (pr.get("state") or "").lower()
+        # The repo name on `gh search prs` can be a worktree-style feature copy
+        # (e.g. "FashionVerse-g-pricing"). Canonicalise the project via git so
+        # such PRs collapse back to "fashionverse".
+        repo_short = repo.split("/", 1)[1] if "/" in repo else repo
+        canonical_dir = Path.home() / "projects" / repo_short
+        if canonical_dir.exists():
+            proj = canonical_project(canonical_dir)
+        else:
+            proj = slug(repo_short)
+        title = pr.get("title") or f"PR #{num}"
         ts = pr.get("createdAt") or pr.get("closedAt") or ""
         if state == "merged":
             kind, status = "merge", "done"
@@ -244,12 +269,14 @@ def collect_prs() -> Iterable[dict]:
         else:
             kind, status = "pr", "pending"
         out.append(event(
-            id=make_id(SRC_PR, f"{repo}#{pr.get('number')}"),
+            id=make_id(SRC_PR, f"{repo}#{num}"),
             ts=ts, project=proj, kind=kind, status=status,
-            title=title, ref=str(pr.get("number") or ""),
+            title=title, ref=str(num),
             url=pr.get("url") or "", actor="owner",
             source=SRC_PR,
         ))
+    if out:
+        _PENDING_STATE[pf] = str(int(time.time()))
     return out
 
 
@@ -282,6 +309,181 @@ def collect_skills() -> Iterable[dict]:
                 actor="owner", model="", source=SRC_SKILLS,
             ))
     return out
+
+
+# --- skill USE (transcripts) ------------------------------------------------
+# Scans ~/.claude/projects/**/*.jsonl for tool_use blocks with name 'Skill',
+# reads ONLY input.skill, and emits one kind=skill event per (skill, project, day)
+# with a "<skill> used Nx" title. Stream-friendly: never reads content as a
+# whole, never stores transcript text, first run limited to files modified
+# in the last 90 days.
+
+SRC_SKILL_USE = "skill-use"
+_SKILL_TOOL_RE = re.compile(r'"name"\s*:\s*"Skill"')
+_SKILL_FIELD_RE = re.compile(r'"skill"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"')
+
+def _scan_file_for_skill_use(path: Path) -> list[tuple[str, str]]:
+    """Return [(skill, day)] pairs found in `path` by streaming line-by-line.
+
+    The file may be up to ~12 GB; we never load it whole. We skip lines that
+    don't contain the literal 'Skill' string (the tool name) so the cost of
+    the scan is roughly proportional to the number of tool_use blocks, not
+    the size of the file.
+    """
+    out: list[tuple[str, str]] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                if '"Skill"' not in ln:
+                    continue
+                # Cheap filter: only lines with the tool_use shape are interesting.
+                if not _SKILL_TOOL_RE.search(ln):
+                    continue
+                m = _SKILL_FIELD_RE.search(ln)
+                if not m:
+                    continue
+                skill = m.group(1)
+                # Day is taken from the file's mtime — the file's mtime matches
+                # the most recent activity in it, which is the most actionable
+                # day for the skill-use signal. The id uses the same day.
+                try:
+                    mt = path.stat().st_mtime
+                except Exception:
+                    continue
+                day = datetime.fromtimestamp(mt, tz=timezone.utc).strftime("%Y-%m-%d")
+                out.append((skill, day))
+    except (OSError, UnicodeDecodeError):
+        return out
+    return out
+
+
+def collect_skill_use() -> Iterable[dict]:
+    """Emit one event per (skill, project, day) tuple found in transcripts.
+
+    - Streams line-by-line; never holds the file in memory.
+    - Skips lines that don't contain the literal '"Skill"' before doing any work.
+    - First run: only files modified in the last 90 days. Later runs resume
+      from a per-file (size, offset) cursor in ~/.local/state/world/skill-scan.json.
+    - Reads ONLY `input.skill` from each matched tool_use block.
+    """
+    root = Path.home() / ".claude" / "projects"
+    if not root.exists():
+        return []
+    cursor_path = STATE_DIR / "skill-scan.json"
+    try:
+        cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {}
+    except Exception:
+        cursor = {}
+    if not isinstance(cursor, dict):
+        cursor = {}
+    # tracks last-seen (size, mtime) per file path (str).
+    files: dict[str, dict] = cursor.get("files", {}) or {}
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=90)).timestamp()
+
+    # Counters keyed by (skill, project, day). The day comes from the file's
+    # mtime at scan time.
+    counts: dict[tuple[str, str, str], int] = {}
+    affected_files: set[str] = set()
+
+    jsonl_paths: list[Path] = []
+    for dirpath, _dirs, filenames in os.walk(root):
+        for fn in filenames:
+            if not fn.endswith(".jsonl"):
+                continue
+            p = Path(dirpath) / fn
+            jsonl_paths.append(p)
+
+    for p in jsonl_paths:
+        spath = str(p)
+        # Fast path: if the cursor already records this file at exactly the
+        # same mtime, we can trust the previous scan and skip stat() entirely.
+        # macOS stat() on a cold cache over thousands of files is the dominant
+        # cost on the second run.
+        prev_quick = files.get(spath)
+        if prev_quick and isinstance(prev_quick, dict):
+            try:
+                if abs(float(prev_quick.get("mtime", 0.0)) - p.stat().st_mtime) < 1e-3:
+                    continue
+            except OSError:
+                pass
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        size = st.st_size
+        mtime = st.st_mtime
+        prev = files.get(spath) or {}
+        prev_size = int(prev.get("size", 0)) if isinstance(prev, dict) else 0
+        prev_mtime = float(prev.get("mtime", 0.0)) if isinstance(prev, dict) else 0.0
+        # 90-day window: if the file is outside it AND we have no record of
+        # it (or its record also shows it's stale), skip it. We never want
+        # the skills guild to read a 12 GB transcript that's been quiet for
+        # months. Files we already tracked are also skipped once their
+        # mtime is stale: re-scanning a stale file is wasted work.
+        is_stale = mtime < cutoff_ts
+        if is_stale and (not prev or prev_mtime < cutoff_ts):
+            files[spath] = {"size": size, "mtime": mtime}
+            continue
+        # If the file shrank (rotated/truncated), re-read from the start.
+        start = 0 if size < prev_size else prev_size
+        # If the mtime went backwards, the file was rewritten — re-read.
+        if mtime + 1e-3 < prev_mtime:
+            start = 0
+        # Project from the parent folder name (no transcript content needed).
+        proj = project_from_transcript_folder(p.parent.name)
+        if start == 0:
+            pairs = _scan_file_for_skill_use(p)
+        else:
+            # Only read the appended tail. Skip if the appended region is empty.
+            if size == start:
+                pairs = []
+            else:
+                pairs = []
+                try:
+                    with p.open("rb") as fh:
+                        fh.seek(start)
+                        for raw in fh:
+                            try:
+                                ln = raw.decode("utf-8", errors="replace")
+                            except Exception:
+                                continue
+                            if '"Skill"' not in ln:
+                                continue
+                            if not _SKILL_TOOL_RE.search(ln):
+                                continue
+                            m = _SKILL_FIELD_RE.search(ln)
+                            if not m:
+                                continue
+                            skill = m.group(1)
+                            day = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+                            pairs.append((skill, day))
+                except OSError:
+                    pairs = []
+        if pairs:
+            affected_files.add(spath)
+        for skill, day in pairs:
+            counts[(skill, proj, day)] = counts.get((skill, proj, day), 0) + 1
+        files[spath] = {"size": size, "mtime": mtime}
+
+    # Persist cursor only when at least one file changed; this way an empty
+    # re-run still records the file as scanned.
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        cursor_path.write_text(json.dumps({"files": files}))
+    except Exception:
+        pass
+
+    out: list[dict] = []
+    for (skill, proj, day), n in sorted(counts.items()):
+        out.append(event(
+            id=make_id(SRC_SKILL_USE, f"{skill}:{proj}:{day}"),
+            ts=f"{day}T00:00:00Z",
+            project=proj, kind="skill", status="done",
+            title=f"{skill} used {n}x", ref="", url="",
+            actor="owner", model="", source=SRC_SKILL_USE,
+        ))
+    return out
+
 
 
 # --- market-swot ------------------------------------------------------------
@@ -364,7 +566,15 @@ def collect_herdr() -> Iterable[dict]:
         title = (p.get("terminal_title_stripped") or p.get("title") or "").strip() or "worker"
         cwd = p.get("cwd") or ""
         status = "running"
-        proj = slug(Path(cwd).name) if cwd else "herdr"
+        # Canonicalise the cwd against git so workers in a worktree / feature
+        # copy collapse to the base repo (e.g. FashionVerse-g-pricing ->
+        # fashionverse). Falls back to slug(cwd.name) for non-git dirs.
+        if cwd:
+            proj = canonical_project(cwd)
+            if proj == "unknown":
+                proj = slug(Path(cwd).name)
+        else:
+            proj = "herdr"
         # Worker pane = has a foreground_cwd of a real project.
         agent = p.get("agent") or "claude"
         out.append(event(
@@ -396,7 +606,10 @@ def collect_transcripts() -> Iterable[dict]:
             except Exception:
                 continue
             if proj is None:
-                proj = slug(os.path.basename(dirpath) or "unknown")
+                # Project slug comes from the folder name itself (no transcript
+                # content is read), canonicalised to map worktree-derived
+                # folders back to the base repo.
+                proj = project_from_transcript_folder(os.path.basename(dirpath))
             day = datetime.fromtimestamp(mt, tz=timezone.utc).strftime("%Y-%m-%d")
             buckets[(proj, day)] = buckets.get((proj, day), 0) + 1
     for (proj, day), n in sorted(buckets.items()):
@@ -414,7 +627,7 @@ def collect_transcripts() -> Iterable[dict]:
 
 SOURCES = [
     SRC_TASKS, SRC_SPEC, SRC_JDELEGATE, SRC_GIT, SRC_PR,
-    SRC_SKILLS, SRC_SWOT, SRC_KB, SRC_HERDR, SRC_TRANSCRIPTS,
+    SRC_SKILLS, SRC_SKILL_USE, SRC_SWOT, SRC_KB, SRC_HERDR, SRC_TRANSCRIPTS,
 ]
 
 def heartbeat_counts(events_by_source: dict[str, list[dict]]) -> list[dict]:
