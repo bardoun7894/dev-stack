@@ -294,6 +294,23 @@ out="$(run_script --rebaseline)"
 out="$(run_script)"
 echo "$out" | grep -q "chkrootkit: /usr/bin/x" && bad "chkrootkit-rebaseline" "rebaseline did not absorb: $out" || ok "chkrootkit-rebaseline"
 
+# ---- 9a. chkrootkit: baseline written in en_US order (mixed case/underscore),
+#       current list in another order; no comm sort warnings, only new paths ----
+CL="$T/state/locale"; mkdir -p "$CL"
+# en_US collation: punctuation ignored, case-insensitive first -> alpha, _beta, Zed
+printf '/usr/lib/alpha\n/usr/lib/_beta\n/usr/lib/Zed\n' > "$CL/chkrootkit.baseline"
+printf 'WARNING: suspicious\n/usr/lib/_beta\n/usr/lib/alpha\n/usr/lib/Zed\n/usr/lib/Newone\n/usr/lib/_new2\n' > "$LOGD"
+stub_install
+lout="$(ENV_FILE="$ENV_FILE" STATE_DIR="$CL" BACKUP_DIRS="$T/backups" \
+  NGINX_CONF_DIR="$T/nginx/sites-enabled" VAR_LOG_CHKROOTKIT="$LOGD" \
+  CRON_LOG_DIR="$T/cron-targets" HEALTH_PY_LOG="$PY_LOG" \
+  bash "$SCRIPT" --dry-run 2>"$CL/stderr")"
+grep -q "not in sorted order" "$CL/stderr" && bad "chkrootkit-locale-warn" "comm warned: $(cat "$CL/stderr")" || ok "chkrootkit-locale-warn"
+[ "$(echo "$lout" | grep -c '^chkrootkit:\|chkrootkit: /usr/lib/')" = "2" ] \
+  && echo "$lout" | grep -q "chkrootkit: /usr/lib/Newone$" && echo "$lout" | grep -q "chkrootkit: /usr/lib/_new2$" \
+  && ! echo "$lout" | grep -qE "chkrootkit: /usr/lib/(alpha|_beta|Zed)$" \
+  && ok "chkrootkit-locale-new-only" || bad "chkrootkit-locale-new-only" "unexpected: $lout"
+
 # ---- 9b. docker: down restart-policy container, unbound ports, clean ----
 HEALTH_STUB_DOCKER_ALL="obs-n8n
 web-ok
