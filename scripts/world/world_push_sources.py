@@ -42,6 +42,37 @@ _SESSION_GLOBS = [
     Path.home() / "code",
 ]
 
+def _is_git_worktree(dirpath: Path) -> bool:
+    """True when `dirpath` is a git worktree (not the main checkout).
+
+    Implementation: a worktree has `--git-common-dir` pointing to a path
+    whose resolved location is OUTSIDE the current dirpath, while its
+    `--git-dir` resolves INTO dirpath. (The main checkout has both equal.)
+    """
+    try:
+        cp = subprocess.run(
+            ["git", "-C", str(dirpath), "rev-parse",
+             "--path-format=absolute",
+             "--git-common-dir", "--git-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    if cp.returncode != 0:
+        return False
+    lines = cp.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return False
+    common = lines[0].strip()
+    gitd = lines[1].strip()
+    if not common or not gitd:
+        return False
+    try:
+        return Path(common).resolve() != Path(gitd).resolve()
+    except Exception:
+        return False
+
+
 def collect_session_tasks() -> Iterable[dict]:
     cutoff = _cutoff()
     out: list[dict] = []
@@ -60,6 +91,12 @@ def collect_session_tasks() -> Iterable[dict]:
             except ValueError:
                 parent_parts = p.parts
             repo_dir = base / parent_parts[0] if parent_parts else p
+            # Skip worktree copies: only scan files inside the main checkout of
+            # a logical repo. A git worktree of FashionVerse (e.g.
+            # FashionVerse-g-pricing) has --git-common-dir pointing back to the
+            # main checkout's .git.
+            if _is_git_worktree(repo_dir):
+                continue
             project_slug = canonical_project(repo_dir)
             try:
                 mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
@@ -89,11 +126,15 @@ def _spec_root(base: Path) -> Iterable[Path]:
             continue
         if looks_like_worktree(repo_dir):
             continue
+        if _is_git_worktree(repo_dir):
+            continue
         spec_dir = repo_dir / "specs"
         if not spec_dir.exists():
             continue
         for p in sorted(spec_dir.glob("*/tasks.md")):
             if looks_like_worktree(p):
+                continue
+            if _is_git_worktree(p.parent.parent):
                 continue
             parts = p.parts
             if "_session" in parts:
@@ -180,29 +221,75 @@ def _git_log(repo: Path, since: str, rev: str = "") -> list[tuple[str, str, str]
     return out
 
 
-def collect_git() -> Iterable[dict]:
+def _resolve_canonical_repo(repo: Path) -> tuple[Path, str] | None:
+    """Return (canonical_repo_dir, project_slug) for a discovered git root.
+
+    The canonical repo directory is the main worktree (parent of the resolved
+    `--git-common-dir`). That is the single source of truth for one logical
+    repository: every worktree of the same repo shares --git-common-dir and we
+    only want to scan commits ONCE.
+    """
+    try:
+        cp = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    if cp.returncode != 0 or not cp.stdout.strip():
+        return None
+    common = Path(cp.stdout.strip())
+    if common.name != ".git":
+        return None
+    canonical_dir = common.parent
+    if not canonical_dir.exists():
+        return None
+    return canonical_dir, slug(canonical_dir.name)
+
+
+def collect_git(roots: list[Path] | None = None) -> Iterable[dict]:
     cutoff = _cutoff().strftime("%Y-%m-%d")
+    if roots is None:
+        scan_roots = [Path.home() / "projects", Path.home() / "code"]
+    else:
+        scan_roots = list(roots)
     out: list[dict] = []
-    for repo in iter_git_roots([str(Path.home() / "projects"),
-                                 str(Path.home() / "code")]):
-        # Use canonical_project so commits from a worktree/feature-copy folder
-        # still report the base repo's project slug.
-        project = canonical_project(repo)
-        sf = STATE_DIR / f"git.{slug(str(repo))}.sha"
-        head = (_git_out(repo, ["rev-parse", "HEAD"], 5) or "").strip()
+    # Map canonical (real path of the main worktree) -> list of discovered roots.
+    by_canonical: dict[str, dict] = {}
+    for repo in iter_git_roots([str(r) for r in scan_roots]):
+        resolved = _resolve_canonical_repo(repo)
+        if not resolved:
+            continue
+        canonical_dir, project = resolved
+        key = str(canonical_dir.resolve())
+        bucket = by_canonical.setdefault(
+            key, {"canonical": canonical_dir, "project": project,
+                  "roots": []},
+        )
+        # Trust the first main-checkout discovery; later worktrees reach the
+        # same canonical and should not flip project names.
+        if len(str(repo)) < len(str(bucket["canonical"])):
+            bucket["canonical"] = repo
+        bucket["roots"].append(repo)
+    for bucket in by_canonical.values():
+        canonical_dir: Path = bucket["canonical"]
+        project: str = bucket["project"]
+        sf = STATE_DIR / f"git.{project}.sha"
+        head = (_git_out(canonical_dir, ["rev-parse", "HEAD"], 5) or "").strip()
         if not head:
             continue
         last = _state_read(sf)
         if last == head:
             continue
-        commits = _git_log(repo, cutoff, f"{last}..HEAD") if last else []
+        commits = _git_log(canonical_dir, cutoff, f"{last}..HEAD") if last else []
         if not commits:
-            commits = _git_log(repo, cutoff)
+            commits = _git_log(canonical_dir, cutoff)
         _PENDING_STATE[sf] = head
         for sha, ts, subject in commits:
             ts = ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             out.append(event(
-                id=make_id(SRC_GIT, f"{repo}:{sha}"),
+                id=make_id(SRC_GIT, f"{project}:{sha}"),
                 ts=ts, project=project, kind="commit", status="done",
                 title=subject, ref=sha, url="", actor="owner",
                 source=SRC_GIT,
@@ -616,7 +703,7 @@ def collect_transcripts() -> Iterable[dict]:
         out.append(event(
             id=make_id(SRC_TRANSCRIPTS, f"{proj}:{day}"),
             ts=f"{day}T00:00:00Z",
-            project="claude-sessions", kind="status", status="up",
+            project=proj, kind="status", status="up",
             title=f"{proj} {n} transcript files", ref="", url="",
             actor="owner", model="", source=SRC_TRANSCRIPTS,
         ))

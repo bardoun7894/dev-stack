@@ -18,6 +18,10 @@ cd "$ROOT"
 LOG="${WORLD_TEST_LOG:-/tmp/world-mac-test.log}"
 WORLD_STATE_DIR="$(mktemp -d -t worldstate.XXXXXX)"
 export WORLD_STATE_DIR
+# Allow fixture git commits on `main`; the global dev-stack pre-commit hook
+# would otherwise block them. Test fixtures build throwaway repos just to
+# exercise collectors; their commits have no further reach.
+export ALLOW_MAIN_COMMIT=1
 TRACK="$ROOT/track"
 WORLD_PUSH="$ROOT/world-push"
 
@@ -783,9 +787,10 @@ assert_contains "canonical_project: empty string is 'unknown'" "EMPTY=unknown" "
 
 # ---------------------------------------------------------------------------
 echo "## 12) session-tasks collector canonicalises the project" | tee -a "$LOG"
-# Build a base repo with a worktree; drop a -tasks.md under the worktree's
-# specs/_session. The collector should emit events with project='fashionverse',
-# not 'fashionverse-g-pricing'.
+# Build a base repo with a worktree; drop a -tasks.md in BOTH the main
+# checkout and the worktree. The collector must emit from each logical file
+# ONCE: only the main-checkout copy is read (the worktree copy is skipped).
+# The project on every emitted event must be the canonical 'fashionverse'.
 TASKS_BASE="$(mktemp -d -t tasksbase.XXXXXX)"
 mkdir -p "$TASKS_BASE/FashionVerse"
 cd "$TASKS_BASE/FashionVerse" && git init -q -b main . >/dev/null
@@ -799,7 +804,8 @@ cat > "$TASKS_BASE/FashionVerse-g-pricing/specs/_session/2026-10-05-tasks.md" <<
 - [x] 09:30 — Canonical test ✓ 09:55 [green: passes]
 - [ ] 10:00 — Pending canonical
 EOF
-# Also drop one in the main repo to be sure BOTH map to the same project.
+# Main checkout also has a tasks file. Collector should emit from THIS one
+# only — the worktree copy is skipped.
 mkdir -p "$TASKS_BASE/FashionVerse/specs/_session"
 cat > "$TASKS_BASE/FashionVerse/specs/_session/2026-10-06-tasks.md" <<'EOF'
 # Session task log — 2026-10-06
@@ -817,8 +823,14 @@ for e in events:
     print(json.dumps(e))
 PY
 )"
-assert_contains "session-tasks: worktree task -> project=fashionverse" '"project": "fashionverse"' "$TASKS_OUT"
-assert_contains "session-tasks: worktree task has correct title" "Canonical test" "$TASKS_OUT"
+assert_contains "session-tasks: main-checkout task -> project=fashionverse" '"project": "fashionverse"' "$TASKS_OUT"
+assert_contains "session-tasks: main-checkout task has correct title" "Main repo task" "$TASKS_OUT"
+# Worktree copy must NOT be emitted.
+if printf '%s' "$TASKS_OUT" | grep -Fq "Canonical test"; then
+  echo "FAIL  worktree copy of session-tasks leaked"; fail=$((fail+1))
+else
+  echo "PASS  worktree copy of session-tasks skipped"; pass=$((pass+1))
+fi
 # Count distinct projects — must be 1.
 DISTINCT_PROJ="$(printf '%s\n' "$TASKS_OUT" | PYTHONPATH="$ROOT" python3 -c '
 import json, sys
@@ -833,6 +845,9 @@ assert_eq "session-tasks: only one distinct project across main+worktree" "fashi
 
 # ---------------------------------------------------------------------------
 echo "## 13) spec-kit collector canonicalises the project" | tee -a "$LOG"
+# Two-orbiter scenario: a real git repo with a worktree. Spec-kit must read
+# the spec files from the MAIN checkout only; the worktree copies are
+# skipped. Project must equal the canonical main repo slug.
 SPEC_BASE2="$(mktemp -d -t specbase2.XXXXXX)"
 mkdir -p "$SPEC_BASE2/FashionVerse"
 cd "$SPEC_BASE2/FashionVerse" && git init -q -b main . >/dev/null
@@ -840,13 +855,19 @@ git -C "$SPEC_BASE2/FashionVerse" -c user.name=t -c user.email=t@t \
   commit --allow-empty -q -m init >/dev/null
 git -C "$SPEC_BASE2/FashionVerse" worktree add -q -b feat \
   "$SPEC_BASE2/FashionVerse-g-pricing" >/dev/null
+mkdir -p "$SPEC_BASE2/FashionVerse/specs/001-x"
 mkdir -p "$SPEC_BASE2/FashionVerse-g-pricing/specs/001-x"
-cat > "$SPEC_BASE2/FashionVerse-g-pricing/specs/001-x/tasks.md" <<'EOF'
+cat > "$SPEC_BASE2/FashionVerse/specs/001-x/tasks.md" <<'EOF'
 # Spec 001-x
 - [x] step one
 - [ ] step two
 EOF
-# Put a worktree-style "copy" under the worktree too (e.g. edunex-0NN-*).
+cat > "$SPEC_BASE2/FashionVerse-g-pricing/specs/001-x/tasks.md" <<'EOF'
+# Spec 001-x (worktree copy)
+- [x] step one
+- [ ] step two
+EOF
+# Second repo: EDUNEX main + edunex-056-rewards worktree (no main spec file).
 SPEC_BASE3="$(mktemp -d -t specbase3.XXXXXX)"
 mkdir -p "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0"
 cd "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0" && git init -q -b main . >/dev/null
@@ -854,9 +875,14 @@ git -C "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0" -c user.name=t -c user.email=t@
   commit --allow-empty -q -m init >/dev/null
 git -C "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0" worktree add -q -b feat \
   "$SPEC_BASE3/edunex-056-rewards" >/dev/null
+mkdir -p "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0/specs/002-y"
 mkdir -p "$SPEC_BASE3/edunex-056-rewards/specs/002-y"
-cat > "$SPEC_BASE3/edunex-056-rewards/specs/002-y/tasks.md" <<'EOF'
+cat > "$SPEC_BASE3/EDUNEX_GOLDEN_MASTER_v1.0.0/specs/002-y/tasks.md" <<'EOF'
 # Spec 002-y
+- [x] only step
+EOF
+cat > "$SPEC_BASE3/edunex-056-rewards/specs/002-y/tasks.md" <<'EOF'
+# Spec 002-y (worktree copy)
 - [x] only step
 EOF
 
@@ -871,8 +897,11 @@ for e in events:
     print(json.dumps(e))
 PY
 )"
-assert_contains "spec-kit: FashionVerse worktree -> fashionverse" '"project": "fashionverse"' "$SPEC_OUT"
-assert_contains "spec-kit: edunex-056-rewards worktree -> edunex-golden-master-v1-0-0" '"project": "edunex-golden-master-v1-0-0"' "$SPEC_OUT"
+assert_contains "spec-kit: FashionVerse main -> fashionverse" '"project": "fashionverse"' "$SPEC_OUT"
+assert_contains "spec-kit: edunex main -> edunex-golden-master-v1-0-0" '"project": "edunex-golden-master-v1-0-0"' "$SPEC_OUT"
+# Worktree copies must be skipped.
+SPEC_WORKTREE_LEAK="$(printf '%s' "$SPEC_OUT" | grep -c 'worktree copy' || true)"
+assert_eq "spec-kit: worktree copy was skipped" "0" "$SPEC_WORKTREE_LEAK"
 
 # ---------------------------------------------------------------------------
 echo "## 14) git collector canonicalises per-repo project" | tee -a "$LOG"
@@ -896,8 +925,7 @@ import lib_world
 base = pathlib.Path(sys.argv[1])
 os.environ["WORLD_STATE_DIR"] = sys.argv[2]
 # Use isolated state + iterate just the repos under base.
-projects = [base]
-events = list(w.collect_git())
+events = list(w.collect_git(roots=[base]))
 for e in events:
     print(json.dumps(e))
 PY
@@ -1133,6 +1161,225 @@ if printf '%s' "$GH_OUT2" | grep -q 'cached=0'; then
 else
   echo "FAIL  gh-prs: hourly cache did not hit; got: $(printf '%s' "$GH_OUT2" | head -1)"; fail=$((fail+1))
 fi
+
+# ---------------------------------------------------------------------------
+echo "## 20) REGRESSION: git collector emits each sha once across worktrees" | tee -a "$LOG"
+# Two git worktrees of the same repo share commits. The collector must run
+# `git log` ONCE per git-common-dir so each SHA is seen exactly once.
+WT_GIT_BASE="$(mktemp -d -t wtgit.XXXXXX)"
+WT_GIT_STATE="$(mktemp -d -t wtgitstate.XXXXXX)"
+mkdir -p "$WT_GIT_BASE/FashionVerse"
+(cd "$WT_GIT_BASE/FashionVerse" && git init -q -b main .) >/dev/null
+git -C "$WT_GIT_BASE/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$WT_GIT_BASE/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m "second commit" >/dev/null
+git -C "$WT_GIT_BASE/FashionVerse" worktree add -q -b feat \
+  "$WT_GIT_BASE/FashionVerse-g-pricing" >/dev/null
+git -C "$WT_GIT_BASE/FashionVerse-g-pricing" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m "feature commit" >/dev/null
+
+WT_GIT_OUT="$(WORLD_STATE_DIR="$WT_GIT_STATE" PYTHONPATH="$ROOT" _WORLD_ROOTS="$WT_GIT_BASE" python3 - <<'PY' 2>&1
+import sys, json, os, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+roots = [pathlib.Path(p) for p in os.environ["_WORLD_ROOTS"].split(os.pathsep)]
+events = list(w.collect_git(roots=roots))
+# Persist the per-repo HEAD cursor so we can verify the state file path.
+w.commit_state()
+print("# events=" + str(len(events)))
+seen_shas = []
+seen_ids = []
+seen_projects = []
+for e in events:
+    seen_shas.append(e["ref"])
+    seen_ids.append(e["id"])
+    seen_projects.append(e["project"])
+print("# shas=" + ",".join(seen_shas))
+print("# ids=" + ",".join(seen_ids))
+print("# projects=" + ",".join(sorted(set(seen_projects))))
+print("# duplicates=" + str(len(seen_shas) - len(set(seen_shas))))
+PY
+)"
+
+echo "$WT_GIT_OUT" | tee -a "$LOG" >/dev/null
+# Each unique sha emitted once, even though there are two worktrees.
+DUPES="$(printf '%s' "$WT_GIT_OUT" | python3 -c '
+import sys
+for ln in sys.stdin:
+    if ln.startswith("# duplicates="):
+        print(ln.split("=", 1)[1].strip())
+        break
+')"
+WT_EVENTS="$(printf '%s' "$WT_GIT_OUT" | python3 -c '
+import sys
+for ln in sys.stdin:
+    if ln.startswith("# events="):
+        print(ln.split("=", 1)[1].strip())
+        break
+')"
+assert_eq "git: no duplicate shas across worktrees" "0" "$DUPES"
+# ID uniqueness: every emitted event must have a unique id. Compare the
+# emitted event count to the deduped id count.
+assert_contains "git: emitted events > 0" "events>0" "events>0"
+if [ "$WT_EVENTS" -gt 0 ] 2>/dev/null; then
+  WT_IDS="$(printf '%s' "$WT_GIT_OUT" | python3 -c '
+import sys
+for ln in sys.stdin:
+    if ln.startswith("# ids="):
+        print(ln.split("=", 1)[1].strip())
+        break
+')"
+  WT_IDS_DEDUP="$(printf '%s' "$WT_IDS" | tr ',' '\n' | awk 'NF' | sort -u | wc -l | tr -d ' ')"
+  assert_eq "git: unique id count == total emitted count" "$WT_EVENTS" "$WT_IDS_DEDUP"
+fi
+
+# All projects must be a single canonical project (fashionverse). The git root
+# key in `git.<slug>.sha` is the COMMON-DIR state, not the worktree's path.
+WT_PROJECTS="$(printf '%s' "$WT_GIT_OUT" | python3 -c '
+import sys
+for ln in sys.stdin:
+    if ln.startswith("# projects="):
+        print(ln.split("=", 1)[1].strip())
+        break
+')"
+assert_eq "git: only one canonical project across worktrees" "fashionverse" "$WT_PROJECTS"
+
+# The git state file MUST be keyed by git-common-dir's parent (fashionverse),
+# not by fashionverse-g-pricing (which would be the worktree dir).
+SHA_STATE="$(ls "$WT_GIT_STATE"/git.*.sha 2>/dev/null | head -1)"
+if [ -n "$SHA_STATE" ] && printf '%s' "$SHA_STATE" | grep -Eq 'git\.fashionverse-g-pricing\.sha'; then
+  echo "FAIL  git state file keyed by worktree dir (not canonical)"; fail=$((fail+1))
+elif [ -n "$SHA_STATE" ]; then
+  echo "PASS  git state file keyed by canonical main repo dir"; pass=$((pass+1))
+else
+  echo "FAIL  git state file missing"; fail=$((fail+1))
+fi
+
+# ---------------------------------------------------------------------------
+echo "## 21) REGRESSION: session-tasks + spec-kit skip worktree copies once" | tee -a "$LOG"
+# Build a repo with a SECOND git worktree (FashionVerse-g-pricing) and drop the
+# SAME specs/_session/tasks.md under both. The collector must emit each task
+# line EXACTLY ONCE (from the main checkout) — even though its current
+# looks_like_worktree helper doesn't match FashionVerse-g-pricing.
+TWT_BASE="$(mktemp -d -t twt.XXXXXX)"
+mkdir -p "$TWT_BASE/FashionVerse"
+(cd "$TWT_BASE/FashionVerse" && git init -q -b main .) >/dev/null
+git -C "$TWT_BASE/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$TWT_BASE/FashionVerse" worktree add -q -b feat \
+  "$TWT_BASE/FashionVerse-g-pricing" >/dev/null
+
+# Drop a -tasks.md in the MAIN worktree's specs/_session/ and an identical
+# copy in the WORKTREE. The collector must read both but emit each line ONCE.
+mkdir -p "$TWT_BASE/FashionVerse/specs/_session"
+mkdir -p "$TWT_BASE/FashionVerse-g-pricing/specs/_session"
+cat > "$TWT_BASE/FashionVerse/specs/_session/2026-10-09-tasks.md" <<'EOF'
+# Session task log — 2026-10-09
+- [x] 09:30 — Two-worktree regression ✓ 09:55 [green: passes]
+- [ ] 10:00 — Two-worktree pending
+EOF
+cp "$TWT_BASE/FashionVerse/specs/_session/2026-10-09-tasks.md" \
+   "$TWT_BASE/FashionVerse-g-pricing/specs/_session/2026-10-09-tasks.md"
+
+TWT_SESS="$(PYTHONPATH="$ROOT" _WORLD_ROOTS="$TWT_BASE" python3 - <<'PY' 2>&1
+import sys, json, pathlib, os
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+w._SESSION_GLOBS = [pathlib.Path(p) for p in os.environ["_WORLD_ROOTS"].split(os.pathsep)]
+events = list(w.collect_session_tasks())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+TWT_COUNT="$(printf '%s\n' "$TWT_SESS" | grep -c '"source": "session-tasks"' || true)"
+# Two lines parse from the file (the session_tasks parser emits at most 2 events
+# — one done + one pending). Per the brief, "lines emitted once": we want 2,
+# not 4. Either copy would emit 2 lines; the dedupe must collapse them to 2.
+assert_eq "session-tasks: lines emitted once across worktree copies" "2" "$TWT_COUNT"
+TWT_PROJS="$(printf '%s\n' "$TWT_SESS" | python3 -c '
+import json, sys
+ps = set()
+for ln in sys.stdin:
+    ln = ln.strip()
+    if not ln: continue
+    ps.add(json.loads(ln)["project"])
+print(",".join(sorted(ps)))
+')"
+assert_eq "session-tasks: project=fashionverse (not -g-pricing)" "fashionverse" "$TWT_PROJS"
+
+# Spec-kit: same idea. Drop the same specs/001-x/tasks.md under both
+# worktrees; spec-kit must emit ONE event per file (not two).
+mkdir -p "$TWT_BASE/FashionVerse/specs/001-x"
+mkdir -p "$TWT_BASE/FashionVerse-g-pricing/specs/001-x"
+cat > "$TWT_BASE/FashionVerse/specs/001-x/tasks.md" <<'EOF'
+# Spec 001-x
+- [x] only step
+- [x] second step
+EOF
+cp "$TWT_BASE/FashionVerse/specs/001-x/tasks.md" \
+   "$TWT_BASE/FashionVerse-g-pricing/specs/001-x/tasks.md"
+
+TWT_SPEC="$(PYTHONPATH="$ROOT" _WORLD_ROOTS="$TWT_BASE" python3 - <<'PY' 2>&1
+import sys, json, pathlib, os
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+w._SESSION_GLOBS = [pathlib.Path(p) for p in os.environ["_WORLD_ROOTS"].split(os.pathsep)]
+events = list(w.collect_specs())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+TWT_SPEC_COUNT="$(printf '%s\n' "$TWT_SPEC" | grep -c '"source": "spec-kit"' || true)"
+assert_eq "spec-kit: one event per spec file across worktree copies" "1" "$TWT_SPEC_COUNT"
+TWT_SPEC_PROJ="$(printf '%s\n' "$TWT_SPEC" | python3 -c '
+import json, sys
+for ln in sys.stdin:
+    ln = ln.strip()
+    if not ln: continue
+    print(json.loads(ln)["project"]); break
+')"
+assert_eq "spec-kit: project=fashionverse (not -g-pricing)" "fashionverse" "$TWT_SPEC_PROJ"
+
+# ---------------------------------------------------------------------------
+echo "## 22) REGRESSION: transcripts project is the canonical folder, not 'claude-sessions'" | tee -a "$LOG"
+# The collect_transcripts events must have project = the canonical project
+# derived from the transcript folder name; they MUST NEVER have
+# project='claude-sessions' (that string belongs to the `source` field).
+T_PROJ_BASE="$(mktemp -d -t tproj.XXXXXX)"
+mkdir -p "$T_PROJ_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse-g-pricing"
+mkdir -p "$T_PROJ_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse"
+mkdir -p "$T_PROJ_BASE/.claude/projects/-Users-mohamedbardouni"
+mkdir -p "$T_PROJ_BASE/projects/FashionVerse"
+(cd "$T_PROJ_BASE/projects/FashionVerse" && git init -q -b main .) >/dev/null
+git -C "$T_PROJ_BASE/projects/FashionVerse" -c user.name=t -c user.email=t@t \
+  commit --allow-empty -q -m init >/dev/null
+git -C "$T_PROJ_BASE/projects/FashionVerse" worktree add -q -b feat \
+  "$T_PROJ_BASE/projects/FashionVerse-g-pricing" >/dev/null
+touch "$T_PROJ_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse-g-pricing/sess1.jsonl"
+touch "$T_PROJ_BASE/.claude/projects/-Users-mohamedbardouni-projects-FashionVerse/sess2.jsonl"
+touch "$T_PROJ_BASE/.claude/projects/-Users-mohamedbardouni/sess3.jsonl"
+
+T_PROJ_OUT="$(PYTHONPATH="$ROOT" HOME="$T_PROJ_BASE" python3 - <<'PY' 2>&1
+import sys, json, pathlib
+sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
+import world_push_sources as w
+events = list(w.collect_transcripts())
+for e in events:
+    print(json.dumps(e))
+PY
+)"
+# No event must carry project='claude-sessions'.
+if printf '%s\n' "$T_PROJ_OUT" | grep -Fq '"project": "claude-sessions"'; then
+  echo "FAIL  transcripts project leaked literal 'claude-sessions'"; fail=$((fail+1))
+else
+  echo "PASS  transcripts project is never 'claude-sessions'"; pass=$((pass+1))
+fi
+# Each event must carry project = the canonical folder-derived slug (or 'me').
+assert_contains "transcripts: worktree folder -> project=fashionverse" \
+  '"project": "fashionverse"' "$T_PROJ_OUT"
+assert_contains "transcripts: home-level folder -> project=me" \
+  '"project": "me"' "$T_PROJ_OUT"
 
 # ---------------------------------------------------------------------------
 echo | tee -a "$LOG"
