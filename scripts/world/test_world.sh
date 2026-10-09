@@ -250,6 +250,21 @@ assert_contains "dry-run prints event" '"source":"track"' "$(cat "$WORLD_STATE_D
   echo "PASS  dry-run didn't add to outbox"; pass=$((pass+1))
 } || { echo "FAIL  dry-run wrote to outbox"; fail=$((fail+1)); }
 
+echo "## 5b) track add --source/--key" | tee -a "$LOG"
+WORLD_STATE_DIR="$WORLD_STATE_DIR" "$TRACK" --dry-run add --kind task --project testproj \
+  --status running --title "keyed" --source live --key run:x:running 2>/dev/null > "$WORLD_STATE_DIR/key.out"
+EXP_ID="$(printf '%s' 'live:run:x:running' | shasum -a 1 | cut -d' ' -f1)"
+assert_contains "--key id = sha1(source:key)" "\"id\":\"$EXP_ID\"" "$(cat "$WORLD_STATE_DIR/key.out")"
+assert_contains "--source sets event source" '"source":"live"' "$(cat "$WORLD_STATE_DIR/key.out")"
+WORLD_STATE_DIR="$WORLD_STATE_DIR" "$TRACK" --dry-run add --kind task --project testproj \
+  --status running --title "nokey" 2>/dev/null > "$WORLD_STATE_DIR/nokey.out"
+assert_contains "no flags keeps source track" '"source":"track"' "$(cat "$WORLD_STATE_DIR/nokey.out")"
+if grep -Fq "\"id\":\"$EXP_ID\"" "$WORLD_STATE_DIR/nokey.out"; then
+  echo "FAIL  no --key id changed"; fail=$((fail+1))
+else
+  echo "PASS  no --key keeps timestamp-derived id"; pass=$((pass+1))
+fi
+
 # ---------------------------------------------------------------------------
 echo "## 6) spec-kit per-repo scan + id key includes counts" | tee -a "$LOG"
 SPEC_BASE="$(mktemp -d -t specbase.XXXXXX)"

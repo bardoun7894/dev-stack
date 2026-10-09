@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 # Allow running both as `scripts/world/track` and `python -m world.track`.
 sys.path.insert(0, str(__import__("os").path.dirname(__import__("os").path.realpath(__file__))))
 from lib_world import (
-    SRC_TRACK, event, json_dumps, normalise_event_lengths,
+    SRC_TRACK, event, json_dumps, make_id, normalise_event_lengths,
     outbox_append, outbox_load, outbox_rewrite, post_events,
     rejected_append, slug,
 )
@@ -48,17 +48,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_p.add_argument("--model", default="")
     add_p.add_argument("--cost", type=float, default=None)
     add_p.add_argument("--dur", type=float, default=None)
+    add_p.add_argument("--source", default=SRC_TRACK, help="event source (default: track)")
+    add_p.add_argument("--key", default=None, help="stable key; id = sha1('<source>:<key>')")
     sub.add_parser("flush", help="re-send the outbox")
 
     return p.parse_args(argv)
 
 def cmd_add(args: argparse.Namespace, dry_run: bool) -> int:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    id_ = hashlib.sha1(f"track:{ts}{args.kind}{args.project}{args.title}".encode("utf-8")).hexdigest()
+    if args.key:
+        id_ = make_id(args.source, args.key)
+    else:
+        id_ = hashlib.sha1(f"track:{ts}{args.kind}{args.project}{args.title}".encode("utf-8")).hexdigest()
     ev = event(
         id=id_, ts=ts, project=args.project, kind=args.kind, status=args.status,
         title=args.title, ref=args.ref, url=args.url, actor=args.actor,
-        model=args.model, cost=args.cost, dur_s=args.dur, source=SRC_TRACK,
+        model=args.model, cost=args.cost, dur_s=args.dur, source=args.source,
     )
     if dry_run:
         print(json_dumps(ev))
