@@ -302,15 +302,15 @@ check_chkrootkit() {
     /^(Searching for|Checking)/ { inw = 0; next }
     /WARNING/ { inw = 1; next }
     inw && /^\// && !/lstat\(\/tmp\/runc-process/ { print }
-  ' "$VAR_LOG_CHKROOTKIT" | grep -Ev '^/tmp/' | sort -u)
+  ' "$VAR_LOG_CHKROOTKIT" | grep -Ev '^/tmp/' | LC_ALL=C sort -u)
   if [ "$REBASELINE" = "1" ] || [ ! -f "$base" ]; then
-    printf '%s\n' "$cur" | sed '/^$/d' > "$base"
+    printf '%s\n' "$cur" | sed '/^$/d' | LC_ALL=C sort -u > "$base"
     return 0
   fi
   while IFS= read -r pth; do
     [ -z "$pth" ] && continue
     add "chkrootkit" "$pth"
-  done < <(printf '%s\n' "$cur" | comm -23 - "$base")
+  done < <(LC_ALL=C comm -23 <(printf '%s\n' "$cur" | sed '/^$/d' | LC_ALL=C sort -u) <(LC_ALL=C sort -u "$base"))
 }
 
 # --- run all checks ---
