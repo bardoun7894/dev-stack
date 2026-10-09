@@ -16,6 +16,7 @@ Composes existing skills; it does not redo their work. Scripts live in `skills/f
 |---|-------|-----|
 | 0 | Active projects | `bash scripts/active.sh [--days 7] [--host mac\|server\|all] > /tmp/fa-active.json`. Show a table P1..Pn (name, host, commits, last commit, specs missing plan/tasks, open tasks, customer). Keep the codes for the whole run. Server down = warning, Mac results only. |
 | 1 | Triage | `bash scripts/triage.sh /tmp/fa-active.json > /tmp/fa-triage.json`. Adds `completeness` (0-4) and `next_action` per project; `needs-llm` means Jev was unsure, so you decide that one by reading the project (never treat it as pass). |
+| 1b | Recommend | `bash scripts/recommend.sh /tmp/fa-triage.json [--top 3] > /tmp/fa-rec.json`. Per project R1..R3 (title, kind, why, evidence, size, Jev impact; one LLM call per project, Jev ranks). The owner card/app shows them with buttons [Write spec R1] [R2] [R3] [Skip]; a tap writes ONLY that spec via readiness-audit phase 4 / kb-spec pre + speckit.specify. Implementation still needs the phase-3 approval. Customer projects: `report_only`, shown but not written. |
 | 2 | Per-project work | By `next_action`: write-specs, fix-defects, verdict: run `readiness-audit <project> --defects` (phases 0-4; add `--report-only` when `report_only`). research-features: `market-swot project <path>`, then readiness-audit. implement-open-tasks: skip to phase 3. At most 3 projects in parallel, different projects only; website projects run on MyContabo per `where-to-work`. |
 | 3 | HARD STOP | Write `~/projects/_finish-apps/<date>/FINISH-APPS-<date>.md`: per project completeness, next action, the G codes from readiness-audit, specs written, what would be implemented. Ask the owner which to implement. Nothing is implemented before an explicit yes. Customer projects stay report-only. |
 | 4 | Implement | Only approved specs. Per spec: `jev route "<spec title + scope>"` for the tier, then `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --cwd <worktree> --name <label> "<brief>"` with the brief from `scripts/gate/brief-template.md`. Run `scripts/gate/overlap.sh <repo-root> <branches...>` before running branches in parallel. Gates run through `gaterun.sh` / `gate.sh`; wait with `monitor.sh` once (background). The orchestrator never polls. |
@@ -39,6 +40,6 @@ Composes existing skills; it does not redo their work. Scripts live in `skills/f
 
 ## Files
 
-- `scripts/active.sh`, `scripts/triage.sh`, `config/customers.txt`
-- Tests: `tests/finish-apps/active_test.sh`, `tests/finish-apps/triage_test.sh`
-- Env: `FINISH_APPS_MAC_ROOTS`, `FINISH_APPS_SERVER_ROOTS`, `FINISH_APPS_SSH_HOST`, `JEV_BIN`
+- `scripts/active.sh`, `scripts/triage.sh`, `scripts/recommend.sh`, `config/customers.txt`
+- Tests: `tests/finish-apps/active_test.sh`, `tests/finish-apps/triage_test.sh`, `tests/finish-apps/recommend_test.sh`
+- Env: `FINISH_APPS_MAC_ROOTS`, `FINISH_APPS_SERVER_ROOTS`, `FINISH_APPS_SSH_HOST`, `JEV_BIN`, `FINISH_APPS_LLM`
