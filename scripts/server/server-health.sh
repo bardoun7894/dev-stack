@@ -79,6 +79,23 @@ print(json.dumps({"chat_id": os.environ["CID"], "text": os.environ["MSG"]}))
   return "${PIPESTATUS[1]}"
 }
 
+# World live hook: `track add ...` in the background, 3 s cap, silent; never changes the exit code.
+# WORLD_TRACK=0 disables it; dry runs never emit; a missing `track` is a no-op.
+world_track() {
+  [ "${WORLD_TRACK:-1}" = "0" ] && return 0
+  [ "$DRY_RUN" = "1" ] && return 0
+  command -v track >/dev/null 2>&1 || return 0
+  local kind="$1" status="$2" finding="$3" check minute to=""
+  check="${finding%%:*}"
+  minute=$(( $(date +%s) / 60 ))
+  command -v timeout >/dev/null 2>&1 && to="timeout 3"
+  command -v gtimeout >/dev/null 2>&1 && [ -z "$to" ] && to="gtimeout 3"
+  ( $to track add --kind "$kind" --project server --status "$status" --title "${finding:0:120}" \
+      --ref "$check" --host mycontabo --source live --key "${kind}:${check}:${minute}" \
+      >/dev/null 2>&1 </dev/null & ) >/dev/null 2>&1
+  return 0
+}
+
 # Returns 0 if the finding is due (not sent within 6h); 1 if it was sent recently.
 # Recording happens in mark_sent, only after a successful send.
 finding_due() {
@@ -339,7 +356,7 @@ ${FINDINGS}"
   while IFS= read -r finding; do
     [ -z "$finding" ] && continue
     finding_due "$finding" || continue
-    send_telegram "[server-health] ${finding}" && mark_sent "$finding"
+    if send_telegram "[server-health] ${finding}"; then mark_sent "$finding"; world_track alert down "$finding"; fi
   done <<<"$FINDINGS"
 
   # recovery: a previously-sent finding that no longer appears
@@ -349,6 +366,7 @@ ${FINDINGS}"
       [ -z "$key" ] && continue
       printf '%s\n' "$FINDINGS" | grep -Fxq -- "$key" && continue
       send_telegram "[server-health] recovered: ${key}" || continue
+      world_track recovery up "$key"
       awk -F'\t' -v k="$key" '$2 != k' "$DEDUPE_FILE" > "$DEDUPE_FILE.new" && mv "$DEDUPE_FILE.new" "$DEDUPE_FILE"
     done < <(awk -F'\t' '{print $2}' "$DEDUPE_FILE" | sort -u)
   fi

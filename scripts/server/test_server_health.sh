@@ -376,6 +376,35 @@ out="$(ENV_FILE="$ENV_FILE" STATE_DIR="$T/state/dry" BACKUP_DIRS="$T/backups" \
   bash "$SCRIPT" --dry-run 2>&1)"
 echo "$out" | grep -q "TELEGRAM CALL IN DRY-RUN" && bad "dryrun-guard" "curl stub was hit with api.telegram.org: $out" || ok "dryrun-guard"
 
+# ---- 11. world hooks: a live (non-dry) alert emits `track add --kind alert`, recovery emits --kind recovery ----
+printf '#!/usr/bin/env bash\nprintf "%%s\\t" "$@" >> "%s/track.log"; echo >> "%s/track.log"\n' "$T" "$T" > "$T/bin/track"
+chmod +x "$T/bin/track"
+tw() { for _ in $(seq 1 30); do grep -q "$1" "$T/track.log" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+live_run() {
+  PATH="$T/bin:$PATH" ENV_FILE="$ENV_FILE" STATE_DIR="$T/state/world" BACKUP_DIRS="$T/backups" \
+    NGINX_CONF_DIR="$T/nginx/sites-enabled" VAR_LOG_CHKROOTKIT="$T/logs/chkrootkit.log" \
+    HEALTH_PY_LOG="$PY_LOG" bash "$SCRIPT" >/dev/null 2>&1
+}
+LOGF="$T/cron-targets/app.log"
+: > "$LOGF"; for i in $(seq 1 50); do printf 'line %s: No such container: nope\n' "$i" >> "$LOGF"; done; touch "$LOGF"
+HEALTH_STUB_CRONTAB="0 * * * * /usr/local/bin/t.sh >> $T/cron-targets/app.log 2>&1"
+stub_install
+rm -f "$T/track.log"
+live_run
+tw "alert" && ok "world-alert" || bad "world-alert" "no alert call: $(cat "$T/track.log" 2>/dev/null)"
+a="$(grep -a "alert" "$T/track.log" | head -1)"
+case "$a" in *"down"*"--project"*"server"*|*"--project"*"server"*"down"*) ok "world-alert-flags";; *) bad "world-alert-flags" "$a";; esac
+case "$a" in *"mycontabo"*) ok "world-alert-host";; *) bad "world-alert-host" "$a";; esac
+rm -f "$T/track.log"
+: > "$LOGF"; for i in $(seq 1 50); do printf 'ok line %s\n' "$i" >> "$LOGF"; done; touch "$LOGF"
+live_run
+tw "recovery" && grep -a "recovery" "$T/track.log" | grep -aq "up" && ok "world-recovery" || bad "world-recovery" "$(cat "$T/track.log" 2>/dev/null)"
+rm -f "$T/track.log"
+: > "$LOGF"; for i in $(seq 1 50); do printf 'line %s: No such container: nope\n' "$i" >> "$LOGF"; done; touch "$LOGF"
+rm -rf "$T/state/world"; WORLD_TRACK=0 live_run; sleep 0.3
+[ ! -s "$T/track.log" ] && ok "world-off" || bad "world-off" "emitted with WORLD_TRACK=0"
+rm -f "$T/bin/track"
+
 # ---- summary ----
 echo "---"
 echo "tests: pass=$pass fail=$fail"
