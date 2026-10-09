@@ -1,16 +1,18 @@
 """world/jdelegate_runs.py — parse ~/.cache/jdelegate/<ISO>-<label>-* dirs.
 
-One event per run. status: done (exit=0), failed (exit!=0), running (no exit file).
+One event per run. status: done (exit=0), failed (exit!=0), running (no exit file; failed if pid dead and run.sh >6h old).
 Model + label from line 2 of run.sh '# jdelegate worker: <label> · <model>' else -m flag.
 """
 from __future__ import annotations
 
+import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from lib_world import SRC_JDELEGATE, event, make_id, slug
+from lib_world import SRC_JDELEGATE, canonical_project, event, make_id, slug
 
 _DIR_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)-(.+)$")
 
@@ -51,6 +53,28 @@ def parse_run_sh(text: str) -> tuple[str, str]:
                 pass
     return label, model
 
+_CD_RE = re.compile(r"^cd\s+'([^']+)'\s*\|\|\s*exit\b")
+_STALE_S = 6 * 3600
+
+def parse_cd_dir(text: str) -> str | None:
+    for ln in text.splitlines():
+        m = _CD_RE.match(ln.strip())
+        if m:
+            return m.group(1)
+    return None
+
+def pid_alive(pid_path: Path) -> bool:
+    try:
+        pid = int(pid_path.read_text().strip())
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+    return True
+
 def status_from_exit(exit_path: Path) -> tuple[str, float | None]:
     """Return (status, dur_s). dur_s is computed from exit mtime vs run.sh mtime."""
     if not exit_path.exists():
@@ -77,10 +101,14 @@ def iter_runs(root: Path) -> Iterable[dict]:
         run_sh = child / "run.sh"
         if not run_sh.exists():
             continue
+        cd_dir = None
         try:
-            label, model = parse_run_sh(run_sh.read_text(encoding="utf-8", errors="replace"))
+            text = run_sh.read_text(encoding="utf-8", errors="replace")
+            label, model = parse_run_sh(text)
+            cd_dir = parse_cd_dir(text)
         except Exception:
             label, model = "", ""
+        project = canonical_project(cd_dir) if cd_dir else "dev-stack"
         exit_path = child / "exit"
         status, _ = status_from_exit(exit_path)
         dur = None
@@ -92,9 +120,17 @@ def iter_runs(root: Path) -> Iterable[dict]:
         except Exception:
             dur = None
         title = label or child.name
+        if status == "running":
+            try:
+                old = time.time() - run_sh.stat().st_mtime > _STALE_S
+            except Exception:
+                old = False
+            if old and not pid_alive(child / "pid"):
+                status = "failed"
+                title += " (no exit)"
         yield event(
-            id=make_id(SRC_JDELEGATE, child.name),
-            ts=ts, project="jdelegate",
+            id=make_id(SRC_JDELEGATE, child.name + ":v2"),
+            ts=ts, project=project,
             kind="worker", status=status, title=title,
             ref="", url="", actor="jdelegate", model=model,
             dur_s=dur if dur else None,

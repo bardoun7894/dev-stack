@@ -168,6 +168,29 @@ assert_contains "model parsed" 'gpt-6-luna' "$(cat "$OUT_JD")"
 assert_contains "label parsed" 'ship-it' "$(cat "$OUT_JD")"
 assert_contains "kind worker" '"kind": "worker"' "$(cat "$OUT_JD")"
 
+# jdelegate v2: project from run.sh cd line, stale no-exit -> failed, live pid -> running
+JD2="$(mktemp -d -t jd2.XXXXXX)"
+JD2_PROJ="$(mktemp -d -t jd2proj.XXXXXX)/Some-Proj"
+mkdir -p "$JD2_PROJ"
+for n in dead-old live-fresh; do
+  mkdir -p "$JD2/2026-10-02T10-00-00-123Z-$n"
+  printf '#!/bin/bash\n# jdelegate worker: %s · gpt-6-luna\nset -o pipefail\ncd '"'"'%s'"'"' || exit 1\n' "$n" "$JD2_PROJ" > "$JD2/2026-10-02T10-00-00-123Z-$n/run.sh"
+done
+echo 999999 > "$JD2/2026-10-02T10-00-00-123Z-dead-old/pid"
+touch -t 202601010000 "$JD2/2026-10-02T10-00-00-123Z-dead-old/run.sh"
+echo $$ > "$JD2/2026-10-02T10-00-00-123Z-live-fresh/pid"
+OUT_JD2="$(PYTHONPATH="$ROOT" python3 - "$JD2" <<'PY' 2>&1
+import sys, json, pathlib
+sys.path.insert(0, '/Users/mohamedbardouni/code/dev-stack-world/scripts/world')
+import jdelegate_runs
+for e in jdelegate_runs.iter_runs(pathlib.Path(sys.argv[1])):
+    print(e["title"], "|", e["status"], "|", e["project"], "|", e["id"])
+PY
+)"
+assert_contains "jdelegate cd -> canonical project" "| some-proj |" "$OUT_JD2"
+assert_contains "jdelegate dead old pid -> failed (no exit)" "dead-old (no exit) | failed |" "$OUT_JD2"
+assert_contains "jdelegate fresh live pid -> running" "live-fresh | running |" "$OUT_JD2"
+
 # ---------------------------------------------------------------------------
 echo "## 3) outbox on unreachable server + flush" | tee -a "$LOG"
 # Unroutable IP (TEST-NET-1 192.0.2.0/24) + port unlikely to be listening.
