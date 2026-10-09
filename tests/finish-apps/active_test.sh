@@ -79,5 +79,47 @@ w="$(FINISH_APPS_SSH_HOST=nonexistent.invalid FINISH_APPS_MAC_ROOTS="$P/*" bash 
 echo "$w" | jq -e 'length==2' >/dev/null || { echo "FAIL unreachable server should still give mac results"; fail=1; }
 grep -qi warn "$T/err" || { echo "FAIL no warning on stderr"; fail=1; }
 
+# --- server mode (FINISH_APPS_SELF=server): local server scan + Mac via `ssh mac` ---
+B="$T/bin"; mkdir -p "$B"
+cat > "$B/ssh" <<'E'
+#!/usr/bin/env bash
+# stub ssh: log args, drop options and host, run the remote command locally like a remote shell would
+echo "$*" >> "$STUB_LOG"
+while [ "${1:-}" = -o ]; do shift 2; done
+host="$1"; shift
+[ "$host" = mac ] || exit 255
+[ -z "${STUB_FAIL:-}" ] || exit 255
+eval "$*"
+E
+chmod +x "$B/ssh"
+M="$T/macroots"; mkdir -p "$M"
+cp -R "$P/up" "$M/up"                                   # same repo (same root commit) on both hosts
+cp -R "$P/up" "$M/up"; git -C "$M/up" commit -q --allow-empty -m macextra
+mkdir -p "$M/maconly"; git -C "$M/maconly" init -q -b work; echo m > "$M/maconly/f"
+git -C "$M/maconly" add -A; git -C "$M/maconly" commit -q -m c
+export STUB_LOG="$T/ssh.log"; : > "$STUB_LOG"
+srv() { PATH="$B:$PATH" FINISH_APPS_SELF=server FINISH_APPS_SERVER_ROOTS="$P/*" \
+        FINISH_APPS_MAC_ROOTS_REMOTE="$M/*" bash "$SCRIPT" "$@"; }
+so="$(srv --host server)"
+echo "$so" | jq -e 'length==2 and all(.[]; .host=="server")' >/dev/null \
+  || { echo "FAIL server --host server entries"; echo "$so"; fail=1; }
+[ ! -s "$STUB_LOG" ] || { echo "FAIL --host server should not ssh"; fail=1; }
+so="$(srv --days 7 2>"$T/err")"; rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL server exit=$rc"; fail=1; }
+grep -q MyContabo "$STUB_LOG" && { echo "FAIL server mode must not ssh MyContabo"; fail=1; }
+grep -q '^-o ConnectTimeout=8 .*mac bash -s -- --scan-local' "$STUB_LOG" || { echo "FAIL ssh mac invocation: $(cat "$STUB_LOG")"; fail=1; }
+echo "$so" | jq -e '([.[]|select(.name=="maconly")][0].host)=="mac"' >/dev/null || { echo "FAIL mac entries missing"; echo "$so"; fail=1; }
+echo "$so" | jq -e '[.[]|select(.name=="alpha")][0].host=="server"' >/dev/null || { echo "FAIL server entries missing"; fail=1; }
+echo "$so" | jq -e '[.[]|select(.name=="up")]|length==1 and (.[0].also_at|length==1) and .[0].host=="mac"' >/dev/null \
+  || { echo "FAIL cross-host root-commit dedupe"; echo "$so"; fail=1; }
+so="$(STUB_FAIL=1 srv --days 7 2>"$T/err")"; rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL mac-down exit=$rc"; fail=1; }
+echo "$so" | jq -e 'length==2 and all(.[]; .host=="server")' >/dev/null || { echo "FAIL mac-down should keep server entries"; fail=1; }
+[ "$(grep -ci warn "$T/err")" = 1 ] || { echo "FAIL want exactly one stderr warning"; cat "$T/err"; fail=1; }
+: > "$STUB_LOG"
+so="$(PATH="$B:$PATH" FINISH_APPS_SELF=mac FINISH_APPS_SSH_HOST= FINISH_APPS_MAC_ROOTS="$P/*" bash "$SCRIPT" --host mac)"
+echo "$so" | jq -e 'length==2 and all(.[]; .host=="mac")' >/dev/null || { echo "FAIL SELF=mac unchanged"; fail=1; }
+[ ! -s "$STUB_LOG" ] || { echo "FAIL SELF=mac must not call stub ssh"; fail=1; }
+
 [ "$fail" -eq 0 ] && echo "PASS active_test"
 exit "$fail"

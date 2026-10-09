@@ -42,4 +42,4 @@ Composes existing skills; it does not redo their work. Scripts live in `skills/f
 
 - `scripts/active.sh`, `scripts/triage.sh`, `scripts/recommend.sh`, `config/customers.txt`
 - Tests: `tests/finish-apps/active_test.sh`, `tests/finish-apps/triage_test.sh`, `tests/finish-apps/recommend_test.sh`
-- Env: `FINISH_APPS_MAC_ROOTS`, `FINISH_APPS_SERVER_ROOTS`, `FINISH_APPS_SSH_HOST`, `JEV_BIN`, `FINISH_APPS_LLM`
+- Env: `FINISH_APPS_MAC_ROOTS`, `FINISH_APPS_SERVER_ROOTS`, `FINISH_APPS_SSH_HOST`, `FINISH_APPS_SELF`, `FINISH_APPS_MAC_ROOTS_REMOTE`, `JEV_BIN`, `FINISH_APPS_LLM`

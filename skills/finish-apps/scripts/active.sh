@@ -2,7 +2,8 @@
 # skills/finish-apps/scripts/active.sh [--days N] [--host mac|server|all]
 # Zero AI. JSON array of repos with commits in the last N days (default 7), Mac + MyContabo.
 # Env: FINISH_APPS_MAC_ROOTS, FINISH_APPS_SERVER_ROOTS (space-separated globs),
-#      FINISH_APPS_SSH_HOST (default MyContabo; empty = skip server).
+#      FINISH_APPS_SSH_HOST (default MyContabo; empty = skip server),
+#      FINISH_APPS_SELF (mac|server; auto-detected), FINISH_APPS_MAC_ROOTS_REMOTE (used on the server).
 # Internal: --scan-local --label L --roots "globs"  (runs on the server via ssh, prints local entries).
 set -u
 
@@ -71,7 +72,32 @@ MAC_ROOTS="${FINISH_APPS_MAC_ROOTS-$HOME/projects/*}"
 SRV_ROOTS="${FINISH_APPS_SERVER_ROOTS-/root/projects/* /root/* /opt/* /var/www/*}"
 SSH_HOST="${FINISH_APPS_SSH_HOST-MyContabo}"
 
+detect_self() {
+  [ -n "${FINISH_APPS_SELF:-}" ] && { echo "$FINISH_APPS_SELF"; return; }
+  case "$(hostname 2>/dev/null)" in *contabo*|*tokyo*|vmi*) echo server; return ;; esac
+  [ "$(uname)" = Darwin ] && { echo mac; return; }
+  [ -d /root/tokyo ] && { echo server; return; }
+  echo mac
+}
+SELF="$(detect_self)"
+
 all="[]"
+if [ "$SELF" = server ]; then
+  # on the server: scan server roots locally, reach the Mac over `ssh mac`
+  MAC_REMOTE="${FINISH_APPS_MAC_ROOTS_REMOTE-/Users/mohamedbardouni/projects/*}"
+  if [ "$HOSTSEL" = server ] || [ "$HOSTSEL" = all ]; then
+    ROOTS="$SRV_ROOTS"; LABEL=server
+    all="$(scan_local)"
+  fi
+  if { [ "$HOSTSEL" = mac ] || [ "$HOSTSEL" = all ]; } && [ -n "$MAC_REMOTE" ]; then
+    if mac="$(ssh -o ConnectTimeout=8 -o BatchMode=yes mac bash -s -- --scan-local --days "$DAYS" \
+          --label mac --roots "'$MAC_REMOTE'" < "$0" 2>/dev/null)" && printf '%s' "$mac" | jq -e 'type=="array"' >/dev/null 2>&1; then
+      all="$(jq -n --argjson a "$all" --argjson b "$mac" '$a + $b')"
+    else
+      echo "warn: mac unreachable or scan failed; continuing with server results" >&2
+    fi
+  fi
+else
 if [ "$HOSTSEL" = mac ] || [ "$HOSTSEL" = all ]; then
   ROOTS="$MAC_ROOTS"; LABEL=mac
   all="$(scan_local)"
@@ -83,6 +109,7 @@ if { [ "$HOSTSEL" = server ] || [ "$HOSTSEL" = all ]; } && [ -n "$SSH_HOST" ]; t
   else
     echo "warn: server $SSH_HOST unreachable or scan failed; continuing with Mac results" >&2
   fi
+fi
 fi
 
 # dedupe by root commit (fallback: normalized remote): keep most commits, other copies go to also_at
