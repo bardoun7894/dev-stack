@@ -24,7 +24,7 @@ norm_remote() { # git@github.com:Owner/Repo.git -> github.com/owner/repo
 }
 
 scan_local() { # prints JSON array of entries for ROOTS, host=LABEL
-  local seen="" out="[]" g d common remote n last cnt nspec mp mt ot item
+  local seen="" out="[]" g d common root remote n last cnt nspec mp mt ot item
   for g in $ROOTS; do
     for d in $g; do
       [ -d "$d" ] && [ -d "$d/.git" ] || continue          # linked worktrees have .git as a file
@@ -41,6 +41,7 @@ $common"
       n="$(printf '%s\n' "$cnt" | wc -l | tr -d ' ')"
       last="$(printf '%s\n' "$cnt" | head -1)"
       remote="$(norm_remote "$(git -C "$d" remote get-url origin 2>/dev/null || true)")"
+      root="$(git -C "$d" rev-list --max-parents=0 HEAD 2>/dev/null | sort | head -1)"
       nspec=0; mp=0; mt=0; ot=0
       if [ -d "$d/specs" ]; then
         for s in "$d"/specs/*/; do
@@ -53,10 +54,10 @@ $common"
         done
       fi
       item="$(jq -n --arg name "$(basename "$d")" --arg host "$LABEL" --arg path "$d" \
-        --argjson commits "$n" --argjson last "$last" --arg remote "$remote" \
+        --argjson commits "$n" --argjson last "$last" --arg remote "$remote" --arg root "$root" \
         --argjson st "$nspec" --argjson mp "$mp" --argjson mt "$mt" --argjson ot "$ot" \
         '{name:$name,host:$host,path:$path,also_at:[],commits:$commits,last_commit:($last|todate),
-          remote:$remote,specs_total:$st,specs_missing_plan:$mp,specs_missing_tasks:$mt,open_tasks:$ot}')"
+          remote:$remote,root_commit:$root,specs_total:$st,specs_missing_plan:$mp,specs_missing_tasks:$mt,open_tasks:$ot}')"
       out="$(printf '%s' "$out" | jq --argjson i "$item" '. + [$i]')"
     done
   done
@@ -84,12 +85,12 @@ if { [ "$HOSTSEL" = server ] || [ "$HOSTSEL" = all ]; } && [ -n "$SSH_HOST" ]; t
   fi
 fi
 
-# dedupe by normalized remote: keep most commits, other paths go to also_at
+# dedupe by root commit (fallback: normalized remote): keep most commits, other copies go to also_at
 cust="$HERE/../config/customers.txt"
 custjson="$(grep -vE '^[[:space:]]*(#|$)' "$cust" 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo '[]')"
 printf '%s' "$all" | jq --argjson cust "$custjson" '
-  (map(select(.remote != "")) | group_by(.remote)
-    | map(sort_by(-.commits) as $g | $g[0] + {also_at: ($g[1:] | map(.host + ":" + .path))})) as $withr
-  | ($withr + map(select(.remote == "")))
+  (map(select(.root_commit != "" or .remote != "")) | group_by(if .root_commit != "" then .root_commit else .remote end)
+    | map(sort_by(-.commits) as $g | $g[0] + {also_at: ($g[1:] | map(.host + ":" + .path))})) as $keyed
+  | ($keyed + map(select(.root_commit == "" and .remote == "")))
   | map(. + {customer: (.name as $n | $cust | index($n) != null)})
   | sort_by(.last_commit) | reverse'

@@ -12,7 +12,7 @@ export GIT_AUTHOR_NAME=Test GIT_AUTHOR_EMAIL=t@e.com GIT_COMMITTER_NAME=Test GIT
 
 mkrepo() { # name [date]
   mkdir -p "$P/$1"; git -C "$P/$1" init -q -b work
-  echo x > "$P/$1/f"; git -C "$P/$1" add -A
+  echo "$1" > "$P/$1/f"; git -C "$P/$1" add -A
   if [ -n "${2:-}" ]; then GIT_COMMITTER_DATE="$2" GIT_AUTHOR_DATE="$2" git -C "$P/$1" commit -q -m c
   else git -C "$P/$1" commit -q -m c; fi
 }
@@ -62,6 +62,17 @@ git -C "$T/srv/alpha" commit -q --allow-empty -m extra
 d="$(FINISH_APPS_SSH_HOST= FINISH_APPS_MAC_ROOTS="$P/* $T/srv/*" bash "$SCRIPT" --host mac)"
 echo "$d" | jq -e '[.[]|select(.name=="alpha")]|length==1 and (.[0].also_at|length==1) and .[0].path=="'"$T"'/srv/alpha"' >/dev/null \
   || { echo "FAIL remote dedupe keeps most commits"; echo "$d"; fail=1; }
+
+# dedupe by root commit: copies with different or no remotes, including same-host paths
+mkdir -p "$T/a2" "$T/a3"; cp -R "$P/up" "$T/a2/up"; cp -R "$P/up" "$T/a3/up"
+git -C "$T/a2/up" remote add origin git@github.com:one/up.git
+git -C "$T/a3/up" remote add origin git@github.com:two/up.git
+r="$(FINISH_APPS_SSH_HOST= FINISH_APPS_MAC_ROOTS="$P/up $T/a2/* $T/a3/*" bash "$SCRIPT" --host mac)"
+echo "$r" | jq -e '[.[]|select(.name=="up")]|length==1 and (.[0].also_at|length==2) and (.[0].root_commit|length==40)' >/dev/null \
+  || { echo "FAIL root-commit dedupe across differing remotes"; echo "$r"; fail=1; }
+r="$(FINISH_APPS_SSH_HOST= FINISH_APPS_MAC_ROOTS="$P/up $T/a3/*" bash "$SCRIPT" --host mac)"
+echo "$r" | jq -e '[.[]|select(.name=="up")]|length==1 and (.[0].also_at|length==1) and (.[0].root_commit|length==40)' >/dev/null \
+  || { echo "FAIL root-commit dedupe no-remote vs remote"; echo "$r"; fail=1; }
 
 # unreachable server warns and continues with mac results
 w="$(FINISH_APPS_SSH_HOST=nonexistent.invalid FINISH_APPS_MAC_ROOTS="$P/*" bash "$SCRIPT" 2>"$T/err")"
