@@ -13,6 +13,7 @@ case "$1" in
 esac
 out=$1; shift
 [ -n "$out" ] && [ "$1" = "--" ] && [ $# -gt 1 ] || { echo "usage: testcap.sh <outfile> -- <test command...> | --reset | --status" >&2; exit 2; }
+mkdir -p "$(dirname "$out")" || { echo "testcap: cannot create $(dirname "$out")" >&2; exit 2; }
 shift
 if [ "$n" -ge "$MAX" ]; then
   echo "testcap: $n/$MAX scoped runs used for $br; stop, commit, report names + diagnosis" >&2
