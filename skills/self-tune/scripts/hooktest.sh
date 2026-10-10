@@ -19,3 +19,8 @@ run "echo 'use $JD --cwd x for small work'" "jdelegate in quoted text (expect 0)
 run "until [ -f /x.done ]; do $SL 120; done" "background waiter (expect 0)"
 run "until ! kill -0 123 2>/dev/null; do $SL 5; done; tail -c 800 $T/b9x.output" "wait-loop then read once (expect 0)"
 run "while [ ! -f /x.done ]; do $SL 30; done; cat $T/bzz.output" "while wait-loop then read (expect 0)"
+FT="flutter"" test"; TC="~/code/dev-stack/scripts/gate/testcap.sh"
+run "cd /x/.worktrees/a/app && $FT test/a_test.dart" "scoped test in worktree w/o testcap (expect 2)"
+run "cd /x/.worktrees/a/app && $TC /tmp/o.txt -- $FT test/a_test.dart" "scoped test via testcap in worktree (expect 0)"
+run "cd /x/app && $FT test/a_test.dart" "test outside worktrees (expect 0)"
+run "cat > f.md <<'X'${NL}cd /x/.worktrees/a && $FT${NL}X${NL}echo ok" "test text inside heredoc (expect 0)"

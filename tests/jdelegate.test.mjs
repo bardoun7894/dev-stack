@@ -882,3 +882,67 @@ test('lean worker keeps the Skill tool on: no --disable-slash-commands, Skill in
   // bundled Claude Code skills add ~3k first-turn tokens; the repo's .claude/skills still load
   assert.match(r.script, /"disableBundledSkills":true/);
 });
+
+// ---- world live hooks: `track add` on worker start and exit ----
+function trackRun(env, { claudeBody = 'echo worker-output; exit 0', cwd = repo } = {}) {
+  const tdir = mkdtempSync(join(tmpdir(), 'jd-track-'));
+  const log = join(tdir, 'track.log');
+  const tbin = join(tdir, 'bin');
+  mkdirSync(tbin, { recursive: true });
+  for (const [n, body] of Object.entries({ claude: claudeBody, jev: 'exit 3' })) { writeFileSync(join(tbin, n), `#!/bin/bash\n${body}\n`); chmodSync(join(tbin, n), 0o755); }
+  if (!env.NO_TRACK) {
+    writeFileSync(join(tbin, 'track'), `#!/bin/bash\nl=$(printf '%s\\t' "$@"); printf '%s\\n' "$l" >> ${log}\n`);
+    chmodSync(join(tbin, 'track'), 0o755);
+  }
+  const { NO_TRACK, ...rest } = env;
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', cwd, '--name', 'Wjob', 'do the thing'], {
+    encoding: 'utf8', timeout: 30_000,
+    env: { ...process.env, PATH: `${tbin}:/usr/bin:/bin:${dirname(process.execPath)}`, JDELEGATE_JEV: join(tbin, 'jev'), JEV_ROUTER_CONFIG: tiers,
+      JDELEGATE_CACHE: join(tdir, 'cache'), JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', ...rest },
+  });
+  spawnSync('sleep', ['0.5']);
+  const calls = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => l.split('\t').slice(0, -1)) : [];
+  return { ...r, calls };
+}
+const flagOf = (c, k) => c[c.indexOf(k) + 1];
+
+test('world hook: start and exit emit two track calls with run:<ref>:<status> keys', () => {
+  const r = trackRun({});
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.calls.length, 2, JSON.stringify(r.calls));
+  const [start, end] = r.calls;
+  const ref = flagOf(start, '--ref');
+  assert.ok(ref.length > 0);
+  assert.equal(flagOf(start, '--kind'), 'worker');
+  assert.equal(flagOf(start, '--status'), 'running');
+  assert.equal(flagOf(start, '--source'), 'live');
+  assert.equal(flagOf(start, '--project'), 'repo');
+  assert.equal(flagOf(start, '--model'), 'claude-test');
+  assert.equal(flagOf(start, '--title'), 'Wjob · claude-test');
+  assert.equal(flagOf(start, '--key'), `run:${ref}:running`);
+  assert.equal(flagOf(end, '--status'), 'done');
+  assert.equal(flagOf(end, '--key'), `run:${ref}:done`);
+  assert.match(flagOf(end, '--dur'), /^\d+$/);
+});
+
+test('world hook: a failing worker emits status failed', () => {
+  const r = trackRun({}, { claudeBody: 'exit 4' });
+  assert.notEqual(r.status, 0);
+  const end = r.calls.find((c) => flagOf(c, '--status') === 'failed');
+  assert.ok(end, JSON.stringify(r.calls));
+  assert.match(flagOf(end, '--key'), /^run:.+:failed$/);
+});
+
+test('world hook: WORLD_TRACK=0 emits no track calls', () => {
+  const r = trackRun({ WORLD_TRACK: '0' });
+  assert.equal(r.status, 0);
+  assert.equal(r.calls.length, 0);
+});
+
+test('world hook: missing track does not change the exit code or output', () => {
+  const ok = trackRun({ NO_TRACK: '1' });
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.doesNotMatch(ok.stderr, /track/);
+  const bad = trackRun({ NO_TRACK: '1' }, { claudeBody: 'exit 4' });
+  assert.equal(bad.status, 4);
+});

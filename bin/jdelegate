@@ -44,7 +44,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const HOME = homedir();
 const { buildRouteBody, buildOutputBody, parseRoute, parseIds } = await import(`${HOME}/.pi/agent/extensions/model-router/route-body.mjs`);
@@ -637,6 +637,16 @@ if (p.harness !== "claude" || leanClaude) {
 }
 if (cachedAny) head += " · (cached)";
 
+/** World live hook: `track add` in the background, 3 s cap, silent. WORLD_TRACK=0 disables; a missing track is a no-op. */
+function worldTrack(args) {
+  if (process.env.WORLD_TRACK === "0") return;
+  try {
+    const c = spawn("track", ["add", ...args, "--source", "live"], { stdio: "ignore", detached: true, timeout: 3000 });
+    c.on("error", () => {});
+    c.unref();
+  } catch { /* the world feed never affects a worker */ }
+}
+
 function makeRun(attemptBrief, attemptP, attemptTier) {
   const run = join(CACHE, `${new Date().toISOString().replace(/[:.]/g, "-")}-${nameSlug}-${attemptTier}-${Math.random().toString(36).slice(2, 7)}`);
   mkdirSync(run, { recursive: true, mode: 0o700 });
@@ -712,6 +722,9 @@ function markCodexExhausted(attemptP, run) {
 async function execute(attemptBrief, attemptP, attemptTier) {
   const { run, label } = makeRun(attemptBrief, attemptP, attemptTier);
   const started = Date.now();
+  const ref = basename(run), model = attemptP.ref.split("/").pop(), project = basename(opt.cwd).toLowerCase();
+  const worldEvent = (status, extra = []) => worldTrack(["--kind", "worker", "--project", project, "--status", status, "--title", label, "--ref", ref, "--model", model, ...extra, "--key", `run:${ref}:${status}`]);
+  worldEvent("running");
   const inHerdr = opt.tab && process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID;
   let where = "inline";
   if (inHerdr) {
@@ -741,6 +754,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
       await killWorkerTree({ run, inlinePid, where, tab: existsSync(join(run, "tab")) ? readFileSync(join(run, "tab"), "utf8").trim() : "" });
       // The user-facing value, in minutes. Use the original --timeout number (so the message matches what was passed
       // on the command line, even when JDELEGATE_TIMEOUT_MS overrides the wall-clock value for tests).
+      worldEvent("failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
       const minutesText = `${opt.timeout} min`;
       console.log(`${head}\n[jdelegate] timed out after ${minutesText} in ${where}; worker tree killed, result will be in ${run}`);
       process.exit(124);
@@ -748,6 +762,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     await new Promise((r) => setTimeout(r, 500));
   }
   const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
+  worldEvent(rc === 0 ? "done" : "failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
   const answer = finalAnswer(attemptP, run);
   const tabFile = join(run, "tab");
   if (!opt.keepTab && existsSync(tabFile)) {
