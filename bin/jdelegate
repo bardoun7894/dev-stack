@@ -255,9 +255,21 @@ const CONTRACT = `You are a worker. An orchestrator already did the KB research,
 - Never add Co-Authored-By or "Generated with" lines to a commit. Commit only if the brief says so.
 - Your final answer is: what changed, pasted command output as evidence, and what you could not do.
 Plain direct prose, no emoji.`;
+// KB prior art: Jev-screened, Haiku-condensed matches from the project KB in --cwd (bin/kb-retrieve --condense; falls back to the keyword matches). Empty when none match, on error, or with JDELEGATE_KB=0.
+const KB_RETRIEVE = process.env.DEVSTACK_KB_RETRIEVE_BIN || join(dirname(realpathSync(process.argv[1])), "kb-retrieve");
+let kbPriorArtText;
+function kbPriorArt() {
+  if (process.env.JDELEGATE_KB === "0") return "";
+  if (kbPriorArtText === undefined) {
+    const r = spawnSync(KB_RETRIEVE, ["--root", opt.cwd, "--condense", "--", opt.brief.slice(0, 2000)], { encoding: "utf8", timeout: 50000 });
+    kbPriorArtText = r.status === 0 ? r.stdout.trim() : "";
+  }
+  return kbPriorArtText;
+}
 function workerPrompt(skills, role) {
   const repo = repoInstructions();
-  return [CONTRACT, repo && `## Repo instructions\n${repo}`, role && roleSection(role), ...skills.map((s) => `## Skill: ${s.name}\n${cap(s.body, `skill ${s.name}`)}`)].filter(Boolean).join("\n\n") + "\n";
+  const kb = kbPriorArt();
+  return [CONTRACT, repo && `## Repo instructions\n${repo}`, role && roleSection(role), ...skills.map((s) => `## Skill: ${s.name}\n${cap(s.body, `skill ${s.name}`)}`), kb && `## KB prior art\n${cap(kb, "KB prior art")}`].filter(Boolean).join("\n\n") + "\n";
 }
 
 // The human label (herdr tab title, echo lines) may be anything; the slug is what lands in a directory name.

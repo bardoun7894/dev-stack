@@ -30,8 +30,8 @@ write(tiers, JSON.stringify({ tiers: { T0: ['cliproxy/claude-test'], T1: ['clipr
 const allow = join(tmp, 'worker-skills.json');
 write(allow, JSON.stringify({ worker: ['fake-skill', 'big-skill'], generated: 'test', method: 'jev choice' }));
 
-function dry(args, { env = {}, cwd = repo } = {}) {
-  const r = spawnSync(process.execPath, [JD, '--dry-run', '--harness', 'claude', '--cwd', cwd, ...args, 'do the thing'], {
+function dry(args, { env = {}, cwd = repo, brief = 'do the thing' } = {}) {
+  const r = spawnSync(process.execPath, [JD, '--dry-run', '--harness', 'claude', '--cwd', cwd, ...args, brief], {
     encoding: 'utf8',
     env: {
       ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers,
@@ -55,6 +55,42 @@ test('lean command isolates the worker from user config and loads a system-promp
   assert.doesNotMatch(r.script, /--bare/);
   // the variadic --tools stays last so it cannot swallow a flag
   assert.match(r.script, /--tools Bash Read Edit Write Glob Grep Skill 2>&1/);
+});
+
+// KB prior art: the lean worker prompt gets kb-retrieve's matches for the brief in --cwd (JDELEGATE_KB=0 turns it off)
+const kbProj = join(tmp, 'kb-proj');
+write(join(kbProj, 'ai-knowledge-base', 'knowledge', 'concepts', 'invoice-extraction.md'),
+  '---\ntitle: Invoice extraction\n---\nGemini extracts invoice pages; retry on timeout.\n');
+mkdirSync(join(kbProj, '.git'), { recursive: true });
+
+// kb-retrieve --condense calls claude; tests use stubs so no real Haiku call is made.
+const kbStubBin = (name, body) => { const d = join(tmp, `kb-${name}`); write(join(d, 'claude'), `#!/bin/bash\n${body}\n`); chmodSync(join(d, 'claude'), 0o755); return `${d}:${bin}:${process.env.PATH}`; };
+const kbClaudeFails = kbStubBin('fail', 'cat >/dev/null; exit 1');
+const kbClaudeCondenses = kbStubBin('ok', 'cat >/dev/null; echo "CONDENSED-STUB [[invoice-extraction]] retry on timeout"');
+
+test('KB prior art: worker prompt uses the condensed brief (kb-retrieve --condense)', () => {
+  const r = dry([], { cwd: kbProj, brief: 'fix invoice extraction', env: { PATH: kbClaudeCondenses } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.prompt, /^## KB prior art\nCONDENSED-STUB \[\[invoice-extraction\]\]/m);
+});
+
+test('KB prior art: lean worker-prompt.md gets the matches for the brief', () => {
+  const r = dry([], { cwd: kbProj, brief: 'fix invoice extraction', env: { PATH: kbClaudeFails } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.prompt, /^## KB prior art$/m);
+  assert.match(r.prompt, /### \[\[invoice-extraction\]\] \(ai-knowledge-base\/knowledge\/concepts\/invoice-extraction\.md\)/);
+});
+
+test('KB prior art: JDELEGATE_KB=0 leaves the worker prompt as before', () => {
+  const r = dry([], { cwd: kbProj, brief: 'fix invoice extraction', env: { JDELEGATE_KB: '0' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.prompt, /KB prior art/);
+});
+
+test('KB prior art: no match means no section', () => {
+  const r = dry([], { cwd: kbProj, brief: 'do the thing' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.prompt, /KB prior art/);
 });
 
 test('--full command is the plain one', () => {
