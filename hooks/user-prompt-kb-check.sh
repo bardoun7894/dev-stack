@@ -43,6 +43,14 @@ find_project_root() {
   return 1
 }
 
+# Everything below prints into a temp file; the end of the script wraps it as hookSpecificOutput.additionalContext.
+hook_capture=""
+if hook_capture=$(mktemp "${TMPDIR:-/tmp}/kb-hook.XXXXXX" 2>/dev/null); then
+  exec 3>&1 1>"$hook_capture"
+else
+  hook_capture=""
+fi
+
 # Read hook input from stdin — Claude Code passes a JSON blob with the prompt.
 # We capture it once and parse out the prompt field defensively. If anything
 # fails we fall back to "always emit the reminder" so we never under-inject.
@@ -313,6 +321,27 @@ RAWSTATE
   fi
 fi
 
+# --- KB prior art: keyword search of the project KB (bin/kb-retrieve, no AI call) ---
+#
+# Every prompt of 3+ words, when the project root has a KB. Started now so it overlaps the reminder checks
+# below and joined at the end. Hard timeout 2 s; any error or timeout -> no block. DEVSTACK_KB_RETRIEVE_BIN
+# overrides the binary; KB_PRIOR_ART=0 turns the block off.
+kb_bin="${DEVSTACK_KB_RETRIEVE_BIN:-$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/kb-retrieve}"
+kb_out=""
+kb_pid=""
+if [ -n "$root" ] && [ -n "$user_prompt" ] && [ "${KB_PRIOR_ART:-1}" != "0" ] && [ -f "$kb_bin" ] \
+  && { [ -d "$root/ai-knowledge-base/knowledge" ] || [ -d "$root/okf" ]; }; then
+  set -f; set -- $user_prompt; set +f
+  if [ $# -ge 3 ]; then
+    kb_out=$(mktemp "${TMPDIR:-/tmp}/kb-prior-art.XXXXXX" 2>/dev/null) || kb_out=""
+    if [ -n "$kb_out" ]; then
+      kb_timeout=$(command -v timeout || command -v gtimeout)
+      ${kb_timeout:+$kb_timeout 2} "$kb_bin" --root "$root" -- "${user_prompt:0:2000}" >"$kb_out" 2>/dev/null &
+      kb_pid=$!
+    fi
+  fi
+fi
+
 # --- Smart reminder: only inject when the prompt looks like project work ---
 #
 # Match keywords (case-insensitive). We're deliberately broad because false
@@ -385,4 +414,30 @@ fi
 if [ $emit_reminder -eq 1 ]; then
   printf '%s\n' 'REMINDER (standing rule from ~/.claude/CLAUDE.md): Before answering any question about project history, prior decisions, architecture, past bugs, or existing features, silently run /kb-query first and ground the reply in the cited [[wikilinks]]. Before any /speckit.* phase, run the matching /kb-spec phase first (pre before specify, plan before plan, tasks before tasks, implement before implement). Run /kb-spec post after /speckit.tasks. These are standing bridges — do not wait for explicit invocation.'
   mark_seen reminded
+fi
+
+# --- Join the KB prior art search ---
+kb_text=""
+if [ -n "$kb_pid" ]; then
+  if wait "$kb_pid" 2>/dev/null; then
+    kb_text=$(cat "$kb_out" 2>/dev/null)
+  fi
+fi
+[ -n "$kb_out" ] && rm -f "$kb_out"
+if [ -n "$kb_text" ]; then
+  printf '%s\n%s\n' 'KB prior art (auto-retrieved; cite [[links]] when relevant):' "$kb_text"
+fi
+
+# --- Emit: the captured text becomes hookSpecificOutput.additionalContext (JSON). Falls back to plain text. ---
+if [ -n "$hook_capture" ]; then
+  exec 1>&3 3>&-
+  hook_text=$(cat "$hook_capture" 2>/dev/null)
+  rm -f "$hook_capture"
+  if [ -n "$hook_text" ]; then
+    printf '%s' "$hook_text" | /usr/bin/python3 -c '
+import json, sys
+text = sys.stdin.buffer.read().decode("utf-8", "replace")
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}, ensure_ascii=False))
+' 2>/dev/null || printf '%s\n' "$hook_text"
+  fi
 fi

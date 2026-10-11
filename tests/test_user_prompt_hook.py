@@ -130,6 +130,53 @@ class HookTest(unittest.TestCase):
         out = self.run_hook("fix the login bug in the payment API", None)
         self.assertIn("REMINDER", out)
 
+    def run_proc(self, prompt, session="s-kb", extra_env=None):
+        env = {"HOME": self.home, "PATH": os.environ["PATH"], "DEVSTACK_SUGGEST_BIN": self.stub}
+        env.update(extra_env or {})
+        payload = {"prompt": prompt, "cwd": self.proj, "session_id": session}
+        return subprocess.run(["bash", HOOK], input=json.dumps(payload), capture_output=True, text=True,
+                              cwd=self.proj, env=env, timeout=20)
+
+    def context(self, proc):
+        return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] if proc.stdout.strip() else ""
+
+    def write_kb_page(self, rel, title, body):
+        path = os.path.join(self.proj, "ai-knowledge-base", "knowledge", rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"---\ntitle: {title}\n---\n{body}\n")
+
+    def test_kb_prior_art_is_injected_as_json(self):
+        self.write_kb_page("concepts/invoice-extraction.md", "Invoice extraction",
+                           "Gemini extracts invoice pages; retry on timeout.")
+        p = self.run_proc("how did we fix the invoice extraction")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        ctx = self.context(p)
+        self.assertIn("KB prior art (auto-retrieved; cite [[links]] when relevant):", ctx)
+        self.assertIn("### [[invoice-extraction]]", ctx)
+        self.assertIn("REMINDER", ctx)  # existing output is kept
+
+    def test_no_kb_means_no_prior_art_block(self):
+        p = self.run_proc("how did we fix the invoice extraction")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("KB prior art", self.context(p))
+
+    def test_prompts_under_three_words_are_skipped(self):
+        self.write_kb_page("concepts/invoice-extraction.md", "Invoice extraction",
+                           "Gemini extracts invoice pages; retry on timeout.")
+        p = self.run_proc("invoice extraction")
+        self.assertNotIn("KB prior art", self.context(p))
+
+    def test_failing_kb_retrieve_never_fails_the_hook(self):
+        self.write_kb_page("concepts/invoice-extraction.md", "Invoice extraction",
+                           "Gemini extracts invoice pages; retry on timeout.")
+        p = self.run_proc("how did we fix the invoice extraction", "s-kb-fail",
+                          {"DEVSTACK_KB_RETRIEVE_BIN": "/nonexistent/kb-retrieve"})
+        self.assertEqual(p.returncode, 0, p.stderr)
+        ctx = self.context(p)
+        self.assertNotIn("KB prior art", ctx)
+        self.assertIn("REMINDER", ctx)
+
 
 if __name__ == "__main__":
     unittest.main()

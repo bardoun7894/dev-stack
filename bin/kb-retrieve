@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""kb-retrieve: find prior art in a project's knowledge base by keyword, with no AI call.
+
+usage: kb-retrieve [--root DIR] [--k 3] [--max-chars 2500] [--jev|--no-jev] [--condense] "<text>"
+
+Searches *.md under <root>/okf/ and <root>/ai-knowledge-base/knowledge/ (index.md and log.md are skipped).
+Score per file: each distinct query term found in the title or filename adds 3, each one found in the body adds 1.
+Only files scoring >= 2 are printed. Prints nothing and exits 0 when there is no KB or nothing scores.
+
+--jev (default when `jev` is on PATH; --no-jev or KB_JEV=0 turns it off): the keyword stage keeps up to 8
+candidates and one `jev raw` call scores them all against the text; only those rated "relevant" or better are
+kept, best first, max k. Jev exit 2/3, a 1.5 s timeout or any error falls back to the keyword top k. Jev
+keeping nothing prints nothing. Decisions are logged under the tag kb-retrieve.
+--condense (off by default): pipe the output to `claude -p --model haiku` (lean: no hooks, MCP, CLAUDE.md or
+tools, 40 s) and print its brief (<= 1200 chars, [[links]] kept) instead. Any failure prints the output as is.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+EXCERPT_CHARS = 700
+MIN_SCORE = 2
+JEV_CANDIDATES = 8
+JEV_TIMEOUT = 1.5
+JEV_HEAD_CHARS = 300
+JEV_LEVELS = ["unrelated", "weak", "relevant", "directly answers"]
+JEV_KEEP_SCORE = 1.5  # round(score) >= 2 ("relevant")
+JEV_TAG = "kb-retrieve"
+CONDENSE_TIMEOUT = 40
+CONDENSE_MAX_CHARS = 1200
+SKIP_NAMES = {"index.md", "log.md"}
+STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "what", "when", "where", "which", "who", "how",
+    "are", "was", "were", "has", "have", "had", "not", "but", "can", "could", "should", "would", "will",
+    "into", "about", "your", "our", "their", "there", "here", "does", "did", "done", "its", "all", "any",
+    "some", "just", "also", "than", "then", "them", "they", "you", "why", "is", "it", "be", "to", "of",
+    "in", "on", "at", "by", "or", "an", "as", "do", "my", "me", "we", "so", "if",
+    # Arabic function words, after normalize()
+    "في", "من", "على", "الى", "عن", "مع", "هذا", "هذه", "التي", "الذي", "ان", "لا", "ما",
+}
+TOKEN_RE = re.compile(r"[a-z0-9]+|[ء-ي]+")
+DIACRITICS_RE = re.compile("[ً-ْـ]")
+
+
+def normalize(text):
+    """Lowercase, drop Arabic diacritics and tatweel, unify alef forms."""
+    text = DIACRITICS_RE.sub("", text.lower())
+    return text.translate(str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا"}))
+
+
+def tokens(text):
+    out = set()
+    for tok in TOKEN_RE.findall(normalize(text)):
+        if len(tok) >= 3 and tok not in STOPWORDS:
+            out.add(tok)
+    return out
+
+
+def find_root(start):
+    """Walk up from start to the first .git or .claude marker. Never checks HOME or anything above it."""
+    start = os.path.realpath(start)
+    home = os.path.realpath(os.path.expanduser("~"))
+    d = start
+    while d != home and d != os.path.dirname(d):
+        if os.path.exists(os.path.join(d, ".git")) or os.path.isdir(os.path.join(d, ".claude")):
+            return d
+        if not d.startswith(home + os.sep):
+            break
+        d = os.path.dirname(d)
+    return start
+
+
+def kb_dirs(root):
+    dirs = [os.path.join(root, "okf"), os.path.join(root, "ai-knowledge-base", "knowledge")]
+    return [d for d in dirs if os.path.isdir(d)]
+
+
+def walk_md(dirs):
+    found = []
+    for d in dirs:
+        for dirpath, _, names in os.walk(d):
+            for name in names:
+                if name.endswith(".md") and name not in SKIP_NAMES:
+                    found.append(os.path.join(dirpath, name))
+    return found
+
+
+def rg_content_hits(dirs, terms):
+    """Paths whose content has any term, from rg. None when rg cannot be used."""
+    if not shutil.which("rg"):
+        return None
+    cmd = ["rg", "-l", "-i", "-F", "--no-ignore", "-g", "*.md"]
+    for t in sorted(terms):
+        cmd += ["-e", t]
+    cmd += ["--"] + dirs
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode not in (0, 1):
+        return None
+    return {os.path.normpath(p) for p in r.stdout.splitlines()}
+
+
+def candidate_files(dirs, terms):
+    """*.md files that may score for these terms. rg prefilters content for ASCII terms only: it
+    cannot see Arabic normalisation (alef variants, diacritics), so with Arabic terms every file is scored.
+    Filename hits are always kept, since the title and filename count x3."""
+    files = walk_md(dirs)
+    hits = None
+    if all(t.isascii() for t in terms):
+        hits = rg_content_hits(dirs, terms)
+    if hits is None:
+        return files
+    return [p for p in files if os.path.normpath(p) in hits or tokens(os.path.splitext(os.path.basename(p))[0].replace("-", " ").replace("_", " ")) & terms]
+
+
+def split_frontmatter(text):
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            fm = text[4:end]
+            body = text[end + 4:].lstrip("\n")
+            return fm, body
+    return "", text
+
+
+def frontmatter_title(fm):
+    for line in fm.splitlines():
+        if line.startswith("title:"):
+            return line[len("title:"):].strip().strip("\"'")
+    return ""
+
+
+TITLES = {}  # path -> frontmatter title, filled by score_file for the Jev screen
+
+
+def score_file(path, terms):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return 0, ""
+    fm, body = split_frontmatter(text)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    TITLES[path] = frontmatter_title(fm)
+    title_terms = tokens(stem.replace("-", " ").replace("_", " ") + " " + frontmatter_title(fm))
+    body_terms = tokens(body)
+    score = 0
+    for t in terms:
+        if t in title_terms:
+            score += 3
+        if t in body_terms:
+            score += 1
+    return score, body
+
+
+def ranked(root, text, limit):
+    """Up to `limit` (stem, rel, body, title) tuples scoring >= MIN_SCORE, best first."""
+    terms = tokens(text)
+    if not terms:
+        return []
+    dirs = kb_dirs(root)
+    if not dirs:
+        return []
+    scored = []
+    for path in candidate_files(dirs, terms):
+        if os.path.basename(path) in SKIP_NAMES:
+            continue
+        score, body = score_file(path, terms)
+        if score >= MIN_SCORE:
+            rel = os.path.relpath(path, root)
+            scored.append((-score, rel, body, TITLES.get(path, "")))
+    scored.sort()
+    return [(os.path.splitext(os.path.basename(rel))[0], rel, body, title) for _, rel, body, title in scored[:limit]]
+
+
+def jev_screen(text, cands):
+    """One `jev raw` call for all candidates. Returns the candidates rated relevant or better, best first,
+    or None when Jev cannot be used (caller falls back to the keyword order)."""
+    jev = shutil.which("jev")
+    if not jev:
+        return None
+    articles, questions = [], {}
+    for i, (stem, rel, body, title) in enumerate(cands):
+        qid = stem if stem not in questions else f"{stem}~{i}"
+        articles.append({"id": qid, "title": title or stem, "head": body.strip()[:JEV_HEAD_CHARS]})
+        questions[qid] = {
+            "type": "score",
+            "instructions": f'How relevant is the article with id "{qid}" in state.articles to state.prompt?',
+            "criteria": JEV_LEVELS,
+        }
+    req = {"state": {"prompt": text, "articles": articles}, "questions": questions}
+    try:
+        r = subprocess.run([jev, "raw", "--log", JEV_TAG], input=json.dumps(req), capture_output=True,
+                           text=True, timeout=JEV_TIMEOUT)
+        if r.returncode != 0:
+            return None
+        answers = json.loads(r.stdout)["answers"]
+        scores = {}
+        for a in articles:
+            ans = answers[a["id"]]
+            scores[a["id"]] = float(ans["score"])
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
+    kept = []
+    for i, (a, cand) in enumerate(zip(articles, cands)):
+        if scores[a["id"]] >= JEV_KEEP_SCORE:
+            kept.append((-scores[a["id"]], i, cand))
+    kept.sort()
+    return [c for _, _, c in kept]
+
+
+def render(items, max_chars):
+    out = ""
+    for stem, rel, body, _ in items:
+        header = f"### [[{stem}]] ({rel})"
+        section = f"{header}\n{body.strip()[:EXCERPT_CHARS]}\n\n"
+        if len(out) + len(section) > max_chars:
+            remaining = max_chars - len(out)
+            if remaining < len(header) + 40:
+                break
+            section = section[:remaining]
+        out += section
+    return out
+
+
+def retrieve(root, text, k, max_chars, use_jev=False):
+    cands = ranked(root, text, JEV_CANDIDATES if use_jev else k)
+    if use_jev and cands:
+        kept = jev_screen(text, cands)
+        cands = cands[:k] if kept is None else kept[:k]
+    return render(cands[:k], max_chars)
+
+
+def condense(text, kb_out):
+    """A brief of kb_out for `text` from Haiku, or kb_out unchanged on any failure."""
+    claude = shutil.which("claude")
+    if not claude or not kb_out.strip():
+        return kb_out
+    prompt = (
+        f"Condense the knowledge-base excerpts below into a brief of at most {CONDENSE_MAX_CHARS} characters "
+        "for a worker who will act on the text between <text> tags. Keep every [[link]] and only the facts that "
+        "bear on that text. Output the brief only, no preamble.\n\n"
+        f"<text>\n{text}\n</text>\n\n<excerpts>\n{kb_out}\n</excerpts>\n"
+    )
+    settings = json.dumps({"disableAllHooks": True, "autoMemoryEnabled": False, "includeCoAuthoredBy": False,
+                           "attribution": {"commit": "", "pr": ""}, "disableBundledSkills": True})
+    cmd = [claude, "-p", "--model", "haiku", "--setting-sources", "project,local", "--settings", settings,
+           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--exclude-dynamic-system-prompt-sections",
+           "--tools", ""]
+    env = dict(os.environ, CLAUDE_CODE_DISABLE_CLAUDE_MDS="1")
+    try:
+        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=CONDENSE_TIMEOUT, env=env,
+                           cwd=os.environ.get("TMPDIR") or "/tmp")
+    except (OSError, subprocess.SubprocessError):
+        return kb_out
+    brief = r.stdout.strip()
+    if r.returncode != 0 or not brief:
+        return kb_out
+    return brief[:CONDENSE_MAX_CHARS] + "\n"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Keyword search of a project KB, no AI call.")
+    parser.add_argument("--root", default=os.getcwd(), help="project directory (default: $PWD)")
+    parser.add_argument("--k", type=int, default=3, help="max files to print")
+    parser.add_argument("--max-chars", type=int, default=2500, help="max total output characters")
+    parser.add_argument("--jev", dest="jev", action="store_true", default=None,
+                        help="screen candidates with one Jev call (default when jev is on PATH)")
+    parser.add_argument("--no-jev", dest="jev", action="store_false", help="keyword result only")
+    parser.add_argument("--condense", action="store_true", help="condense the output with Haiku (<= 1200 chars)")
+    parser.add_argument("text", nargs="?", default="", help="the prompt or brief to search for")
+    args = parser.parse_args(argv)
+    root = find_root(args.root)
+    use_jev = args.jev
+    if use_jev is None:
+        use_jev = os.environ.get("KB_JEV") != "0" and shutil.which("jev") is not None
+    out = retrieve(root, args.text, max(args.k, 0), max(args.max_chars, 0), use_jev)
+    if args.condense and out:
+        out = condense(args.text, out)
+    sys.stdout.write(out)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:  # never break the caller: report on stderr, print nothing
+        sys.stderr.write(f"kb-retrieve: {e}\n")
+        sys.exit(0)
