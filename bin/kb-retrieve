@@ -11,6 +11,13 @@ Only files scoring >= 2 are printed. Prints nothing and exits 0 when there is no
 candidates and one `jev raw` call scores them all against the text; only those rated "relevant" or better are
 kept, best first, max k. Jev exit 2/3, a 1.5 s timeout or any error falls back to the keyword top k. Jev
 keeping nothing prints nothing. Decisions are logged under the tag kb-retrieve.
+Global fallback (--no-global or KB_GLOBAL=0 turns it off): when the root has no KB, or the local search
+(after Jev) yields nothing, a cached index of every <dir>/ai-knowledge-base/knowledge and <dir>/okf under
+KB_GLOBAL_ROOTS (colon list; default ~/projects:~/code on macOS, /root/projects:/var/www:/root/code on Linux)
+is keyword-scored, the top 8 are Jev-screened, and hits print as "### [[<project>/<stem>]] (<abs path>)".
+Git worktrees (.git is a file) and the current root are skipped. The index lives in
+~/.cache/kb-retrieve/global-index.json; older than 6 h it is still used and rebuilt by a detached process
+(lock file, one at a time); missing, it is built inline within 1 s or else in the background.
 --condense (off by default): pipe the output to `claude -p --model haiku` (lean: no hooks, MCP, CLAUDE.md or
 tools, 40 s) and print its brief (<= 1200 chars, [[links]] kept) instead. Any failure prints the output as is.
 """
@@ -21,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 EXCERPT_CHARS = 700
 MIN_SCORE = 2
@@ -33,6 +41,10 @@ JEV_TAG = "kb-retrieve"
 CONDENSE_TIMEOUT = 40
 CONDENSE_MAX_CHARS = 1200
 SKIP_NAMES = {"index.md", "log.md"}
+INDEX_MAX_AGE = 6 * 3600
+INDEX_INLINE_BUDGET = 1.0
+INDEX_VERSION = 1
+LOCK_STALE = 600
 STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "what", "when", "where", "which", "who", "how",
     "are", "was", "were", "has", "have", "had", "not", "but", "can", "could", "should", "would", "will",
@@ -215,6 +227,168 @@ def jev_screen(text, cands):
     return [c for _, _, c in kept]
 
 
+# ---- global (cross-project) fallback ----
+
+def cache_dir():
+    return os.path.join(os.path.expanduser("~"), ".cache", "kb-retrieve")
+
+
+def index_path():
+    return os.path.join(cache_dir(), "global-index.json")
+
+
+def global_roots():
+    env = os.environ.get("KB_GLOBAL_ROOTS")
+    if env is not None:
+        return [os.path.realpath(os.path.expanduser(r)) for r in env.split(":") if r]
+    if sys.platform == "darwin":
+        defaults = ["~/projects", "~/code"]
+    else:
+        defaults = ["/root/projects", "/var/www", "/root/code"]
+    return [os.path.realpath(os.path.expanduser(r)) for r in defaults]
+
+
+def build_index(roots, deadline=None):
+    """{"roots", "built", "articles"} over every <root>/<dir>/{ai-knowledge-base/knowledge,okf}. Worktrees are
+    skipped. okf duplicates of a knowledge page (same project and stem) are dropped. None past the deadline."""
+    articles = []
+    for base in roots:
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            proj = os.path.join(base, name)
+            if not os.path.isdir(proj) or os.path.isfile(os.path.join(proj, ".git")):
+                continue
+            seen = set()
+            kbs = [os.path.join(proj, "ai-knowledge-base", "knowledge"), os.path.join(proj, "okf")]
+            for path in walk_md([d for d in kbs if os.path.isdir(d)]):
+                if deadline is not None and time.monotonic() > deadline:
+                    return None
+                stem = os.path.splitext(os.path.basename(path))[0]
+                if stem in seen:
+                    continue
+                seen.add(stem)
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        text = f.read()
+                except OSError:
+                    continue
+                fm, body = split_frontmatter(text)
+                title = frontmatter_title(fm)
+                articles.append({
+                    "project": name, "root": proj, "stem": stem, "path": path, "title": title,
+                    "head": body.strip()[:JEV_HEAD_CHARS],
+                    "tt": sorted(tokens(stem.replace("-", " ").replace("_", " ") + " " + title)),
+                    "bt": sorted(tokens(body)),
+                })
+    return {"version": INDEX_VERSION, "roots": roots, "built": time.time(), "articles": articles}
+
+
+def save_index(index):
+    os.makedirs(cache_dir(), exist_ok=True)
+    tmp = f"{index_path()}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, index_path())
+
+
+def rebuild_index_locked():
+    """Build and save under the lock file. Returns False when another rebuild holds the lock."""
+    os.makedirs(cache_dir(), exist_ok=True)
+    lock = os.path.join(cache_dir(), "rebuild.lock")
+    try:
+        if time.time() - os.path.getmtime(lock) > LOCK_STALE:
+            os.unlink(lock)
+    except OSError:
+        pass
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except OSError:
+        return False
+    try:
+        save_index(build_index(global_roots()))
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+    return True
+
+
+def spawn_rebuild():
+    """Detached background rebuild (KB_GLOBAL_REBUILD_CMD overrides the command, for tests)."""
+    override = os.environ.get("KB_GLOBAL_REBUILD_CMD")
+    cmd = [override] if override else [sys.executable, os.path.realpath(__file__), "--rebuild-index"]
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
+def load_index():
+    """The cached index, or None. A stale one is returned as is and a background rebuild is started; a
+    missing or other-roots one is built inline when that fits INDEX_INLINE_BUDGET, else in the background."""
+    roots = global_roots()
+    index = None
+    try:
+        with open(index_path(), encoding="utf-8") as f:
+            index = json.load(f)
+        if index.get("version") != INDEX_VERSION or index.get("roots") != roots:
+            index = None
+    except (OSError, ValueError, AttributeError):
+        index = None
+    if index is not None:
+        if time.time() - index.get("built", 0) > INDEX_MAX_AGE:
+            spawn_rebuild()
+        return index
+    index = build_index(roots, time.monotonic() + INDEX_INLINE_BUDGET)
+    if index is None:
+        spawn_rebuild()
+        return None
+    try:
+        save_index(index)
+    except OSError:
+        pass
+    return index
+
+
+def global_ranked(root, text, limit):
+    """Up to `limit` (label, abs path, head, title) tuples from the global index, best first."""
+    terms = tokens(text)
+    if not terms:
+        return []
+    index = load_index()
+    if not index:
+        return []
+    here = os.path.realpath(root)
+    scored = []
+    for a in index["articles"]:
+        if a["root"] == here:
+            continue
+        tt, bt = set(a["tt"]), set(a["bt"])
+        score = sum((3 if t in tt else 0) + (1 if t in bt else 0) for t in terms)
+        if score >= MIN_SCORE:
+            scored.append((-score, a["project"], a["stem"], a))
+    scored.sort(key=lambda x: x[:3])
+    return [(f"{a['project']}/{a['stem']}", a["path"], a["head"], a["title"]) for *_, a in scored[:limit]]
+
+
+def fill_bodies(items):
+    """Replace each item's head with the page body from disk (heads are only 300 chars)."""
+    out = []
+    for label, path, head, title in items:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                head = split_frontmatter(f.read())[1]
+        except OSError:
+            pass
+        out.append((label, path, head, title))
+    return out
+
+
 def render(items, max_chars):
     out = ""
     for stem, rel, body, _ in items:
@@ -229,11 +403,18 @@ def render(items, max_chars):
     return out
 
 
-def retrieve(root, text, k, max_chars, use_jev=False):
-    cands = ranked(root, text, JEV_CANDIDATES if use_jev else k)
+def screened(cands, text, k, use_jev):
     if use_jev and cands:
         kept = jev_screen(text, cands)
-        cands = cands[:k] if kept is None else kept[:k]
+        return cands[:k] if kept is None else kept[:k]
+    return cands[:k]
+
+
+def retrieve(root, text, k, max_chars, use_jev=False, use_global=False):
+    cands = screened(ranked(root, text, JEV_CANDIDATES if use_jev else k), text, k, use_jev)
+    if not cands and use_global:
+        cands = screened(global_ranked(root, text, JEV_CANDIDATES if use_jev else k), text, k, use_jev)
+        cands = fill_bodies(cands)
     return render(cands[:k], max_chars)
 
 
@@ -273,14 +454,21 @@ def main(argv=None):
     parser.add_argument("--jev", dest="jev", action="store_true", default=None,
                         help="screen candidates with one Jev call (default when jev is on PATH)")
     parser.add_argument("--no-jev", dest="jev", action="store_false", help="keyword result only")
+    parser.add_argument("--no-global", dest="use_global", action="store_false", default=True,
+                        help="do not fall back to other projects' KBs")
+    parser.add_argument("--rebuild-index", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--condense", action="store_true", help="condense the output with Haiku (<= 1200 chars)")
     parser.add_argument("text", nargs="?", default="", help="the prompt or brief to search for")
     args = parser.parse_args(argv)
+    if args.rebuild_index:
+        rebuild_index_locked()
+        return 0
     root = find_root(args.root)
     use_jev = args.jev
     if use_jev is None:
         use_jev = os.environ.get("KB_JEV") != "0" and shutil.which("jev") is not None
-    out = retrieve(root, args.text, max(args.k, 0), max(args.max_chars, 0), use_jev)
+    use_global = args.use_global and os.environ.get("KB_GLOBAL") != "0"
+    out = retrieve(root, args.text, max(args.k, 0), max(args.max_chars, 0), use_jev, use_global)
     if args.condense and out:
         out = condense(args.text, out)
     sys.stdout.write(out)
