@@ -32,7 +32,7 @@ class KbRetrieveTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_kb(self, *args, root=None, env_extra=None):
-        env = dict(os.environ, HOME=self.home, KB_JEV="0")
+        env = dict(os.environ, HOME=self.home, KB_JEV="0", KB_GLOBAL_ROOTS=os.path.join(self.base, "no-global"))
         env.update(env_extra or {})
         cmd = ["python3", KB_RETRIEVE]
         if root is not None:
@@ -280,6 +280,123 @@ class KbRetrieveJevCondenseTest(unittest.TestCase):
         r = self.run_kb("--condense", "zzzunmatched qqqterm")
         self.assertEqual(r.stdout, "")
         self.assertFalse(os.path.exists(self.cl_stdin))
+
+
+class KbRetrieveGlobalTest(unittest.TestCase):
+    """Cross-project fallback: cached index over KB_GLOBAL_ROOTS, fake jev, fake background rebuild."""
+
+    setUp_base = KbRetrieveTest.setUp
+    tearDown = KbRetrieveTest.tearDown
+
+    def setUp(self):
+        self.setUp_base()
+        self.groot = os.path.join(self.base, "groot")
+        self.other = os.path.join(self.groot, "abd")
+        write(os.path.join(self.other, "ai-knowledge-base", "knowledge", "concepts", "invoice-extraction.md"),
+              page("Invoice extraction", "Gemini extracts invoice pages; retry on timeout."))
+        self.nokb = os.path.join(self.base, "nokb")
+        os.makedirs(os.path.join(self.nokb, ".git"))
+        self.index = os.path.join(self.home, ".cache", "kb-retrieve", "global-index.json")
+
+    def run_kb(self, *args, root=None, env_extra=None):
+        env = {"KB_GLOBAL_ROOTS": self.groot}
+        env.update(env_extra or {})
+        return KbRetrieveTest.run_kb(self, *args, root=root or self.nokb, env_extra=env)
+
+    def test_no_kb_root_hits_global_with_project_label(self):
+        r = self.run_kb("invoice extraction gemini")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first = r.stdout.split("\n", 1)[0]
+        self.assertEqual(first, "### [[abd/invoice-extraction]] (%s)" % os.path.join(
+            self.other, "ai-knowledge-base", "knowledge", "concepts", "invoice-extraction.md"))
+        self.assertIn("Gemini extracts invoice pages", r.stdout)
+        self.assertTrue(os.path.exists(self.index))
+
+    def test_local_miss_falls_back_to_global(self):
+        write(os.path.join(self.kb, "concepts", "unrelated.md"), page("Deploy notes", "nginx and systemd only"))
+        r = self.run_kb("invoice extraction gemini", root=self.proj)
+        self.assertIn("### [[abd/invoice-extraction]]", r.stdout)
+
+    def test_local_hit_stays_local(self):
+        write(os.path.join(self.kb, "concepts", "invoice-extraction.md"),
+              page("Invoice extraction", "local copy of the invoice extraction notes with gemini"))
+        r = self.run_kb("invoice extraction gemini", root=self.proj)
+        self.assertTrue(r.stdout.startswith("### [[invoice-extraction]] (ai-knowledge-base/"), r.stdout)
+        self.assertNotIn("abd/", r.stdout)
+
+    def test_current_root_is_not_searched_globally(self):
+        r = self.run_kb("invoice extraction gemini", root=self.other)
+        self.assertTrue(r.stdout.startswith("### [[invoice-extraction]] (ai-knowledge-base/"), r.stdout)
+        self.assertNotIn("abd/invoice", r.stdout)
+
+    def test_worktree_is_skipped(self):
+        wt = os.path.join(self.groot, "abd-wt")
+        write(os.path.join(wt, ".git"), "gitdir: /elsewhere\n")
+        write(os.path.join(wt, "ai-knowledge-base", "knowledge", "wt-only-invoice.md"),
+              page("Worktree invoice extraction gemini", "invoice extraction gemini worktree copy"))
+        r = self.run_kb("invoice extraction gemini worktree", env_extra={})
+        self.assertNotIn("abd-wt", r.stdout)
+        self.assertIn("[[abd/invoice-extraction]]", r.stdout)
+
+    def test_kb_global_zero_and_flag_disable(self):
+        r = self.run_kb("invoice extraction gemini", env_extra={"KB_GLOBAL": "0"})
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        r = self.run_kb("--no-global", "invoice extraction gemini")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+    def test_stale_index_is_used_and_background_rebuild_started(self):
+        self.run_kb("invoice extraction gemini")  # builds the index
+        old = time.time() - 7 * 3600
+        os.utime(self.index, (old, old))
+        import json
+        with open(self.index) as f:
+            data = json.load(f)
+        data["built"] = old
+        with open(self.index, "w") as f:
+            json.dump(data, f)
+        os.utime(self.index, (old, old))
+        # the stale index still answers although the page is gone from disk's keyword side
+        marker = os.path.join(self.base, "rebuild-marker")
+        fake = os.path.join(self.base, "fake-rebuild.sh")
+        write(fake, "#!/bin/sh\necho started > '%s'\n" % marker)
+        os.chmod(fake, 0o755)
+        r = self.run_kb("invoice extraction gemini", env_extra={"KB_GLOBAL_REBUILD_CMD": fake})
+        self.assertIn("[[abd/invoice-extraction]]", r.stdout)
+        for _ in range(50):
+            if os.path.exists(marker):
+                break
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(marker))
+
+    def test_fresh_index_does_not_rebuild(self):
+        self.run_kb("invoice extraction gemini")
+        marker = os.path.join(self.base, "rebuild-marker")
+        fake = os.path.join(self.base, "fake-rebuild.sh")
+        write(fake, "#!/bin/sh\necho started > '%s'\n" % marker)
+        os.chmod(fake, 0o755)
+        self.run_kb("invoice extraction gemini", env_extra={"KB_GLOBAL_REBUILD_CMD": fake})
+        time.sleep(0.3)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_rebuild_index_flag_writes_index_once_under_lock(self):
+        self.run_kb("--rebuild-index")
+        self.assertTrue(os.path.exists(self.index))
+        lock = os.path.join(self.home, ".cache", "kb-retrieve", "rebuild.lock")
+        self.assertFalse(os.path.exists(lock))
+        os.unlink(self.index)
+        write(lock, "")
+        self.run_kb("--rebuild-index")
+        self.assertFalse(os.path.exists(self.index))  # another rebuild holds the lock
+
+    def test_global_hits_are_jev_screened(self):
+        bindir = os.path.join(self.base, "bin")
+        write(os.path.join(bindir, "jev"), FAKE_JEV)
+        os.chmod(os.path.join(bindir, "jev"), 0o755)
+        seen = os.path.join(self.base, "jev-seen.jsonl")
+        env = {"PATH": bindir + os.pathsep + os.environ["PATH"], "KB_JEV": "1", "FAKE_JEV_SEEN": seen}
+        r = self.run_kb("invoice extraction gemini", env_extra=env)
+        self.assertIn("[[abd/invoice-extraction]]", r.stdout)
+        self.assertTrue(os.path.exists(seen))
 
 
 if __name__ == "__main__":

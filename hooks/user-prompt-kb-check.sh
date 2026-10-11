@@ -323,20 +323,19 @@ fi
 
 # --- KB prior art: keyword search of the project KB (bin/kb-retrieve, no AI call) ---
 #
-# Every prompt of 3+ words, when the project root has a KB. Started now so it overlaps the reminder checks
-# below and joined at the end. Hard timeout 2 s; any error or timeout -> no block. DEVSTACK_KB_RETRIEVE_BIN
+# Every prompt of 3+ words; a project without a KB falls back to the global index inside kb-retrieve.
+# Started now so it overlaps the reminder checks below and joined at the end. Hard timeout 2 s; any error or timeout -> no block. DEVSTACK_KB_RETRIEVE_BIN
 # overrides the binary; KB_PRIOR_ART=0 turns the block off.
 kb_bin="${DEVSTACK_KB_RETRIEVE_BIN:-$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/kb-retrieve}"
 kb_out=""
 kb_pid=""
-if [ -n "$root" ] && [ -n "$user_prompt" ] && [ "${KB_PRIOR_ART:-1}" != "0" ] && [ -f "$kb_bin" ] \
-  && { [ -d "$root/ai-knowledge-base/knowledge" ] || [ -d "$root/okf" ]; }; then
+if [ -n "$user_prompt" ] && [ "${KB_PRIOR_ART:-1}" != "0" ] && [ -f "$kb_bin" ]; then
   set -f; set -- $user_prompt; set +f
   if [ $# -ge 3 ]; then
     kb_out=$(mktemp "${TMPDIR:-/tmp}/kb-prior-art.XXXXXX" 2>/dev/null) || kb_out=""
     if [ -n "$kb_out" ]; then
       kb_timeout=$(command -v timeout || command -v gtimeout)
-      ${kb_timeout:+$kb_timeout 2} "$kb_bin" --root "$root" -- "${user_prompt:0:2000}" >"$kb_out" 2>/dev/null &
+      ${kb_timeout:+$kb_timeout 2} "$kb_bin" --root "${root:-$PWD}" -- "${user_prompt:0:2000}" >"$kb_out" 2>/dev/null &
       kb_pid=$!
     fi
   fi
