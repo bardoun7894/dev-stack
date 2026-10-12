@@ -11,7 +11,8 @@
   var tools = @json($tools);
 
   tools.forEach(function (t) {
-    mc.registerTool({
+    // Chrome 156: the returned promise rejects with AbortError on unregister.
+    Promise.resolve(mc.registerTool({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
@@ -31,7 +32,9 @@
         var res = await fetch(url, opts);
         return { content: [{ type: 'text', text: await res.text() }], isError: !res.ok };
       }
-    }, { signal: ac.signal });
+    }, { signal: ac.signal })).catch(function (err) {
+      if (!ac.signal.aborted) console.warn('WebMCP: ' + t.name + ' was rejected', err);
+    });
   });
 
   window.addEventListener('pagehide', function () { ac.abort(); });

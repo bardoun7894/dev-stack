@@ -24,6 +24,7 @@ WebMCP lets a page register tools that in-browser agents can call, instead of sc
 7. Annotate: `readOnlyHint` for reads, `consequentialHint` for purchases/deletes/sends, `untrustedContentHint` when results contain user-generated content.
 8. Unregister on unmount/navigation by aborting the `AbortController` passed as `{signal}` to `registerTool`.
 9. Pass tool input as an object (JSON-stringified args are deprecated from Chrome 155).
+10. `registerTool` returns a promise (Chrome 156) that rejects with AbortError on unregister: always `.catch` it and ignore it when the signal is aborted.
 
 ## Imperative API
 

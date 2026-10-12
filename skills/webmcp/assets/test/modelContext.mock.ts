@@ -9,7 +9,7 @@ export interface RegisteredTool {
 
 export interface ModelContextMock {
   tools: Map<string, RegisteredTool>;
-  registerTool(tool: RegisteredTool, options?: { signal?: AbortSignal }): void;
+  registerTool(tool: RegisteredTool, options?: { signal?: AbortSignal }): void | Promise<unknown>;
   call(name: string, input?: unknown): Promise<unknown>;
 }
 
@@ -20,7 +20,14 @@ export function installModelContextMock(): ModelContextMock {
     registerTool(tool, options) {
       if (tools.has(tool.name)) throw new Error(`duplicate tool: ${tool.name}`);
       tools.set(tool.name, tool);
-      options?.signal?.addEventListener("abort", () => tools.delete(tool.name));
+      const signal = options?.signal;
+      // Like Chrome 156: the promise rejects with AbortError when the signal aborts.
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          tools.delete(tool.name);
+          reject(new DOMException("The tool was unregistered", "AbortError"));
+        });
+      });
     },
     call(name, input = {}) {
       const tool = tools.get(name);

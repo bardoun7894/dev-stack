@@ -32,6 +32,31 @@ describe("WebMcpTools", () => {
     expect(mc.tools.size).toBe(0);
   });
 
+  it("handles the AbortError promise on unmount without unhandled rejection", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { unmount } = render(<WebMcpTools tools={tools} />);
+    unmount();
+    await new Promise((r) => setTimeout(r, 0));
+    process.off("unhandledRejection", unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("reports a non-abort rejection via console.warn", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mc.registerTool = () => Promise.reject(new Error("invalid schema"));
+    render(<WebMcpTools tools={tools} />);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(warn).toHaveBeenCalledWith(
+      "WebMCP: search_products was rejected",
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
   it("calls execute with the input", async () => {
     render(<WebMcpTools tools={tools} />);
     await mc.call("search_products", { q: "shoes" });

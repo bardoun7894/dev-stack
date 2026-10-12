@@ -18,7 +18,7 @@ export interface WebMcpTool<I = any> {
 }
 
 interface ModelContextLike {
-  registerTool(tool: WebMcpTool, options?: { signal?: AbortSignal }): void;
+  registerTool(tool: WebMcpTool, options?: { signal?: AbortSignal }): void | Promise<unknown>;
 }
 
 /** Registers the given tools on document.modelContext; no-op when unsupported. */
@@ -29,7 +29,10 @@ export function WebMcpTools({ tools }: { tools: WebMcpTool[] }) {
     const ac = new AbortController();
     for (const tool of tools) {
       try {
-        mc.registerTool(tool, { signal: ac.signal });
+        // Chrome 156: the returned promise rejects with AbortError on unregister.
+        Promise.resolve(mc.registerTool(tool, { signal: ac.signal })).catch((err) => {
+          if (!ac.signal.aborted) console.warn(`WebMCP: ${tool.name} was rejected`, err);
+        });
       } catch (err) {
         console.warn(`WebMCP: failed to register ${tool.name}`, err);
       }
