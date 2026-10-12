@@ -167,6 +167,19 @@ class HookTest(unittest.TestCase):
         p = self.run_proc("invoice extraction")
         self.assertNotIn("KB prior art", self.context(p))
 
+    def test_system_notifications_get_no_prior_art(self):
+        self.write_kb_page("concepts/invoice-extraction.md", "Invoice extraction",
+                           "Gemini extracts invoice pages; retry on timeout.")
+        ask = "how did we fix the invoice extraction"
+        self.assertIn("KB prior art", self.context(self.run_proc(ask, "s-n0")))  # control: same words, real prompt
+        for i, prompt in enumerate((
+                f"<task-notification><task-id>b1</task-id><summary>{ask}</summary></task-notification>",
+                f"{ask} [SYSTEM NOTIFICATION: background task finished]",
+                f"Heads up\n[SYSTEM NOTIFICATION] {ask}")):
+            p = self.run_proc(prompt, f"s-n{i + 1}")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertNotIn("KB prior art", self.context(p), prompt)
+
     def test_failing_kb_retrieve_never_fails_the_hook(self):
         self.write_kb_page("concepts/invoice-extraction.md", "Invoice extraction",
                            "Gemini extracts invoice pages; retry on timeout.")
