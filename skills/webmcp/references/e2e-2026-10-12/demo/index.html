@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Course catalog (WebMCP demo)</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+  section { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  h2 { margin-top: 0; font-size: 1.1rem; }
+  #webmcp-status { font-weight: 600; }
+  form:tool-form-active { outline: 3px solid #1a73e8; }
+  form:tool-submit-active button { background: #1a73e8; color: #fff; }
+  li { margin: .2rem 0; }
+</style>
+</head>
+<body>
+<h1>Course catalog</h1>
+<p>WebMCP: <span id="webmcp-status">checking</span></p>
+
+<section>
+  <h2>Search</h2>
+  <input id="q" placeholder="e.g. IELTS" aria-label="Search courses">
+  <button id="manual-search" type="button">Search</button>
+  <ul id="results" aria-live="polite"></ul>
+</section>
+
+<section>
+  <h2>Cart (<span id="cart-count">0</span>)</h2>
+  <ul id="cart"></ul>
+</section>
+
+<section>
+  <h2>Contact</h2>
+  <!-- toolautosubmit is acceptable only because this demo form sends nothing anywhere;
+       for a real consequential form leave it off so the user confirms. -->
+  <form id="contact" toolname="contact_form" toolautosubmit
+        tooldescription="Send a message to the course advisors. Returns a confirmation with the sender name.">
+    <p><label>Name <input name="name" required toolparamdescription="Full name of the sender"></label></p>
+    <p><label>Email <input name="email" type="email" required toolparamdescription="Sender email address"></label></p>
+    <p><label>Message <textarea name="message" toolparamdescription="Message body for the advisors"></textarea></label></p>
+    <button type="submit">Send</button>
+  </form>
+  <p id="contact-status" aria-live="polite"></p>
+</section>
+
+<script>
+(function () {
+  var COURSES = [
+    { id: 'c101', title: 'IELTS Academic Preparation', level: 'B2' },
+    { id: 'c102', title: 'IELTS General Writing Workshop', level: 'B1' },
+    { id: 'c201', title: 'Business English Essentials', level: 'B1' },
+    { id: 'c301', title: 'Python for Beginners', level: 'A1' },
+    { id: 'c302', title: 'Data Analysis with SQL', level: 'B1' }
+  ];
+  var cart = [];
+
+  function search(q) {
+    var needle = String(q || '').toLowerCase().trim();
+    return COURSES.filter(function (c) { return c.title.toLowerCase().indexOf(needle) !== -1; });
+  }
+  function renderResults(items) {
+    var ul = document.getElementById('results');
+    ul.textContent = '';
+    items.forEach(function (c) {
+      var li = document.createElement('li');
+      li.textContent = c.id + ' - ' + c.title + ' (' + c.level + ')';
+      ul.appendChild(li);
+    });
+    if (!items.length) ul.textContent = 'No courses found';
+  }
+  function renderCart() {
+    var ul = document.getElementById('cart');
+    ul.textContent = '';
+    cart.forEach(function (c) {
+      var li = document.createElement('li');
+      li.textContent = c.id + ' - ' + c.title;
+      ul.appendChild(li);
+    });
+    document.getElementById('cart-count').textContent = String(cart.length);
+  }
+  function text(obj, isError) {
+    return { content: [{ type: 'text', text: JSON.stringify(obj) }], isError: !!isError };
+  }
+
+  // Works with or without WebMCP: plain UI path.
+  document.getElementById('manual-search').addEventListener('click', function () {
+    renderResults(search(document.getElementById('q').value));
+  });
+
+  var form = document.getElementById('contact');
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var data = new FormData(form);
+    var name = String(data.get('name') || '').trim();
+    var email = String(data.get('email') || '').trim();
+    var result = { sent: !!(name && email), to: 'advisors', from: name, email: email };
+    document.getElementById('contact-status').textContent =
+      result.sent ? 'Message sent by ' + name + ' <' + email + '>' : 'Name and email are required';
+    if (e.agentInvoked) e.respondWith(Promise.resolve(text(result, !result.sent)));
+  });
+
+  var mc = document.modelContext;
+  var status = document.getElementById('webmcp-status');
+  if (!mc || typeof mc.registerTool !== 'function') {
+    status.textContent = 'unavailable (page works without it)';
+    return;
+  }
+
+  var ac = new AbortController();
+  mc.registerTool({
+    name: 'search_courses',
+    description: 'Search the course catalog by title text. Returns {count, courses:[{id,title,level}]} and shows them in the results list.',
+    inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Text to match in course titles' } }, required: ['query'] },
+    annotations: { readOnlyHint: true },
+    execute: async function (input) {
+      var items = search(input && input.query);
+      renderResults(items);
+      return text({ count: items.length, courses: items });
+    }
+  }, { signal: ac.signal });
+
+  mc.registerTool({
+    name: 'add_to_cart',
+    description: 'Add a course to the cart by id. Returns the updated cart.',
+    inputSchema: { type: 'object', properties: { courseId: { type: 'string', description: 'Course id such as c101' } }, required: ['courseId'] },
+    annotations: { consequentialHint: true },
+    execute: async function (input) {
+      var id = String(input && input.courseId || '');
+      var course = COURSES.filter(function (c) { return c.id === id; })[0];
+      if (!course) return text({ error: 'unknown courseId', courseId: id }, true);
+      if (!cart.some(function (c) { return c.id === id; })) cart.push(course);
+      renderCart();
+      return text({ cart: cart.map(function (c) { return c.id; }), count: cart.length });
+    }
+  }, { signal: ac.signal });
+
+  window.addEventListener('pagehide', function () { ac.abort(); });
+  status.textContent = 'active';
+  window.__toolsReady = true; // test hook for the e2e script
+})();
+</script>
+</body>
+</html>

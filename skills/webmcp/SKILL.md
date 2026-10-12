@@ -74,8 +74,14 @@ Add `toolautosubmit` only for non-consequential forms. In the submit handler: `e
    await page.goto('http://127.0.0.1:3000/checkout');
    expect(await page.evaluate(() => typeof document.modelContext)).toBe('object');
    ```
-   Then assert the page's tools registered, either through a test hook the app exposes or through the binary's CDP `WebMCP` domain (`WebMCP.invokeTool` exists; its params are unverified, so confirm them with `chrome --remote-debugging` before relying on them).
+   Then assert the tools registered, through a test hook the app exposes or through the CDP `WebMCP` domain (experimental; verified on Chrome 156.0.8078.4):
+   - `WebMCP.enable` / `WebMCP.disable`. Events: `toolsAdded`, `toolsRemoved`, `toolInvoked`, `toolResponded`.
+   - `WebMCP.invokeTool {frameId, toolName, input: <object>}` returns `{invocationId}`. Cancel with `WebMCP.cancelInvocation {invocationId}`. The result arrives as `toolResponded {invocationId, status, output, errorText, exception}`; `status` was `Completed`.
+   - Over CDP, annotations arrive as `readOnly`, `consequential`, `untrustedContent`, `debugging` booleans.
+   - A declarative form completes without a user submit only with `toolautosubmit`. Without it, the response waits for a submit.
+   - Wait for navigation to commit before evaluating. The target is listed before the page script runs.
    CLI smoke check (page sets `document.body.dataset.mc = typeof document.modelContext`; run as root needs `--no-sandbox`): `chrome --headless=new --no-sandbox --enable-features=WebMCPTesting --dump-dom http://127.0.0.1:8000/index.html | grep -o 'data-mc="[^"]*"'` prints `data-mc="object"`.
+4. Reusable e2e harness: `skills/webmcp/references/e2e-2026-10-12/e2e.mjs` (Node 22+, no deps). Run from that folder: `CHROME=/path/to/chrome node e2e.mjs`. Env: `CHROME` (default is a Linux Playwright path), `OUT` (default: script dir, receives `after.png`), `DEMO_DIR` (default `./demo`), `ONLY_NEGATIVE=1` (flag-off control only). It starts `python3 -m http.server` on a free 127.0.0.1 port, launches headless Chrome with `--headless=new --no-sandbox --remote-debugging-port=<free>` (flag on, then off), drives the tools over CDP, prints a PASS/FAIL table and exits 1 on any failure. Profiles go to `/tmp/webmcp-e2e-prof-*`. `webmcp-domain.json` is the protocol description. Known issue: the last row of `run.txt` (run B) fails with `Cannot set properties of null` at `#q` (querySelector returned null; cause not diagnosed). `run-negative.txt` is the clean control.
 
 ## Scope notes
 

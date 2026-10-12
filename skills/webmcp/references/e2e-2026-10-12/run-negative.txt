@@ -1,0 +1,14 @@
+# http.server pid=459069 port=41907 dir=/tmp/webmcp-e2e/demo
+# B (flag off): chrome pid=459091 cdp=35995 flag=false
+[PASS] flag off: typeof document.modelContext === "undefined"
+  #webmcp-status: "unavailable (page works without it)"
+[PASS] flag off: page still works through its normal UI :: "c301 - Python for Beginners (A1)"
+[PASS] cleanup: no leftover chrome/http.server processes
+
+| Check | Result | Detail |
+|---|---|---|
+| flag off: typeof document.modelContext === "undefined" | PASS |  |
+| flag off: page still works through its normal UI | PASS | "c301 - Python for Beginners (A1)" |
+| cleanup: no leftover chrome/http.server processes | PASS |  |
+
+3/3 passed
