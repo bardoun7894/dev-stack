@@ -1,0 +1,94 @@
+{
+  "_comment": "Owner decisions encoded for recommend.py / propose_tiers.py. Source: tiers.json _comment lines dated 2026-09-29..2026-10-07 and the 2026-10-11 model-intel briefs (F12-F15).",
+  "never_worker_families": [
+    "claudeopus55",
+    "claudefable51",
+    "claudefable5"
+  ],
+  "openai_only_for": [
+    "review",
+    "language"
+  ],
+  "arabic_copy": {
+    "first": "OpenAI",
+    "fallback": "Google"
+  },
+  "video_pinned": {
+    "MarktingTeam": "PixVerse",
+    "auto_change": false
+  },
+  "arabic_text_in_images": "overlay: never let the image model render Arabic text",
+  "knee_points_per_dollar": 5.0,
+  "auto_apply": {
+    "min_index_gain": 2.0,
+    "equal_index_cost_ratio": 0.7,
+    "equal_index_tolerance": 0.25,
+    "max_changes_per_run": 3
+  },
+  "subscription_providers": [
+    "cliproxy",
+    "openai-codex",
+    "opencode-go",
+    "commandcode",
+    "kimi-coding"
+  ],
+  "provider_rank": [
+    "cliproxy",
+    "openai-codex",
+    "opencode-go",
+    "commandcode",
+    "kimi-coding",
+    "openrouter"
+  ],
+  "use_case_pins": {
+    "orchestration": {
+      "model": "Claude Opus 5.5",
+      "effort": "high"
+    },
+    "architecture": {
+      "model": "Claude Opus 5.5",
+      "effort": "xhigh"
+    },
+    "main_coding": {
+      "model": "Claude Opus 5.5",
+      "effort": "high"
+    },
+    "arabic_first": {
+      "model": "GPT-6.1 Sol"
+    },
+    "arabic_fallback": {
+      "model": "Gemini 3.8 Flash"
+    },
+    "judge": {
+      "model": "Claude Haiku 5.5",
+      "gate": "jev",
+      "note": "owner rule 2026-10-11: Jev gates, Haiku on fallback"
+    }
+  },
+  "effort_tolerance": 1.5,
+  "candidate_margin": 1.0,
+  "hardest_use_cases": [],
+  "floors": {
+    "search": 33,
+    "bulk": 30,
+    "judge": 40,
+    "fallback": 44,
+    "min_tps": 100
+  },
+  "pinned_entries": {
+    "claude_prefix_tiers": [
+      "T3",
+      "T4"
+    ],
+    "claude_prefix_len": 2,
+    "chains": [
+      "kinds.language",
+      "kinds.test",
+      "kinds.review"
+    ]
+  },
+  "kie": {
+    "script": "~/.claude/skills/kie-ai/scripts/kie.py",
+    "catalogue_date": "2026-08-07"
+  }
+}

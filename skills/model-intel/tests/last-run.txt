@@ -1,0 +1,125 @@
+/Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:9: ResourceWarning: unclosed file <_io.TextIOWrapper name='/Users/mohamedbardouni/code/dev-stack/skills/model-intel/config/owner_rules.json' mode='r' encoding='UTF-8'>
+  RULES = json.load(open(mi.SKILL / "config" / "owner_rules.json"))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+test_already_in_tiers_is_not_auto (test_model_intel.AutoApply.test_already_in_tiers_is_not_auto) ... ok
+test_applies_when_all_conditions_hold (test_model_intel.AutoApply.test_applies_when_all_conditions_hold) ... ok
+test_apply_backs_up_inserts_and_keeps_claude (test_model_intel.AutoApply.test_apply_backs_up_inserts_and_keeps_claude) ... ok
+test_cli_end_to_end_on_temp_copy (test_model_intel.AutoApply.test_cli_end_to_end_on_temp_copy) ... ok
+test_equal_index_needs_70pct_cost (test_model_intel.AutoApply.test_equal_index_needs_70pct_cost) ... ok
+test_failed_validation_restores_backup (test_model_intel.AutoApply.test_failed_validation_restores_backup) ... ok
+test_not_applied_cases (test_model_intel.AutoApply.test_not_applied_cases) ... ok
+test_pinned_and_owner_rules (test_model_intel.AutoApply.test_pinned_and_owner_rules) ... ok
+test_pinned_slot_is_never_auto_applied (test_model_intel.AutoApply.test_pinned_slot_is_never_auto_applied) ... ok
+test_probe_failure_goes_to_proposals (test_model_intel.AutoApply.test_probe_failure_goes_to_proposals) ... ok
+test_tier_sections_are_not_pinned_but_owner_chains_are (test_model_intel.AutoApply.test_tier_sections_are_not_pinned_but_owner_chains_are) ... ok
+test_unpinned_t3_slot_is_auto_applied_on_temp_copy (test_model_intel.AutoApply.test_unpinned_t3_slot_is_auto_applied_on_temp_copy) ... ok
+test_new_removed_changed (test_model_intel.Diff.test_new_removed_changed) ... ok
+test_effort_rule_lowest_within_tolerance_never_max (test_model_intel.F12F13.test_effort_rule_lowest_within_tolerance_never_max) ... ok
+test_judging_row_is_jev_first_haiku_pin (test_model_intel.F12F13.test_judging_row_is_jev_first_haiku_pin) ... ok
+test_pins_hold_and_better_model_is_a_candidate (test_model_intel.F12F13.test_pins_hold_and_better_model_is_a_candidate) ... ok
+test_use_case_objectives (test_model_intel.F12F13.test_use_case_objectives) ... ok
+test_fetch_writes_snapshot_and_latest (test_model_intel.FetchParse.test_fetch_writes_snapshot_and_latest) ... ok
+test_llm_fixture (test_model_intel.FetchParse.test_llm_fixture) ... ok
+test_media_and_stt_fixtures (test_model_intel.FetchParse.test_media_and_stt_fixtures) ... ok
+test_aliases_match_version_not_just_family (test_model_intel.KieReach.test_aliases_match_version_not_just_family) ... ok
+test_every_alias_target_exists_in_the_built_catalogue (test_model_intel.KieReach.test_every_alias_target_exists_in_the_built_catalogue) ... ok
+test_media_rows_split_kie_best_from_global_leader (test_model_intel.KieReach.test_media_rows_split_kie_best_from_global_leader) ... ok
+test_reachable_and_picks (test_model_intel.Recommend.test_reachable_and_picks) ... /Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:28: ResourceWarning: unclosed file <_io.TextIOWrapper name='/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ljf960fl/tiers.json' mode='r' encoding='UTF-8'>
+  tiers = json.load(open(tiers_path or mi.TIERS))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:52: ResourceWarning: unclosed file <_io.TextIOWrapper name='/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ljf960fl/pi/models.json' mode='r' encoding='UTF-8'>
+  d = json.load(open(p))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:52: ResourceWarning: unclosed file <_io.TextIOWrapper name='/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ljf960fl/pi/models-store.json' mode='r' encoding='UTF-8'>
+  d = json.load(open(p))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:393: ResourceWarning: unclosed file <_io.TextIOWrapper name='/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ljf960fl/data/kie_models.json' mode='w' encoding='UTF-8'>
+  json.dump(k, open(p, "w"), indent=1)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_writes_header_jev_judging_and_effort_rule (test_model_intel.RenderPicks.test_writes_header_jev_judging_and_effort_rule) ... /Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:28: ResourceWarning: unclosed file <_io.TextIOWrapper name='/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ktua27rn/tiers.json' mode='r' encoding='UTF-8'>
+  tiers = json.load(open(tiers_path or mi.TIERS))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:52: ResourceWarning: unclosed file <_io.TextIOWrapper name='/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ktua27rn/pi/models.json' mode='r' encoding='UTF-8'>
+  d = json.load(open(p))
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/mohamedbardouni/code/dev-stack/skills/model-intel/scripts/recommend.py:393: ResourceWarning: unclosed file <_io.TextIOWrapper name='/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ktua27rn/data/kie_models.json' mode='w' encoding='UTF-8'>
+  json.dump(k, open(p, "w"), indent=1)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+ok
+test_drop_over_30pct_keeps_previous_latest (test_model_intel.RowDrop.test_drop_over_30pct_keeps_previous_latest) ... fetch FAILED, previous latest kept:
+  llm.csv: rows 10 -> 3 (drop > 30%)
+ok
+test_empty_parse_fails (test_model_intel.RowDrop.test_empty_parse_fails) ... fetch FAILED, previous latest kept:
+  media_tts.csv: 0 rows parsed (page format changed?)
+ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 0.261s
+
+OK
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-2c89_erv/data/snapshots/2026-10-11
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-t909usfa/data/snapshots/2026-10-04
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-t909usfa/data/snapshots/2026-10-11
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-vju8jq5a/data/snapshots/2026-10-11
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-q8ho7d7a/data/snapshots/2026-10-11
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ljf960fl/data/snapshots/2026-10-11
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ktua27rn/data/snapshots/2026-10-11
+/var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-ktua27rn/ref/model-picks.md
+llm.csv: 10 rows
+media_text_to_image.csv: 5 rows
+media_image_editing.csv: 5 rows
+media_text_to_video.csv: 5 rows
+media_image_to_video.csv: 5 rows
+media_tts.csv: 5 rows
+media_stt.csv: 6 rows
+snapshot /var/folders/5w/919jrqy11wb5sqv8bgrbbvz40000gn/T/mi-test-27n6w589/data/snapshots/2026-10-04
