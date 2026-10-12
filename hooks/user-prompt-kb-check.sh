@@ -329,7 +329,12 @@ fi
 kb_bin="${DEVSTACK_KB_RETRIEVE_BIN:-$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/kb-retrieve}"
 kb_out=""
 kb_pid=""
-if [ -n "$user_prompt" ] && [ "${KB_PRIOR_ART:-1}" != "0" ] && [ -f "$kb_bin" ]; then
+# Skipped for system-generated prompts (task / background notifications), which are not user questions.
+kb_system_prompt=0
+case "$user_prompt" in
+  "<task-notification"*|*"[SYSTEM NOTIFICATION"*) kb_system_prompt=1 ;;
+esac
+if [ -n "$user_prompt" ] && [ "${KB_PRIOR_ART:-1}" != "0" ] && [ $kb_system_prompt -eq 0 ] && [ -f "$kb_bin" ]; then
   set -f; set -- $user_prompt; set +f
   if [ $# -ge 3 ]; then
     kb_out=$(mktemp "${TMPDIR:-/tmp}/kb-prior-art.XXXXXX" 2>/dev/null) || kb_out=""
