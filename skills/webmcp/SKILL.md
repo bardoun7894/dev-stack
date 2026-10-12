@@ -67,6 +67,15 @@ Add `toolautosubmit` only for non-consequential forms. In the submit handler: `e
 
 1. Unit: `assets/test/modelContext.mock.ts` fakes `document.modelContext.registerTool`, records tools and honors abort. `assets/test/WebMcpTools.test.tsx` shows asserting register on mount, unregister on unmount, and no-op when unsupported.
 2. Live: Chrome with `chrome://flags/#enable-webmcp-testing` enabled; open the page and inspect registered tools in DevTools (AI assistance), then call a tool and check the network request.
+3. Headless/server (verified on Chrome for Testing 156.0.8078.4, Linux): without a flag `document.modelContext` is undefined; with `--enable-features=WebMCPTesting` (or `--enable-experimental-web-platform-features`) it is an object and `registerTool` succeeds. `navigator.modelContext` stays undefined. Serve the page from `http://127.0.0.1` or https; data: URLs were not tested.
+   ```ts
+   const browser = await chromium.launch({ args: ['--enable-features=WebMCPTesting'] });
+   const page = await browser.newPage();
+   await page.goto('http://127.0.0.1:3000/checkout');
+   expect(await page.evaluate(() => typeof document.modelContext)).toBe('object');
+   ```
+   Then assert the page's tools registered, either through a test hook the app exposes or through the binary's CDP `WebMCP` domain (`WebMCP.invokeTool` exists; its params are unverified, so confirm them with `chrome --remote-debugging` before relying on them).
+   CLI smoke check (page sets `document.body.dataset.mc = typeof document.modelContext`; run as root needs `--no-sandbox`): `chrome --headless=new --no-sandbox --enable-features=WebMCPTesting --dump-dom http://127.0.0.1:8000/index.html | grep -o 'data-mc="[^"]*"'` prints `data-mc="object"`.
 
 ## Scope notes
 
