@@ -200,7 +200,7 @@ fs.appendFileSync(\`${'$'}{e.JEV_LOG}\`, (a[0] === 'raw' ? 'raw ' + input.replac
 setTimeout(() => {
   if (a[0] !== 'raw' || e.RAW_FAIL) process.exit(3);
   const qs = JSON.parse(input).questions; const answers = {};
-  if (qs.tier) Object.assign(answers, { tier: { choice: 'T3', confidence: 0.9 }, kind: { choice: e.KIND_ANSWER || 'code', confidence: 0.9 }, role: { choice: 'doer', confidence: 0.9 }, arabic: { noul: Number(e.ARABIC || 0.01) }, ui: { noul: 0.02 } });
+  if (qs.tier) Object.assign(answers, { tier: { choice: 'T3', confidence: 0.9 }, kind: { choice: e.KIND_ANSWER || 'code', confidence: 0.9 }, role: { choice: 'doer', confidence: 0.9 }, arabic: { noul: Number(e.ARABIC || 0.01) }, ui: { noul: Number(e.UI_ANSWER || 0.02) } });
   else for (const k of Object.keys(qs)) {
     const kv = (e.MCP_SCORES || '').split(',').find((x) => k === 'mcp:' + x.split('=')[0]);
     answers[k] = e.RAW_BAD === k ? { oops: 1 } : k === 'role' ? { choice: e.ROLE_ANSWER || 'none', confidence: Number(e.ROLE_CONF || 0.9) } : { noul: kv ? Number(kv.split('=')[1]) : 0.1 };
@@ -982,4 +982,61 @@ test('world hook: missing track does not change the exit code or output', () => 
   assert.doesNotMatch(ok.stderr, /track/);
   const bad = trackRun({ NO_TRACK: '1' }, { claudeBody: 'exit 4' });
   assert.equal(bad.status, 4);
+});
+
+// F16: agy out of quota -> UI work routes to claude until the printed reset; a quota failure retries once on claude at the same tier.
+const AGY_QUOTA_ERR = 'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 56h40m51s.","status":"RESOURCE_EXHAUSTED","error_code":429,"retryable":true}';
+const agyRoute = (exFile, args = [], env = {}) => spawnSync(process.execPath, [JD, '--print', ...args, 'restyle the settings page layout'], {
+  encoding: 'utf8',
+  env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: join(tmp, 'cache'),
+    JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AGY_EXHAUSTED_FILE: exFile, UI_ANSWER: '0.9', JEV_LOG: jevLog, ...env },
+}).stdout;
+const exFile = (name, until) => { const f = join(tmp, `agy-ex-${name}.json`); if (until !== undefined) write(f, JSON.stringify({ until, seen: new Date().toISOString() })); return f; };
+
+test('F16 routing: UI work goes to agy when agy-exhausted.json is absent', () => {
+  jevStub();
+  assert.match(agyRoute(exFile('absent')), /→ agy · agy\//);
+});
+
+test('F16 routing: UI work goes to claude with the reset time while agy-exhausted.json is in the future', () => {
+  jevStub();
+  const until = new Date(Date.now() + 3 * 36e5).toISOString();
+  const out = agyRoute(exFile('future', until));
+  assert.match(out, /→ claude · /);
+  assert.match(out, new RegExp(`agy quota exhausted until ${until.replace(/\./g, '\\.')} → claude`));
+});
+
+test('F16 routing: an expired agy-exhausted.json routes UI work to agy again', () => {
+  jevStub();
+  assert.match(agyRoute(exFile('expired', new Date(Date.now() - 36e5).toISOString())), /→ agy · agy\//);
+});
+
+test('F16 routing: an explicit --harness agy ignores the exhausted file', () => {
+  jevStub();
+  assert.match(agyRoute(exFile('explicit', new Date(Date.now() + 36e5).toISOString()), ['--harness', 'agy']), /→ agy · agy\//);
+});
+
+test('F16 run: an agy RESOURCE_EXHAUSTED failure records the reset and retries once on claude at the same tier', () => {
+  jevStub();
+  const relay = join(tmp, 'agy-quota-relay.mjs');
+  write(relay, `import { mkdirSync, writeFileSync } from 'node:fs';
+const o = process.argv[process.argv.indexOf('--out-dir') + 1];
+mkdirSync(o, { recursive: true });
+writeFileSync(o + '/stderr.txt', ${JSON.stringify(AGY_QUOTA_ERR + '\n')});
+writeFileSync(o + '/result.json', JSON.stringify({ status: 'failed', exitCode: 1, stderrTail: [${JSON.stringify(AGY_QUOTA_ERR)}] }));
+process.exit(1);
+`);
+  stub('claude', 'echo RETRIED-ON-CLAUDE');
+  const f = exFile('run');
+  const before = Date.now();
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--cwd', repo, 'restyle the settings page layout'], { encoding: 'utf8', timeout: 60000,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: join(tmp, 'agyq-cache'),
+      JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AGY_RELAY: relay,
+      JDELEGATE_AGY_EXHAUSTED_FILE: f, UI_ANSWER: '0.9', JEV_LOG: jevLog } });
+  assert.match(r.stdout, /RETRIED-ON-CLAUDE/, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /escalated/);
+  const j = JSON.parse(readFileSync(f, 'utf8'));
+  const want = before + (56 * 3600 + 40 * 60 + 51) * 1000;
+  assert.ok(Math.abs(Date.parse(j.until) - want) < 120000, j.until);
+  assert.ok(Date.parse(j.seen) >= before - 1000);
 });

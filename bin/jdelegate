@@ -79,7 +79,9 @@ const runCmd = (cmd, args, { input, timeout = 8000 } = {}) => new Promise((done)
 });
 const SECTION_CAP = 12000;
 const ROLE_CAP = 8000;
-const AGY_RELAY = `${HOME}/.claude/skills/agy-delegate/scripts/relay.mjs`;
+const AGY_RELAY = process.env.JDELEGATE_AGY_RELAY || `${HOME}/.claude/skills/agy-delegate/scripts/relay.mjs`;
+const AGY_EXHAUSTED_FILE = process.env.JDELEGATE_AGY_EXHAUSTED_FILE || join(HOME, ".cache", "jev-router", "agy-exhausted.json");
+const AGY_QUOTA_DEFAULT_MS = 6 * 36e5;
 const TIERS = ["T0", "T1", "T2", "T3", "T4"];
 const THINK = ["off", "minimal", "low", "medium", "high"];
 
@@ -365,10 +367,38 @@ const needsShell = (brief) => /\bgit\s+(commit|push|merge|rebase|checkout|add)\b
 /** Owner rule 2026-10-07: computer use, browser/e2e/playwright, running tests and QA run on kinds.test (Haiku 5.5). */
 const isTestWork = (brief, role) => role === "qa-engineer" || /\b(computer[- ]use|browser|e2e|end[- ]to[- ]end|playwright|puppeteer|cypress|selenium|qa|run(ning)?\s+(the\s+|all\s+|our\s+)?(unit\s+|e2e\s+|integration\s+)?tests?|test\s+suite)\b/i.test(brief);
 
-function pick(d) {
+/** Epoch ms until which agy is out of quota per agy-exhausted.json, or 0 when the file is absent, unreadable or expired. */
+function agyExhaustedUntil() {
+  const t = Date.parse(readJson(AGY_EXHAUSTED_FILE)?.until);
+  return t > Date.now() ? t : 0;
+}
+/** Ms until agy works again from an agy quota error text ("Individual quota reached ... Resets in 56h40m51s."); undefined when the text is not a quota error. */
+function agyQuotaResetMs(text) {
+  if (!/RESOURCE_EXHAUSTED|quota reached/i.test(text)) return undefined;
+  const m = text.match(/Resets? in\s+(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?!s))?\s*(?:(\d+)\s*s)?/i);
+  const ms = m ? ((+m[1] || 0) * 864e5 + (+m[2] || 0) * 36e5 + (+m[3] || 0) * 6e4 + (+m[4] || 0) * 1e3) : 0;
+  return ms > 0 ? ms : AGY_QUOTA_DEFAULT_MS;
+}
+/** An agy worker that hit its quota: record agy as exhausted until the printed reset so every later run routes UI work to claude. Returns true when it did. */
+function markAgyExhausted(attemptP, run) {
+  if (attemptP.harness !== "agy") return false;
+  const read = (f) => { try { return readFileSync(join(run, f), "utf8"); } catch { return ""; } };
+  const ms = agyQuotaResetMs([read("agy/stderr.txt"), read("agy/result.json"), read("out.log")].join("\n"));
+  if (ms === undefined) return false;
+  try {
+    mkdirSync(dirname(AGY_EXHAUSTED_FILE), { recursive: true });
+    writeFileSync(AGY_EXHAUSTED_FILE, JSON.stringify({ until: new Date(Date.now() + ms).toISOString(), seen: new Date().toISOString() }, null, 2));
+  } catch { /* the retry on claude does not depend on the file */ }
+  return true;
+}
+
+/** noAgy: the agy lane is unusable (quota) for this pick, whatever --harness said. */
+function pick(d, { noAgy = false } = {}) {
   const thinkIdx = Math.max(0, THINK.indexOf(CONFIG.thinking?.[d.tier] ?? "medium"));
   const thinking = THINK[Math.min(THINK.length - 1, d.role === "thinker" ? Math.max(thinkIdx + 1, 2) : thinkIdx)];
-  if (opt.harness === "agy" || (!opt.harness && d.ui >= 0.7 && (d.kind === "code" || d.kind === "general"))) {
+  const uiWork = !opt.harness && d.ui >= 0.7 && (d.kind === "code" || d.kind === "general");
+  const agyUntil = uiWork && !noAgy ? agyExhaustedUntil() : 0;
+  if (!noAgy && !agyUntil && (opt.harness === "agy" || uiWork)) {
     return { harness: "agy", ref: `agy/${CONFIG.agy_model ?? "gemini-3.8-flash-high"}`, thinking, why: `UI work (ui ${d.ui.toFixed(2)}) → agy` };
   }
   const chain = [...new Set([...(CONFIG.kinds?.[d.kind]?.[d.tier] ?? []), ...(CONFIG.tiers?.[d.tier] ?? [])])];
@@ -379,13 +409,14 @@ function pick(d) {
       ? { ref, i, ...bucketOf(ref, quota) }
       : { ref, i, bucket: METERED.has(provider(ref)) ? 3 : (PRIORITY[provider(ref)] ?? 2) })
     .sort((x, y) => x.bucket - y.bucket || x.i - y.i)
-    .filter((x) => !opt.harness || harnessFor(x.ref) === opt.harness)
+    .filter((x) => noAgy || !opt.harness || harnessFor(x.ref) === opt.harness)
     .filter((x) => !(needsShell(opt.brief) && harnessFor(x.ref) === "opencode"));
   const ranked = scored.map((x) => x.ref);
   const demoted = [...new Set(scored.map((x) => x.note).filter(Boolean))];
   const ref = ranked[0];
   if (!ref) return undefined;
-  return { harness: harnessFor(ref), ref, thinking, why: `${d.kind}·${d.tier} chain, first live${demoted.length ? `; quota: ${demoted.join("; ")}` : ""}` };
+  const agyNote = agyUntil ? `agy quota exhausted until ${new Date(agyUntil).toISOString()} → claude; ` : "";
+  return { harness: harnessFor(ref), ref, thinking, why: `${agyNote}${d.kind}·${d.tier} chain, first live${demoted.length ? `; quota: ${demoted.join("; ")}` : ""}` };
 }
 
 // ── 3. worker command ───────────────────────────────────────────────────
@@ -837,6 +868,11 @@ let tier = initialTier, currentP = p, brief = opt.brief;
 let result = await execute(brief, currentP, tier);
 if (markCodexExhausted(currentP, result.run)) {
   const next = pick({ ...d, tier });
+  if (next) { currentP = next; result = await execute(brief, currentP, tier); }
+}
+// agy out of quota: record it and retry once on the claude chain at the same tier (never escalate to agy T4 for this).
+if (markAgyExhausted(currentP, result.run)) {
+  const next = pick({ ...d, tier }, { noAgy: true });
   if (next) { currentP = next; result = await execute(brief, currentP, tier); }
 }
 let escalationReason = "";
