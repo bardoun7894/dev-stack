@@ -24,6 +24,12 @@
 //            --chrome         force the bundled headless Chrome even when --cdp is set
 //            --screenshots D  save D/<flow>/NN.png per step plus final.png and final-full.png (implies --chrome);
 //                             Jev is text-only, so layout/visual checks are a vision model reading these (L3)
+//            --ready-timeout MS  cap on waiting for a page to be quiet (default 8000): after each navigation and each
+//                             action that changed the page or started a request, and once more before the verdict.
+//                             Quiet = no fetch/XHR in flight AND visible text unchanged for 500 ms. The cap always wins.
+//            --wait-for "X"   after the first navigation, wait until X (CSS selector, else visible text) shows.
+//                             Flow JSON: "waitFor": "X". Use it for data that appears after a timer, which nothing
+//                             in flight can reveal (a fetch started by a 3 s setTimeout is not yet pending at 500 ms)
 //
 // One Jev request per step carries the operation question AND one target head per operation, so choosing
 // "which operation" and "which element" costs a single round trip (speculative fan-out, from
@@ -63,6 +69,31 @@ const EXECUTE = readFileSync(join(HERE, 'execute.js'), 'utf8');
 const SETTLE = readFileSync(join(HERE, 'settle.js'), 'utf8');
 const callWith = (src, arg) => `(${src})(${JSON.stringify(arg)})`;
 
+// Installed before every document: counts fetch/XHR requests in flight, so a page that is still loading data
+// is not judged. A failed addInitScript (an engine without it) leaves the counter absent and pending reads as 0.
+const PENDING_INIT = `(() => {
+  if (window.__jevPending) return;
+  let n = 0;
+  window.__jevPending = () => n;
+  const fetch0 = window.fetch;
+  if (fetch0) window.fetch = (...a) => { n++; const end = () => { n--; }; const p = fetch0(...a); p.then(end, end); return p; };
+  const send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (...a) { n++; this.addEventListener('loadend', () => { n--; }, { once: true }); return send.apply(this, a); };
+})()`;
+
+// One evaluate per poll: requests in flight, the visible text, and whether --wait-for (selector, else text) shows.
+const READY_PROBE = (target) => {
+  const text = document.body ? document.body.innerText : '';
+  let visible = target == null;
+  if (target != null) {
+    let el = null;
+    try { el = document.querySelector(target); } catch { /* not a selector: match it as text */ }
+    if (el) { const r = el.getBoundingClientRect(); visible = r.width > 0 && r.height > 0; }
+    else visible = text.includes(target);
+  }
+  return { pending: window.__jevPending ? window.__jevPending() : 0, text, visible };
+};
+
 function args(argv) {
   // Real Chrome by default: every geometric guard in this agent (visibility, viewport, occlusion, scroll)
   // needs a browser that lays the page out. --cdp opts into an external one (e.g. Lightpanda), which the
@@ -85,6 +116,7 @@ function args(argv) {
     else if (a.startsWith('--')) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
   }
   o.maxSteps = Number(o.maxSteps);
+  o.readyTimeout = Number(o.readyTimeout ?? 8000);
   // --screenshots and --headful need a browser that paints, but an explicit --cdp already names one;
   // silently launching a second Chrome there would screenshot the wrong browser.
   if ((o.screenshots || o.headful) && !o.cdp) o.chrome = true;
@@ -163,6 +195,26 @@ async function observe(page, { settle = false } = {}) {
     await page.waitForTimeout(settle ? 400 : 40);
   }
   return last;
+}
+
+// Waits until the page is quiet (nothing in flight, visible text unchanged for 500 ms) and, if given, the
+// waitFor target shows. A poller never goes quiet, so the cap ends the wait with no error: the verdict then
+// judges what is on screen at the cap, which is the same as before this wait existed.
+async function waitReady(page, { timeout, waitFor = null }) {
+  const deadline = Date.now() + timeout;
+  let text = null;
+  let since = Date.now();
+  while (Date.now() < deadline) {
+    const s = await page.evaluate(callWith(READY_PROBE, waitFor)).catch(() => null);
+    const now = Date.now();
+    if (!s) since = now;                       // mid-navigation: not quiet yet
+    else {
+      if (s.text !== text || s.pending > 0) { text = s.text; since = now; }
+      if (s.visible && now - since >= 500) return true;
+    }
+    await page.waitForTimeout(100);
+  }
+  return false;
 }
 
 // Wait for the page to stop changing before judging it. `settle` only waits for SOMETHING actionable, which
@@ -296,6 +348,8 @@ async function runFlow(session, flow, opt, persona = 'normal') {
   try { ({ page, dispose } = await session.newPage()); } catch (e) {
     return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'no_browser', detail: String(e.message).slice(0, 200), stop: 'no_browser', steps: [] };
   }
+  await page.addInitScript(PENDING_INIT).catch(() => {});
+  const readyOpts = { timeout: opt.readyTimeout };
   const shots = [];
   const shotDir = opt.screenshots ? join(opt.screenshots, slug(`${flow.name || flow.goal}-${persona}`)) : null;
   if (shotDir) mkdirSync(shotDir, { recursive: true });
@@ -320,6 +374,7 @@ async function runFlow(session, flow, opt, persona = 'normal') {
   const fresh = [];
   try {
     await page.goto(flow.url, { waitUntil: 'load' });
+    await waitReady(page, { ...readyOpts, waitFor: flow.waitFor ?? opt.waitFor ?? null });
     for (let step = 0; step < opt.maxSteps; step++) {
       const obs = await observe(page, { settle: true });
       if (!obs) { stop = 'no_document'; break; }
@@ -376,9 +431,15 @@ async function runFlow(session, flow, opt, persona = 'normal') {
       stale = 0;
       fresh.push(recordStep(operation, action, fillKey));
       if (persona === 'double_submit' && action.kind === 'click') await act(page, obs, action, null, opt);
-      if (persona === 'back_button' && step === 0) { await page.goBack().catch(() => {}); await page.waitForTimeout(300); }
+      if (persona === 'back_button' && step === 0) { await page.goBack().catch(() => {}); await waitReady(page, readyOpts); }
 
-      const after = await observe(page);
+      // An action that changed the page, or started a request, is not judged until the page is quiet.
+      let after = await observe(page);
+      const requestStarted = (await page.evaluate(() => (window.__jevPending ? window.__jevPending() : 0)).catch(() => 0)) > 0;
+      if (!after || after.marker !== before || requestStarted) {
+        await waitReady(page, readyOpts);
+        after = await observe(page);
+      }
       history.push({
         operation,
         action: ['wait', 'scroll'].includes(action.kind) ? operation
@@ -389,6 +450,7 @@ async function runFlow(session, flow, opt, persona = 'normal') {
     }
 
     const judge = persona === 'normal' && flow.expect ? CHECKPOINT : HEALTH;
+    await waitReady(page, readyOpts);
     const final = await quiesce(page);
     const state = buildJudgeState(
       flow.expect || 'the app handles the session gracefully',
@@ -429,7 +491,7 @@ async function main() {
   const opt = args(process.argv.slice(2));
   let flows;
   if (opt.flows) flows = JSON.parse(readFileSync(opt.flows, 'utf8'));
-  else if (opt.url && (opt.goal || opt.login)) flows = [{ url: opt.url, goal: opt.goal, expect: opt.expect, data: opt.data ? JSON.parse(opt.data) : {} }];
+  else if (opt.url && (opt.goal || opt.login)) flows = [{ url: opt.url, goal: opt.goal, expect: opt.expect, data: opt.data ? JSON.parse(opt.data) : {}, waitFor: opt.waitFor }];
   else if (opt.login) flows = [{ url: 'about:blank' }];
   else { console.error('usage: jev-browse --url URL --goal "…" [--expect "…"] [--data JSON] [--adversarial N] | --flows flows.json\n       jev-browse --login --profile NAME --url URL   sign in once; later runs reuse the session'); process.exit(64); }
 
@@ -453,7 +515,9 @@ async function main() {
   // out why a flow never sees the button you expected.
   if (opt.observe) {
     const { page } = await session.newPage();
+    await page.addInitScript(PENDING_INIT).catch(() => {});
     await page.goto(flows[0].url, { waitUntil: 'load' });
+    await waitReady(page, { timeout: opt.readyTimeout, waitFor: flows[0].waitFor ?? opt.waitFor ?? null });
     const obs = await observe(page, { settle: true });
     const data = flows[0].data || {};
     console.log(JSON.stringify({

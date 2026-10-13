@@ -176,7 +176,13 @@ jev-browse --url … --goal … --data … --adversarial 5   # personas: normal,
                                                         # double_submit, back_button — reports what breaks
 jev-browse --url … --goal … --observe             # print the page exactly as Jev is offered it, decide nothing
 jev-browse --url … --goal … --autofill            # let a small LLM write values --data does not cover
+jev-browse --url … --goal … --wait-for "1,234"    # wait for a value/selector after the first navigation (flow key: "waitFor")
 ```
+
+Every navigation and every action that changed the page or started a request waits until the page is quiet
+(no fetch/XHR in flight and visible text unchanged for 500 ms), capped by `--ready-timeout MS` (default 8000).
+A page that data-loads for several seconds is judged after it loads, not while it shows `-`. A value that only
+appears after a timer, with nothing in flight, is not seen by the quiet check: use `--wait-for` for that.
 
 ### One Chrome, two drivers (jev-browse + chrome-devtools-mcp)
 
