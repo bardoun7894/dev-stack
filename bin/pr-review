@@ -663,7 +663,8 @@ function autoFix(repo, n, r) {
   writeJsonFile(FIX_FILE, state);
   const done = (res) => {
     const s2 = readJson(FIX_FILE) ?? {};
-    s2[`${repo}#${n}`] = { ...s2[`${repo}#${n}`], ...res };
+    // Keep the reviewed sha; the pushed commit goes in fix_sha.
+    s2[`${repo}#${n}`] = { ...s2[`${repo}#${n}`], status: res.status, ...(res.reason ? { reason: res.reason } : {}), ...(res.sha ? { fix_sha: res.sha } : {}) };
     writeJsonFile(FIX_FILE, s2);
     return res;
   };
