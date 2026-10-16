@@ -19,7 +19,7 @@
       annotations: t.annotations || {},
       execute: async function (input, ctx) {
         var method = (t.method || 'GET').toUpperCase();
-        var url = t.url;
+        var url = t.url.replace(/\{(\w+)\}/g, function (_, k) { return encodeURIComponent(input[k]); });
         var opts = { method: method, credentials: 'same-origin', signal: ctx && ctx.signal,
                      headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } };
         if (method === 'GET') {

@@ -234,7 +234,7 @@ try {
   // ---- run B: flag off (negative control)
   const B = await openPage(false, httpPort, 'B (flag off)');
   // the target URL is listed before navigation commits; wait for the real page's script to have run
-  await until(() => B.cdp.evaluate(`document.getElementById('webmcp-status')?.textContent.startsWith('unavailable') === true`).catch(() => false), 30000, 'page B load');
+  await until(() => B.cdp.evaluate(`document.readyState === 'complete' && document.querySelector('#q') !== null && document.getElementById('webmcp-status')?.textContent.startsWith('unavailable') === true`).catch(() => false), 30000, 'page B load');
   check('flag off: typeof document.modelContext === "undefined"', (await B.cdp.evaluate('typeof document.modelContext')) === 'undefined');
   console.log('  #webmcp-status: ' + j(await B.cdp.evaluate(pageText('#webmcp-status'))));
   await B.cdp.evaluate(`document.querySelector('#q').value='Python'; document.querySelector('#manual-search').click();`);
