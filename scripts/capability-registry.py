@@ -223,12 +223,16 @@ def park_plan(reg, policy, home):
         want_live = name in pins[kind] or it.get("uses_14d", 0) >= need
         if want_live == (it["location"] == "live"):
             continue
-        sub = ("skills" if kind == "skill" else "agents") + ("" if it["location"] == "live" else "-parked")
-        path = os.path.join(home, sub, name if kind == "skill" else name + ".md")
-        if os.path.exists(path) and not os.path.islink(path):
-            out.append(f"real {kind} {name} {'real directory' if os.path.isdir(path) else 'real file'} (left alone)")
+        # the directory name is what moves; the frontmatter name may differ from it
+        dirname = os.path.basename(it["path"]) if kind == "skill" and it.get("path") else name
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", dirname):
             continue
-        out.append(f"{'park' if it['location'] == 'live' else 'unpark'} {kind} {name}")
+        sub = ("skills" if kind == "skill" else "agents") + ("" if it["location"] == "live" else "-parked")
+        path = os.path.join(home, sub, dirname if kind == "skill" else name + ".md")
+        if os.path.exists(path) and not os.path.islink(path):
+            out.append(f"real {kind} {dirname} {'real directory' if os.path.isdir(path) else 'real file'} (left alone)")
+            continue
+        out.append(f"{'park' if it['location'] == 'live' else 'unpark'} {kind} {dirname if kind == 'skill' else name}")
     return out
 
 

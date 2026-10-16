@@ -177,7 +177,7 @@ def run(state=None, turns=6, window=120, dry_run=False):
         else:
             c["skipped_no_evidence"] += 1
             continue
-        if outcome not in (rec["question"].get("criteria") or {}):  # only a label this decision could have chosen
+        if outcome != "none" and outcome not in (rec["question"].get("criteria") or {}):  # only a label this decision could have chosen
             c["skipped_bad_label"] += 1
             continue
         c[kind] += 1

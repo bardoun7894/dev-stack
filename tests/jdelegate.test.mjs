@@ -731,9 +731,11 @@ test('test-kind briefs and role=qa-engineer route to kinds.test; code briefs do 
     tiers: { T0: ['cliproxy/claude-test'], T1: ['cliproxy/claude-test'], T2: ['opencode-go/x'], T3: ['cliproxy/claude-test'], T4: ['cliproxy/claude-test'] },
     kinds: { test: { T2: ['cliproxy/claude-haiku-5-5'], T3: ['cliproxy/claude-haiku-5-5'] } },
   }));
+  jevStub();
   const route = (brief, extra = []) => spawnSync(process.execPath, [JD, '--print', ...extra, brief], {
     encoding: 'utf8',
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: t, JDELEGATE_CACHE: join(tmp, 'cache'), JDELEGATE_SELECT_CACHE: '0' },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: t, JDELEGATE_CACHE: join(tmp, 'cache'), JDELEGATE_SELECT_CACHE: '0',
+      JDELEGATE_AGENT_DIRS: `${agents}:${agentsParked}`, JDELEGATE_WORKER_ROLES: roles, JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0' },
   }).stdout;
   assert.match(route('run the e2e tests for the login page'), /test·.*claude-haiku-5-5/);
   assert.match(route('use playwright to click through checkout'), /claude-haiku-5-5/);
