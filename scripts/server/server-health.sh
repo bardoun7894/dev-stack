@@ -282,7 +282,8 @@ check_cron_logs() {
     last_line=""
     while IFS= read -r line; do
       [ -z "$line" ] && continue
-      if printf '%s' "$line" | grep -Eiq 'error|fail|exception|No such container|ENOENT|denied|Traceback'; then
+      # An empty "failures":[] (world-collect's healthy summary line) is not a failure.
+      if printf '%s' "${line//'"failures":[]'/}" | grep -Eiq 'error|fail|exception|No such container|ENOENT|denied|Traceback'; then
         hits=$((hits+1))
         last_line="$line"
       fi
@@ -342,8 +343,10 @@ check_chkrootkit
 
 # --- emit ---
 emit() {
-  if [ -z "$FINDINGS" ]; then
-    [ "$SUMMARY" = "1" ] && send_telegram "[server-health] all green ($(hostname -s 2>/dev/null || echo host))"
+  # No early return on zero findings outside --summary: the recovery pass below must still run,
+  # or the last open finding never recovers.
+  if [ -z "$FINDINGS" ] && [ "$SUMMARY" = "1" ]; then
+    send_telegram "[server-health] all green ($(hostname -s 2>/dev/null || echo host))"
     return 0
   fi
   if [ "$SUMMARY" = "1" ]; then

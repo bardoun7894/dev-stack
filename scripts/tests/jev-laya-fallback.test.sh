@@ -85,7 +85,7 @@ run python3 "$JEV" tune lt
 check tune-skips-laya 0 "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["decisions"])')"
 
 for f in "$HERE/../../skills/jev/scripts/jev-browse.mjs" "$HERE/../../skills/jev/scripts/jev-page.mjs" \
-         "$HERE/../../bin/jev-review"; do
+         "$HERE/../../bin/jev-review" "$HERE/../../bin/pr-review"; do
   grep -q "JEV_NO_LAYA" "$f" && echo "PASS judge-opts-out $(basename "$f")" \
     || { echo "FAIL judge-opts-out $(basename "$f")"; fail=1; }
 done

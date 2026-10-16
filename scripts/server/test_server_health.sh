@@ -235,6 +235,24 @@ HEALTH_STUB_CRONTAB="0 * * * * /usr/local/bin/q.sh >> $T/cron-targets/quiet.log 
 out="$(run_script)"
 echo "$out" | grep -q "cronlog: .*cron-targets/quiet.log" && bad "cronlog-quiet" "quiet cron log flagged: $out" || ok "cronlog-quiet"
 
+# ---- 6b. healthy JSON summaries carrying an empty "failures":[] do NOT alert (world-collect.log) ----
+LOGF3="$T/cron-targets/collect.log"
+: > "$LOGF3"
+for i in $(seq 1 50); do
+  printf '{"interval_s":300,"rejected":0,"failures":[],"accepted":%s}\n' "$i" >> "$LOGF3"
+done
+HEALTH_STUB_CRONTAB="*/5 * * * * /usr/local/bin/c.sh >> $T/cron-targets/collect.log 2>&1"
+out="$(run_script)"
+echo "$out" | grep -q "cronlog: .*cron-targets/collect.log" && bad "cronlog-empty-failures" "empty failures flagged: $out" || ok "cronlog-empty-failures"
+
+# ---- 6c. the same summaries with a real failure entry still alert ----
+: > "$LOGF3"
+for i in $(seq 1 50); do
+  printf '{"interval_s":300,"failures":["git: fatal"],"accepted":%s}\n' "$i" >> "$LOGF3"
+done
+out="$(run_script)"
+echo "$out" | grep -q "cronlog: .*cron-targets/collect.log" && ok "cronlog-real-failures" || bad "cronlog-real-failures" "real failures not flagged: $out"
+
 # ---- 7. dedupe: same finding twice sends only one message ----
 LOGF="$T/cron-targets/app.log"
 touch "$LOGF"
@@ -255,6 +273,16 @@ for i in $(seq 1 50); do printf 'ok line %s\n' "$i" >> "$LOGF"; done
 touch "$LOGF"
 out="$(run_script)"
 echo "$out" | grep -q "recovered: .*cronlog: .*cron-targets/app.log" && ok "recovery" || bad "recovery" "no recovered: line: $out"
+
+# ---- 8b. recovery still fires when the cleared finding was the last one (zero findings this run) ----
+E="$T/empty"; mkdir -p "$E/state" "$E/backups" "$E/nginx/sites-enabled"
+printf '%s\t%s\n' "$(date +%s)" "pm2: portfolio-next restarts=65358 (was 64236)" > "$E/state/findings.sent"
+out=$(HEALTH_STUB_HOSTS= HEALTH_STUB_FAILED= HEALTH_STUB_PM2LIST= HEALTH_STUB_DOCKER= HEALTH_STUB_CRONTAB= \
+  HEALTH_STUB_DF= HEALTH_STUB_DOCKER_ALL= ENV_FILE="$ENV_FILE" STATE_DIR="$E/state" BACKUP_DIRS="$E/backups" \
+  NGINX_CONF_DIR="$E/nginx/sites-enabled" VAR_LOG_CHKROOTKIT="$E/none.log" HEALTH_PY_LOG="$PY_LOG" \
+  bash "$SCRIPT" --dry-run 2>&1)
+echo "$out" | grep -q "recovered: pm2: portfolio-next" && ok "recovery-last-finding" || bad "recovery-last-finding" "no recovered: line: $out"
+grep -q "portfolio-next" "$E/state/findings.sent" && bad "recovery-last-finding-cleared" "key left in findings.sent" || ok "recovery-last-finding-cleared"
 
 # ---- 9. chkrootkit: ignore /tmp, /usr/lib/python3/.../fail2ban/tests/, and the
 #       runc-process lstat line; alert once per unique /usr/bin path ----

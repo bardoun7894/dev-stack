@@ -75,7 +75,10 @@ const CLAUDE_ARGS_FALLBACK = [...CLAUDE_ARGS.slice(0, -2), "--disallowedTools", 
 
 // The single place gh, claude, pi, opencode and jev are invoked.
 function exec(cmd, args, { input, cwd, timeout = 60000 } = {}) {
-  const env = cmd === "claude" ? { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" } : process.env;
+  // JEV_NO_LAYA: the merge judge and injection guard are security gates; a down Jev must stay an error
+  // (skip, never merge), not fall back to local Laya, whose nouls bunch under INJECTION_BAR.
+  const env = cmd === "claude" ? { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }
+    : cmd === "jev" ? { ...process.env, JEV_NO_LAYA: "1" } : process.env;
   const r = RUNNER
     ? spawnSync(RUNNER, [cmd, ...args], { input, cwd, env, timeout, encoding: "utf8", maxBuffer: 64 << 20 })
     : spawnSync(cmd, args, { input, cwd, env, timeout, encoding: "utf8", maxBuffer: 64 << 20 });
