@@ -32,6 +32,9 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+# No local Laya fallback: its noul answers bunch below RISK_THRESHOLD, so a down Jev would route every
+# diff to "none". Exit 3 instead, and callers run a normal LLM review.
+os.environ["JEV_NO_LAYA"] = "1"
 WORKERS = 8
 MAX_STATE_CHARS = 24000
 RISK_THRESHOLD = 0.6

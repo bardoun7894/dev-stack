@@ -125,7 +125,7 @@ def read_precision():
                     continue
                 if r.get("kind_of_record") == "outcome":
                     outcomes[r["id"]] = r["outcome"]
-                elif r.get("tag") == SUGGEST_TAG and str((r.get("question") or {}).get("instructions", "")).startswith(RERANK_PREFIX):
+                elif r.get("tag") == SUGGEST_TAG and r.get("engine", "jev") == "jev" and str((r.get("question") or {}).get("instructions", "")).startswith(RERANK_PREFIX):
                     decisions[r["id"]] = r.get("value")
     except OSError:
         return {}

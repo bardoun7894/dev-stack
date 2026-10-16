@@ -105,7 +105,7 @@ def load_decisions(jev):
                 continue
             if r.get("kind_of_record") == "outcome":
                 done.add(r["id"])
-            elif r.get("tag") == TAG:
+            elif r.get("tag") == TAG and r.get("engine", "jev") == "jev":  # Laya fallback answers never train Jev
                 instr = str((r.get("question") or {}).get("instructions", ""))
                 if r.get("kind") == "choice" and (instr.startswith(WIDE_PREFIX) or instr.startswith(RERANK_PREFIX)):
                     decisions.append(r)

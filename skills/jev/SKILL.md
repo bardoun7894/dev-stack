@@ -167,7 +167,11 @@ Laya is 20-30× faster but weaker (A/B 2026-09-22: 73% vs 81% routing, mode coll
 choices, confidence 0.02-0.26), so:
 - every `--min` gate fails closed (exit 2): routers go one tier up, which is the safe direction;
 - `noul` probabilities bunch near 0.5, so `--yes 0.7` reads as no;
-- `jev tune` skips Laya decisions; `jev-browse` / `jev-page` set `JEV_NO_LAYA=1` (Laya over-predicts pass).
+- `jev tune` and the capability-registry/outcomes readers skip Laya decisions;
+- `jev-browse` / `jev-page` (Laya over-predicts pass) and `jev-review` (its risk nouls fall below 0.6,
+  so every diff would route to "none") set `JEV_NO_LAYA=1`;
+- importers calling `ask()` / `ask_many()` get Laya answers with no `--min`: their own thresholds
+  decide (checked: jdelegate 0.4/0.6, jev-skill-suggest 0.6/0.8, retry-or-stop 0.85, all fail closed).
 Daemon down or `JEV_NO_LAYA=1` → exit 3 as before. Env: `JEV_LAYA_URL`, `JEV_LAYA_TIMEOUT` (3 s).
 Install: `ln -s ~/code/dev-stack/bin/laya-serve ~/.local/bin/`, copy `launchd/dev.mbardouni.laya-serve.plist`
 to `~/Library/LaunchAgents/`, `launchctl bootstrap gui/$(id -u)` it. The port opens about 40 s after start.

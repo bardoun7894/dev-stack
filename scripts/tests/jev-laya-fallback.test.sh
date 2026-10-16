@@ -84,9 +84,14 @@ check log-engine laya "$(python3 -c 'import json,sys;print(json.loads(open(sys.a
 run python3 "$JEV" tune lt
 check tune-skips-laya 0 "$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["decisions"])')"
 
-for f in "$HERE/../../skills/jev/scripts/jev-browse.mjs" "$HERE/../../skills/jev/scripts/jev-page.mjs"; do
-  grep -q "JEV_NO_LAYA" "$f" && echo "PASS e2e-judge-opts-out $(basename "$f")" \
-    || { echo "FAIL e2e-judge-opts-out $(basename "$f")"; fail=1; }
+for f in "$HERE/../../skills/jev/scripts/jev-browse.mjs" "$HERE/../../skills/jev/scripts/jev-page.mjs" \
+         "$HERE/../../bin/jev-review"; do
+  grep -q "JEV_NO_LAYA" "$f" && echo "PASS judge-opts-out $(basename "$f")" \
+    || { echo "FAIL judge-opts-out $(basename "$f")"; fail=1; }
+done
+for f in "$HERE/../capability-outcomes.py" "$HERE/../capability-registry.py"; do
+  grep -q 'r.get("engine", "jev") == "jev"' "$f" && echo "PASS log-reader-skips-laya $(basename "$f")" \
+    || { echo "FAIL log-reader-skips-laya $(basename "$f")"; fail=1; }
 done
 
 exit $fail
