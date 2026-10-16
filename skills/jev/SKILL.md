@@ -157,3 +157,17 @@ Where Jev fits in each of our projects (done and candidates): [references/use-ca
 - It is not in `/api/v1/models`, so pi/opencode model pickers can't select it — call `jev` via bash instead.
 - `noul` answers carry no `confidence` field; the probability is the signal.
 - Python urllib needs a real `User-Agent` (Cloudflare 1010 otherwise); the CLI sets one.
+
+## Local fallback: Laya
+
+When Jev errors (out of quota, 402, no key, network), `bin/jev` asks the local `laya-serve`
+daemon (127.0.0.1:8719, launchd `dev.mbardouni.laya-serve`, Mac only) before exiting 3. The answer
+is tagged `"engine": "laya"` in the JSON output and the decision log, and stderr shows `jev: fallback=laya`.
+Laya is 20-30× faster but weaker (A/B 2026-09-22: 73% vs 81% routing, mode collapse on many-option
+choices, confidence 0.02-0.26), so:
+- every `--min` gate fails closed (exit 2): routers go one tier up, which is the safe direction;
+- `noul` probabilities bunch near 0.5, so `--yes 0.7` reads as no;
+- `jev tune` skips Laya decisions; `jev-browse` / `jev-page` set `JEV_NO_LAYA=1` (Laya over-predicts pass).
+Daemon down or `JEV_NO_LAYA=1` → exit 3 as before. Env: `JEV_LAYA_URL`, `JEV_LAYA_TIMEOUT` (3 s).
+Install: `ln -s ~/code/dev-stack/bin/laya-serve ~/.local/bin/`, copy `launchd/dev.mbardouni.laya-serve.plist`
+to `~/Library/LaunchAgents/`, `launchctl bootstrap gui/$(id -u)` it. The port opens about 40 s after start.

@@ -49,7 +49,10 @@ const readStdin = () => new Promise((resolve, reject) => {
 
 function askJev(state, questions) {
   return new Promise((resolve) => {
-    const p = spawn('python3', [JEV, 'raw', '--log', 'browse'], { stdio: ['pipe', 'pipe', 'inherit'] });
+    // JEV_NO_LAYA: the local Laya fallback over-predicts pass, so a down Jev stays an error here.
+    const p = spawn('python3', [JEV, 'raw', '--log', 'browse'], {
+      stdio: ['pipe', 'pipe', 'inherit'], env: { ...process.env, JEV_NO_LAYA: '1' },
+    });
     let out = '';
     p.stdout.on('data', (d) => { out += d; });
     p.on('error', () => resolve(null));

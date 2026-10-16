@@ -110,6 +110,46 @@ def route(body):
 
 
 def post(body, timeout=None):
+    """Jev first; on any JevError the local Laya daemon answers instead, else the error stands."""
+    try:
+        return post_jev(body, timeout)
+    except JevError as e:
+        res = laya_post(body)
+        if res is None:
+            raise
+        print(f"jev: fallback=laya ({str(e)[:80]})", file=sys.stderr)
+        return res
+
+
+def laya_post(body):
+    """The bin/laya-serve daemon on 127.0.0.1, or None. JEV_NO_LAYA=1 opts out (e2e judges:
+    Laya over-predicts pass). Answers are tagged engine=laya: its confidence is uncalibrated, so
+    every --min gate fails closed, and jev tune leaves them out."""
+    if os.environ.get("JEV_NO_LAYA"):
+        return None
+    url = os.environ.get("JEV_LAYA_URL", "http://127.0.0.1:8719/decisions")
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"state": body.get("state"), "questions": body.get("questions")}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=float(os.environ.get("JEV_LAYA_TIMEOUT", "3"))) as r:
+            res = json.loads(r.read().decode())
+    except (OSError, ValueError):
+        return None
+    answers = res.get("answers") if isinstance(res, dict) else None
+    if not isinstance(answers, dict):
+        return None
+    for a in answers.values():
+        if isinstance(a, dict):
+            a["engine"] = "laya"
+    res["engine"] = "laya"
+    return res
+
+
+def post_jev(body, timeout=None):
     url, key, body = route(body)
     req = urllib.request.Request(
         url,
@@ -162,6 +202,7 @@ def log_decision(tag, state, question, answer):
         "kind_of_record": "decision", "id": did, "ts": int(time.time()), "tag": tag,
         "state_hash": hashlib.sha1(s.encode()).hexdigest()[:12], "state_preview": s[:600],
         "question": question, "kind": kind, "value": value, "confidence": answer.get("confidence"),
+        "engine": answer.get("engine", "jev"),
     })
     return did
 
@@ -203,7 +244,7 @@ def tune_report(tag, n=20):
                     continue
                 if r.get("kind_of_record") == "outcome":
                     outcomes[r["id"]] = r["outcome"]
-                elif r.get("tag") == tag:
+                elif r.get("tag") == tag and r.get("engine", "jev") == "jev":
                     decisions[r["id"]] = r
     except OSError:
         pass
@@ -298,6 +339,8 @@ def cli_ask(opts, question):
 def emit_choice_or_score(a, key, opts, extra=None):
     conf = a.get("confidence")
     out = {key: a.get(key), "confidence": conf}
+    if a.get("engine"):
+        out["engine"] = a["engine"]
     if extra:
         out.update(extra)
     print(a.get(key) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
@@ -336,7 +379,8 @@ def main(argv):
             die('usage: jev noul "<statement>" [--state …] [--yes 0.7]', 64)
         a = cli_ask(opts, {"type": "noul", "instructions": pos[0]})
         p = a.get("noul")
-        print(p if opts["quiet"] else json.dumps({"noul": p}))
+        out = {"noul": p, "engine": a["engine"]} if a.get("engine") else {"noul": p}
+        print(p if opts["quiet"] else json.dumps(out))
         if opts["yes"] is not None:
             sys.exit(0 if (p or 0) >= opts["yes"] else 1)
     elif cmd == "score":

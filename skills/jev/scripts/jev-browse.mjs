@@ -160,7 +160,10 @@ function saveRecording(path, recording) {
 let cost = 0;
 function askJev(state, questions) {
   return new Promise((resolve) => {
-    const p = spawn('python3', [JEV, 'raw', '--log', 'browse'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // JEV_NO_LAYA: the local Laya fallback over-predicts pass, so a down Jev stays an error here.
+    const p = spawn('python3', [JEV, 'raw', '--log', 'browse'], {
+      stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, JEV_NO_LAYA: '1' },
+    });
     let out = '';
     p.stdout.on('data', (d) => { out += d; });
     p.on('close', (code) => {

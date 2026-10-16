@@ -11,6 +11,7 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | Phase                      | Sub-skill                                                                              | Model          |
 |----------------------------|----------------------------------------------------------------------------------------|----------------|
 | 0. Ground in prior art     | `/kb-query`                                                                            | (no agent)     |
+| Jev down (402 / out of quota) | Nothing to change: `jev`, `jev-review` and `jdelegate` fall back to local Laya (`laya-serve`, `engine: laya`, every `--min` gate fails closed); `jev-browse` stays on Jev only. See `skills/jev/SKILL.md` "Local fallback: Laya" | auto |
 | 1. Brainstorm options      | `brainstorming` (obra)                                                                 | inline         |
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
 | 2a. Research (mandatory)   | `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher` (one pass, read-only) → `specs/NNN/research.md` | Sonnet (read-only + web) |
