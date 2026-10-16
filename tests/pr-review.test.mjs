@@ -19,7 +19,7 @@ let stdin = ""; try { stdin = readFileSync(0, "utf8"); } catch {}
 let bodyFile = null;
 const bi = args.indexOf("--body-file");
 if (bi >= 0) bodyFile = readFileSync(args[bi + 1], "utf8");
-appendFileSync(dir + "/calls.jsonl", JSON.stringify({ cmd, args, stdin, bodyFile }) + "\\n");
+appendFileSync(dir + "/calls.jsonl", JSON.stringify({ cmd, args, stdin, bodyFile, cwd: process.cwd() }) + "\\n");
 const out = (s) => process.stdout.write(s);
 if (cmd === "pi" || cmd === "opencode") {
   if (args[0] === "--version") { if (sc.noTools?.includes(cmd)) process.exit(127); out("1.0"); }
@@ -53,8 +53,21 @@ else if (cmd === "jev") {
 }
 else if (cmd === "claude") {
   if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); }
-  if (sc.claudeRaw !== undefined) out(sc.claudeRaw);
+  const role = stdin.startsWith("You are a security filter") ? "guard" : stdin.startsWith("You are a merge judge") ? "judge"
+    : stdin.startsWith("You are fixing a pull request") ? "fix" : "review";
+  if (role === "fix" && sc.fixFail) { process.stderr.write("fixer died"); process.exit(1); }
+  const special = role === "guard" ? sc.haikuGuard : role === "judge" ? sc.haikuJudge : role === "fix" ? (sc.fixOut ?? "Fixed.") : undefined;
+  if (special !== undefined) out(JSON.stringify({ type: "result", result: typeof special === "string" ? special : JSON.stringify(special), total_cost_usd: 0.001, usage: { input_tokens: 1, output_tokens: 1 } }));
+  else if (sc.claudeRaw !== undefined) out(sc.claudeRaw);
   else out(JSON.stringify({ type: "result", result: sc.claudeOut ?? "No blocking issues", total_cost_usd: sc.claudeCost ?? 0.0123, usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 50 } }));
+}
+else if (cmd === "git") {
+  if (args.includes("push") && sc.pushFail) { process.stderr.write("rejected"); process.exit(1); }
+  if (args[0] === "status") out(sc.gitStatus ?? "");
+  else if (args[0] === "rev-parse") {
+    const n = readFileSync(dir + "/calls.jsonl", "utf8").split("\\n").filter((l) => l.includes('"cmd":"git"') && l.includes('"rev-parse"')).length;
+    out((n <= 1 ? (sc.gitHead ?? "${SHA}") : "fedcba9876543210") + "\\n");
+  }
 }
 else if (args[0] === "search") out(JSON.stringify(sc.search ?? []));
 else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(args.join(" ").includes("mergeStateStatus") ? (sc.prMerge ?? sc.pr) : sc.pr));
@@ -85,6 +98,7 @@ function run(argv, scenario, extraEnv = {}) {
   chmodSync(join(dir, "stub.mjs"), 0o755);
   writeFileSync(join(dir, "scenario.json"), JSON.stringify(scenario));
   mkdirSync(join(dir, "cfg"));
+  mkdirSync(join(dir, "log"));
   for (const [name, content] of Object.entries(scenario.files ?? {})) writeFileSync(join(dir, name), typeof content === "string" ? content : JSON.stringify(content));
   const r = spawnSync(BIN, argv, {
     encoding: "utf8",
@@ -94,7 +108,7 @@ function run(argv, scenario, extraEnv = {}) {
       PR_REVIEW_LOG: join(dir, "log", "decisions.jsonl"), ...extraEnv,
     },
   });
-  const lf = join(dir, "log", "decisions.jsonl");
+  const lf = extraEnv.PR_REVIEW_LOG ?? join(dir, "log", "decisions.jsonl");
   const decisions = existsSync(lf) ? readFileSync(lf, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
   const f = join(dir, "calls.jsonl");
   const calls = existsSync(f) ? readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
@@ -373,16 +387,16 @@ test("no-automerge.txt lists the repo -> no merge; other repo still merges", () 
   assert.equal(merges(go({ files: { "cfg/no-automerge.txt": "x/y\n" } })).length, 1);
 });
 
-test("301 changed lines -> no merge; 300 -> merge", () => {
+test("no changed-line cap (owner: any size): 301 and 20000 lines still merge; lines logged", () => {
   const f = (a, d) => [{ path: "src/a.js", additions: a, deletions: d }];
   const big = go({ pr: pr({ files: f(200, 101) }) });
-  assert.equal(merges(big).length, 0);
-  assert.equal(big.decisions[0].reason, "too-big-301");
-  assert.equal(merges(go({ pr: pr({ files: f(200, 100) }) })).length, 1);
+  assert.equal(merges(big).length, 1);
+  assert.equal(big.decisions[0].lines, 301);
+  assert.equal(merges(go({ pr: pr({ files: f(15000, 5000) }) })).length, 1);
 });
 
 test("risky paths -> no merge", () => {
-  for (const path of [".github/workflows/x.yml", "db/migrations/1.sql", ".env.example", "src/Auth/login.js", "package-lock.json", "infra/Dockerfile"]) {
+  for (const path of [".github/workflows/x.yml", "db/migrations/1.sql", ".env.example", "src/Auth/login.js", "package-lock.json", "infra/Dockerfile", "bin/pr-review", "bin/jev"]) {
     const r = go({ pr: pr({ files: [{ path, additions: 1, deletions: 1 }] }) });
     assert.equal(merges(r).length, 0, path);
     assert.match(r.decisions[0].reason, /^risky-path/, path);
@@ -393,10 +407,10 @@ test("decision log line carries the contract fields", () => {
   const r = go({});
   assert.equal(r.decisions.length, 1);
   const d = r.decisions[0];
-  assert.deepEqual(Object.keys(d), ["at", "repo", "pr", "sha", "a", "b", "b_model", "jev", "conf", "lines", "action", "reason", "injection", "e2e", "e2e_source", "cost"]);
+  assert.deepEqual(Object.keys(d), ["at", "repo", "pr", "sha", "a", "b", "b_model", "jev", "conf", "judge", "lines", "action", "reason", "injection", "e2e", "e2e_source", "fix", "cost"]);
   assert.equal(d.repo, "o/r"); assert.equal(d.pr, 1); assert.equal(d.sha, SHA);
   assert.equal(d.a, "PASS"); assert.equal(d.b, "PASS"); assert.equal(d.b_model, "commandcode/gpt-6.1-sol");
-  assert.equal(d.jev, "pass"); assert.equal(d.conf, 0.95); assert.equal(d.lines, 10); assert.equal(d.action, "merged");
+  assert.equal(d.jev, "pass"); assert.equal(d.conf, 0.95); assert.equal(d.judge, "jev"); assert.equal(d.fix, null); assert.equal(d.lines, 10); assert.equal(d.action, "merged");
 });
 
 // ---- cost per decision ----
@@ -457,7 +471,7 @@ test("verdict-injection PR at p=0.9 is reviewed, body carries warning, merge ski
   assert.equal(r.decisions[0].injection.kind, "verdict");
 });
 
-test("jev raw exit 3 -> injection-guard-error, no merge, review still posted", () => {
+test("jev raw exit 3 and Haiku guard answer garbled -> injection-guard-error, no merge, review still posted", () => {
   const r = go({ jevFail: 3 });
   assert.equal(r.posts.length, 1, "review still posted on guard failure");
   assert.equal(merges(r).length, 0);
@@ -466,13 +480,12 @@ test("jev raw exit 3 -> injection-guard-error, no merge, review still posted", (
   assert.equal(r.decisions[0].injection.max, null);
 });
 
-test(">4 chunks -> injection-suspect with reason injection-too-big", () => {
-  // state = title + body + "+" lines. 4 chunks * 24000 = 96000 chars max for safe. Push past.
-  const big = "+x\n".repeat(50000); // ~100000 chars of "+x\n" lines (filter keeps them all)
-  const r = go({ diff: `diff --git a/x.js b/x.js\n+++ b/x.js\n@@ -1,1 +1,50000 @@\n${big}` });
-  assert.equal(merges(r).length, 0);
-  assert.equal(r.decisions[0].reason, "injection-suspect");
-  assert.equal(r.decisions[0].injection.kind, "injection-too-big");
+test(">4 chunks -> every chunk scanned, no injection-too-big cap (owner: any size)", () => {
+  const big = "+x\n".repeat(35000); // 105000 chars: 5 guard chunks, still under the 120000 review cap
+  const r = go({ diff: `diff --git a/x.js b/x.js\n+++ b/x.js\n@@ -1,1 +1,35000 @@\n${big}` });
+  assert.equal(guardCalls(r).length, 5);
+  assert.equal(merges(r).length, 1);
+  assert.notEqual(r.decisions[0].injection.kind, "injection-too-big");
 });
 
 test("only \"+\" lines reach guard state (a \"-\" line with injection text does not trigger)", () => {
@@ -737,4 +750,177 @@ test("world hook: no track on PATH does not change exit or output", () => {
   const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS }, {});
   assert.equal(r.status, 0);
   assert.match(r.stdout, /merged/);
+});
+
+// ---- Haiku fallback when Jev is down (owner 2026-10-16) ----
+const CLEAN = { verdict: 0.05, exfil: 0.02, override: 0.02, owner: 0.01 };
+const haikuGuardCalls = (r) => r.claudes.filter((c) => c.stdin.startsWith("You are a security filter"));
+const haikuJudgeCalls = (r) => r.claudes.filter((c) => c.stdin.startsWith("You are a merge judge"));
+
+test("jev down -> Haiku guard + Haiku judge; clean and confident -> merge, engine logged as haiku", () => {
+  const r = go({ jevFail: 3, haikuGuard: CLEAN, haikuJudge: { choice: "pass", confidence: 0.97 } });
+  assert.equal(haikuGuardCalls(r).length, 1);
+  assert.equal(haikuJudgeCalls(r).length, 1);
+  assert.ok(haikuGuardCalls(r)[0].args.includes("claude-haiku-5-5"));
+  assert.equal(haikuGuardCalls(r)[0].args[haikuGuardCalls(r)[0].args.indexOf("--tools") + 1], "");
+  assert.equal(merges(r).length, 1);
+  assert.equal(r.decisions[0].injection.engine, "haiku");
+  assert.equal(r.decisions[0].judge, "haiku");
+  const c = skipComments(r).find((x) => x.bodyFile.includes("haiku-merged"));
+  assert.match(c.bodyFile, /Haiku judge \(0\.97\)/);
+});
+
+test("Haiku guard uses the strict 0.3 bar: 0.4 -> injection-suspect", () => {
+  const r = go({ jevFail: 3, haikuGuard: { ...CLEAN, owner: 0.4 }, haikuJudge: { choice: "pass", confidence: 0.99 } });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "injection-suspect");
+  assert.equal(r.decisions[0].injection.kind, "owner");
+});
+
+test("Haiku guard garbled, missing a key or out of range -> injection-guard-error", () => {
+  for (const haikuGuard of ["looks fine to me", { verdict: 0.1, exfil: 0.1, override: 0.1 }, { ...CLEAN, exfil: "low" }, { ...CLEAN, verdict: 7 }]) {
+    const r = go({ jevFail: 3, haikuGuard, haikuJudge: { choice: "pass", confidence: 0.99 } });
+    assert.equal(merges(r).length, 0, JSON.stringify(haikuGuard));
+    assert.equal(r.decisions[0].reason, "injection-guard-error", JSON.stringify(haikuGuard));
+  }
+});
+
+test("Haiku judge: 0.92 -> low confidence, block -> jev-block, garbled -> jev-error", () => {
+  const j = (haikuJudge) => go({ jevFail: 3, haikuGuard: CLEAN, haikuJudge });
+  const a = j({ choice: "pass", confidence: 0.92 });
+  assert.equal(merges(a).length, 0); assert.equal(a.decisions[0].reason, "jev-low-confidence");
+  const b = j({ choice: "block", confidence: 0.99 });
+  assert.equal(merges(b).length, 0); assert.equal(b.decisions[0].reason, "jev-block");
+  const c = j("PASS I think");
+  assert.equal(merges(c).length, 0); assert.equal(c.decisions[0].reason, "jev-error");
+});
+
+test("Jev up -> no Haiku guard or judge call", () => {
+  const r = go({});
+  assert.equal(haikuGuardCalls(r).length + haikuJudgeCalls(r).length, 0);
+  assert.equal(r.decisions[0].injection.engine, "jev");
+});
+
+test("guard result is cached per repo#pr@sha: a second sweep makes no guard call", () => {
+  const shared = mkdtempSync(join(tmpdir(), "pr-review-shared-"));
+  const env = { PR_REVIEW_LOG: join(shared, "decisions.jsonl") };
+  const body = `**Haiku 5.5 review**\n\nok\nVERDICT: PASS\n\n**Second review (commandcode/gpt-6.1-sol)**\n\nok\nVERDICT: PASS\n\n<!-- haiku-review sha=${SHA} -->`;
+  const sc = { pr: pr({ comments: [{ body }] }), prMerge: green() };
+  const a = run(["o/r", "1"], sc, env);
+  assert.equal(guardCalls(a).length, 1);
+  const b = run(["o/r", "1"], sc, env);
+  assert.equal(guardCalls(b).length, 0);
+  assert.equal(merges(b).length, 1);
+});
+
+// ---- one Haiku 5.5 auto-fix round on BLOCK (owner 2026-10-16) ----
+const BLOCK = "P1 src/a.js:3 null deref when user is missing\nVERDICT: BLOCK";
+const fixPr = (over = {}) => pr({ isCrossRepository: false, author: { login: "bardoun7894", is_bot: false }, headRefName: "feat/x", state: "OPEN", ...over });
+const fixGo = (sc = {}, extra = [], env = {}) => run(["o/r", "1", ...extra], { pr: fixPr(), prMerge: green(), claudeOut: BLOCK, gitStatus: " M src/a.js\n", ...sc }, env);
+const fixCalls = (r) => r.claudes.filter((c) => c.stdin.startsWith("You are fixing a pull request"));
+const gitCalls = (r, sub) => r.calls.filter((c) => c.cmd === "git" && c.args.includes(sub));
+const SEEN_BLOCK = `**Haiku 5.5 review**\n\n${BLOCK}\n\n**Second review (commandcode/gpt-6.1-sol)**\n\nP1 src/a.js:9 leak\nVERDICT: BLOCK\n\n<!-- haiku-review sha=${SHA} -->`;
+
+test("BLOCK + clean guard -> one fix round: clone head, Haiku fixes with edit-only tools, commit, push, comment", () => {
+  const r = fixGo();
+  assert.equal(merges(r).length, 0);
+  assert.equal(fixCalls(r).length, 1);
+  const f = fixCalls(r)[0];
+  assert.ok(f.stdin.includes("null deref when user is missing"), "review A findings reach the fixer");
+  assert.ok(f.args.includes("claude-haiku-5-5"));
+  assert.equal(f.args[f.args.indexOf("--tools") + 1], "Read,Edit,Write,Glob,Grep");
+  assert.equal(f.args[f.args.indexOf("--setting-sources") + 1], "", "no project settings from the PR branch");
+  assert.ok(!f.args.includes("Bash"));
+  const clone = r.calls.find((c) => c.cmd === "gh" && c.args[0] === "repo" && c.args[1] === "clone");
+  assert.ok(clone && clone.args.includes("o/r") && clone.args.includes("feat/x"));
+  assert.equal(f.cwd.replace(/^\/private/, ""), clone.args[3].replace(/^\/private/, ""), "fixer runs inside the clone (macOS /private symlink aside)");
+  assert.equal(gitCalls(r, "commit").length, 1);
+  const push = gitCalls(r, "push");
+  assert.equal(push.length, 1);
+  assert.ok(push[0].args.includes("HEAD:refs/heads/feat/x"));
+  assert.ok(!push[0].args.some((a) => /force|^-f$/.test(a)));
+  const c = r.comments.find((x) => x.bodyFile.includes("<!-- haiku-autofix"));
+  assert.ok(c, "auto-fix comment posted");
+  assert.equal(r.decisions[0].fix.status, "pushed");
+  assert.equal(r.decisions[0].fix.sha, "fedcba9876543210");
+  assert.match(r.stdout, /o\/r#1 abcdef1 fix-pushed/);
+});
+
+test("one fix round per PR: a later BLOCK on the new head is reported, not fixed again", () => {
+  const shared = mkdtempSync(join(tmpdir(), "pr-review-shared-"));
+  const env = { PR_REVIEW_LOG: join(shared, "decisions.jsonl") };
+  assert.equal(fixCalls(fixGo({}, [], env)).length, 1);
+  const r = fixGo({ pr: fixPr({ headRefOid: "1111111111111111" }), prMerge: green({ headRefOid: "1111111111111111" }), gitHead: "1111111111111111" }, [], env);
+  assert.equal(fixCalls(r).length, 0);
+  assert.equal(r.decisions.at(-1).fix.reason, "already-tried");
+});
+
+test("the round is claimed before the fixer runs: a fixer crash still uses it up", () => {
+  const shared = mkdtempSync(join(tmpdir(), "pr-review-shared-"));
+  const env = { PR_REVIEW_LOG: join(shared, "decisions.jsonl") };
+  const a = fixGo({ fixFail: true }, [], env);
+  assert.equal(a.decisions[0].fix.status, "error");
+  assert.equal(gitCalls(a, "push").length, 0);
+  const b = fixGo({}, [], env);
+  assert.equal(fixCalls(b).length, 0);
+  assert.equal(b.decisions.at(-1).fix.reason, "already-tried");
+});
+
+test("an autofix comment on the PR also counts as the round being used", () => {
+  const r = fixGo({ pr: fixPr({ comments: [{ body: "x <!-- haiku-autofix sha=0000000 -->" }] }) });
+  assert.equal(fixCalls(r).length, 0);
+  assert.equal(r.decisions[0].fix.reason, "already-tried");
+});
+
+test("no fix: dry-run, --no-merge, dirty guard, guard error, cross-repo, bot author, truncated diff, no-autofix list, head moved", () => {
+  const none = (r, why) => { assert.equal(fixCalls(r).length, 0, why); assert.equal(gitCalls(r, "push").length, 0, why); };
+  none(fixGo({}, ["--dry-run"]), "dry-run");
+  none(fixGo({}, ["--no-merge"]), "no-merge");
+  none(fixGo({ guardAnswers: { verdict: 0.9 } }), "dirty guard");
+  none(fixGo({ jevFail: 3 }), "guard error");
+  none(fixGo({ pr: fixPr({ isCrossRepository: true }) }), "cross-repo");
+  none(fixGo({ pr: fixPr({ isCrossRepository: undefined }) }), "cross-repo unknown");
+  none(fixGo({ pr: fixPr({ author: { login: "dependabot[bot]", is_bot: true } }) }), "dependabot");
+  none(fixGo({ pr: fixPr({ author: { login: "app/renovate" } }) }), "renovate");
+  none(fixGo({ diff: "x".repeat(130000) }), "truncated");
+  none(fixGo({ files: { "cfg/no-autofix.txt": "x/y\no/r#1\n" } }), "no-autofix pr");
+  none(fixGo({ files: { "cfg/no-autofix.txt": "o/r\n" } }), "no-autofix repo");
+  none(fixGo({ files: { "cfg/OFF": "" } }), "kill switch");
+  none(fixGo({ gitHead: "9999999999999999" }), "clone head differs from reviewed sha");
+});
+
+test("fix touching a risky or CI path is not pushed", () => {
+  for (const path of [".github/workflows/ci.yml", "bin/pr-review", ".claude/settings.json", "db/migrations/2.sql"]) {
+    const r = fixGo({ gitStatus: ` M src/a.js\n?? ${path}\n` });
+    assert.equal(gitCalls(r, "push").length, 0, path);
+    assert.equal(gitCalls(r, "commit").length, 0, path);
+    assert.equal(r.decisions[0].fix.status, "rejected", path);
+    assert.ok(r.decisions[0].fix.reason.includes(path), path);
+  }
+});
+
+test("fixer changed nothing -> noop, no commit, no push", () => {
+  const r = fixGo({ gitStatus: "" });
+  assert.equal(gitCalls(r, "commit").length, 0);
+  assert.equal(gitCalls(r, "push").length, 0);
+  assert.equal(r.decisions[0].fix.status, "noop");
+});
+
+test("already-reviewed BLOCK PR (skipped-seen) gets its fix round without a new review", () => {
+  const r = run(["o/r", "1"], { pr: fixPr({ comments: [{ body: SEEN_BLOCK }] }), prMerge: green(), gitStatus: " M src/a.js\n" });
+  assert.equal(r.posts.length, 0);
+  assert.equal(fixCalls(r).length, 1);
+  assert.ok(fixCalls(r)[0].stdin.includes("P1 src/a.js:9 leak"), "review B findings reach the fixer");
+});
+
+test("skipped-seen BLOCK PR whose round is used up makes no guard call", () => {
+  const r = run(["o/r", "1"], { pr: fixPr({ comments: [{ body: SEEN_BLOCK }] }), prMerge: green(), files: { "log/fix-attempts.json": { "o/r#1": { sha: SHA, status: "pushed" } } } });
+  assert.equal(guardCalls(r).length, 0);
+  assert.equal(fixCalls(r).length, 0);
+});
+
+test("each fix round counts toward --max in a sweep", () => {
+  const search = [1, 2, 3].map((n) => ({ repository: { nameWithOwner: "bardoun7894/r" }, number: n, updatedAt: `2026-10-0${n}T00:00:00Z` }));
+  const r = run(["--sweep", "--max", "1"], { search, pr: fixPr({ comments: [{ body: SEEN_BLOCK }] }), prMerge: green(), gitStatus: " M src/a.js\n" });
+  assert.equal(fixCalls(r).length, 1);
 });
