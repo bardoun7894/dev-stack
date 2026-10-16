@@ -36,6 +36,8 @@ export default {
     }
 
     // Content check lite takes about 10 minutes; clicking Post early turns into a "Post now" prompt.
+    // UNVERIFIED: the label may stay on the page after the check passes (then this waits the full timeout).
+    // Confirm on the first --dry-run and switch to the passed-state text if so.
     await page.locator(SEL.checkDone).first().waitFor({ state: 'hidden', timeout: CHECK_TIMEOUT }).catch(() => {});
 
     if (ctx.mode === 'dryrun') return stopDryRun(page, ctx, 'tiktok');

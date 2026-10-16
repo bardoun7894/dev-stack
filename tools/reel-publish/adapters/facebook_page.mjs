@@ -11,7 +11,7 @@ const SEL = {
   description: '[aria-label*="Description" i], [contenteditable=true][role=textbox]',
   next: 'div[role=button]:has-text("Next"), button:has-text("Next")',
   shareNow: 'text=Share now',
-  autoCaptions: 'input[type=checkbox][aria-label*="caption" i], text=Auto-generated captions',
+  autoCaptions: 'input[type=checkbox][aria-label*="caption" i]',
   share: 'div[role=button]:has-text("Share"), button:has-text("Share")',
   contentPosts: 'https://business.facebook.com/latest/content_calendar?asset_id=' + PAGE_ASSET,
 };
@@ -19,6 +19,8 @@ const SEL = {
 export default {
   name: 'facebook_page',
   async run(ctx) {
+    // No verified scheduler in this flow: refuse rather than publish a post approved for later.
+    if (ctx.post.schedule) throw new Error('facebook_page: scheduling not wired; post manually or drop schedule');
     const page = await ctx.newPage();
     await page.goto(SEL.composer, { waitUntil: 'domcontentloaded' });
     if (!(await page.locator(SEL.postTo).first().isVisible({ timeout: 60_000 }).catch(() => false))) {
@@ -33,10 +35,6 @@ export default {
     await page.locator(SEL.next).first().click({ timeout: 300_000 });
     await page.locator(SEL.next).first().click({ timeout: 300_000 });
 
-    if (ctx.post.schedule) {
-      // Scheduling in this flow is not verified; publish immediately rather than guess a picker.
-      ctx.log('facebook_page: scheduler not wired in this flow; posting now');
-    }
     await page.locator(SEL.shareNow).first().click({ timeout: 30_000 }).catch(() => {});
     const cc = page.locator(SEL.autoCaptions).first();
     if (await cc.isChecked?.().catch(() => false)) await cc.uncheck();

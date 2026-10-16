@@ -3,6 +3,7 @@ import { typeAndVerify, stopDryRun } from '../lib/browser.mjs';
 
 const SEL = {
   create: 'https://www.facebook.com/reels/create/',
+  profileName: 'محمد البردوني',
   reelsList: 'https://www.facebook.com/me/reels/',
   fileInput: 'input[type=file]',
   description: '[contenteditable=true][role=textbox]',
@@ -16,11 +17,12 @@ const SEL = {
 export default {
   name: 'facebook_profile',
   async run(ctx) {
+    if (ctx.post.schedule) throw new Error('facebook_profile: no scheduler in this flow; post manually or drop schedule');
     const page = await ctx.newPage();
     await page.goto(SEL.create, { waitUntil: 'domcontentloaded' });
-    // The active identity must be the profile, not the Page. The Page composer lives elsewhere, so the
-    // profile check is the avatar menu, which is verified by the owner during the first manual run.
-    ctx.log('facebook_profile: confirm the active identity is the profile (not the Page)');
+    // The active identity must be the profile, not the Page: fail closed unless the composer shows the profile name.
+    const asProfile = await page.getByText(SEL.profileName).first().isVisible({ timeout: 60_000 }).catch(() => false);
+    if (!asProfile) throw new Error(`facebook_profile: composer does not show "${SEL.profileName}"; switch from the Page to the profile`);
     await page.locator(SEL.fileInput).first().setInputFiles(ctx.post.video, { timeout: 120_000 });
     await page.locator(SEL.next).first().click({ timeout: 300_000 });
     await page.locator(SEL.next).first().click({ timeout: 300_000 });
@@ -38,6 +40,6 @@ export default {
     const id = href && href.match(/\/reel\/(\d+)/);
     await page.close().catch(() => {});
     return { ok: true, url: id ? `https://www.facebook.com/reel/${id[1]}` : null,
-      note: ctx.post.schedule ? 'posted now: no scheduler in this flow' : (id ? null : 'posted; reel id not found') };
+      note: id ? null : 'posted; reel id not found' };
   },
 };
