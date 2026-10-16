@@ -9,11 +9,16 @@ const SOCIAL = '/root/portfolio-next/public/content/social-videos.json';
 const YT_JSON = '/var/lib/mbardouni/content/youtube.json';
 const SITE = 'https://www.mbardouni.dev/ar/videos';
 
-async function verifyOnSite(id) {
-  const { stdout } = await run('curl', ['-s', SITE]);
-  const n = stdout.split(id).length - 1;
-  if (n < 1) throw new Error(`${id} not found on ${SITE}`);
-  return n;
+// /ar/videos is ISR (revalidate 300 s, stale-while-revalidate): the first hit after a write
+// serves the old page and triggers a rebuild, so poll for up to 8 minutes.
+async function verifyOnSite(id, { tries = 16, waitMs = 30_000 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    const { stdout } = await run('curl', ['-s', SITE]);
+    const n = stdout.split(id).length - 1;
+    if (n >= 1) return n;
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, waitMs));
+  }
+  throw new Error(`${id} not found on ${SITE} after ${(tries * waitMs) / 60000} min`);
 }
 
 export default {
@@ -23,7 +28,9 @@ export default {
     const notes = [];
 
     const tt = ctx.results.tiktok;
-    if (tt && tt.ok && tt.url) {
+    if (tt && tt.ok && tt.url && ctx.post.schedule) {
+      notes.push('tiktok scheduled: not listed yet (a card for an unpublished post would be broken); backfill after it goes live');
+    } else if (tt && tt.ok && tt.url) {
       const id = tiktokIdFromUrl(tt.url);
       const doc = JSON.parse(await ssh(`cat ${SOCIAL}`));
       const { doc: next, added } = addTiktokEntry(doc, { url: tt.url, title: ctx.platform.title });

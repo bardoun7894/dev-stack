@@ -1,5 +1,5 @@
 // Runs on MyContabo. Uploads one reel to YouTube with Tokyo's stored OAuth refresh token.
-//   node yt_publish.cjs --check        refresh token, list the channel title, no upload
+//   node yt_publish.cjs --check        refresh token, confirm the upload scope, no upload
 //   node yt_publish.cjs <slug>         upload /root/media-uploads/reel-publish/<slug>/video.mp4 with meta.json
 // Idempotent: if <slug>/result.json exists the upload is not repeated.
 const fs = require("fs");
@@ -34,15 +34,15 @@ async function token() {
 }
 
 async function check() {
+  // The stored token is upload-only (youtube.upload), so channels.list?mine=true answers 403.
+  // tokeninfo proves the refresh works and that the scope covers uploads.
   const tok = await token();
-  const r = await fetch("https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true", {
-    headers: { Authorization: `Bearer ${tok}` },
-  });
-  const body = await r.text();
-  if (!r.ok) throw new Error(`channels.list ${r.status}: ${body.slice(0, 400)}`);
-  const items = JSON.parse(body).items || [];
-  if (!items.length) throw new Error("channels.list returned no channel");
-  console.log(JSON.stringify({ channel: items[0].snippet.title, channelId: items[0].id }));
+  const r = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(tok)}`);
+  const j = await r.json();
+  if (!r.ok) throw new Error(`tokeninfo ${r.status}: ${JSON.stringify(j).slice(0, 300)}`);
+  const scopes = String(j.scope || "").split(" ");
+  if (!scopes.some((s) => /auth\/youtube(\.upload|\.force-ssl)?$/.test(s))) throw new Error(`token lacks an upload scope: ${j.scope}`);
+  console.log(JSON.stringify({ ok: true, scope: j.scope, expires_in: Number(j.expires_in) }));
 }
 
 async function upload(slug) {
