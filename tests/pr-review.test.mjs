@@ -57,6 +57,9 @@ else if (cmd === "claude") {
     : stdin.startsWith("You are fixing a pull request") ? "fix" : "review";
   if (role === "fix" && sc.fixFail) { process.stderr.write("fixer died"); process.exit(1); }
   if (role === "fix" && sc.fixTouchesGit) appendFileSync(process.cwd() + "/.git/config", "[core]\\n\\tfsmonitor = /tmp/pwn.sh\\n");
+  let partText;
+  for (const [k, v] of Object.entries(sc.partOut ?? {})) if (stdin.includes("(part " + k + "/")) partText = v;
+  if (role === "review" && partText !== undefined) { out(JSON.stringify({ type: "result", result: partText, total_cost_usd: 0.001, usage: { input_tokens: 1, output_tokens: 1 } })); process.exit(0); }
   const special = role === "guard" ? sc.haikuGuard : role === "judge" ? sc.haikuJudge : role === "fix" ? (sc.fixOut ?? "Fixed.") : undefined;
   if (special !== undefined) out(JSON.stringify({ type: "result", result: typeof special === "string" ? special : JSON.stringify(special), total_cost_usd: 0.001, usage: { input_tokens: 1, output_tokens: 1 } }));
   else if (sc.claudeRaw !== undefined) out(sc.claudeRaw);
@@ -65,8 +68,12 @@ else if (cmd === "claude") {
 else if (cmd === "git") {
   if (args.includes("push") && sc.pushFail) { process.stderr.write("rejected"); process.exit(1); }
   if (args[0] === "status") out(sc.gitStatus ?? "");
+  else if (args[0] === "fetch") out("");
+  else if (args[0] === "rev-parse" && args[1] === "prhead") out((sc.cloneHead ?? "${SHA}") + "\\n");
+  else if (args[0] === "diff" && args.includes("--numstat")) out(sc.cloneNumstat ?? "1\\t0\\ty.js\\n");
+  else if (args[0] === "diff") out(sc.cloneDiff ?? "diff --git a/y.js b/y.js\\n+1\\n");
   else if (args[0] === "rev-parse") {
-    const n = readFileSync(dir + "/calls.jsonl", "utf8").split("\\n").filter((l) => l.includes('"cmd":"git"') && l.includes('"rev-parse"')).length;
+    const n = readFileSync(dir + "/calls.jsonl", "utf8").split("\\n").filter((l) => l.includes('"cmd":"git"') && l.includes('"rev-parse"') && !l.includes('"prhead"')).length;
     out((n <= 1 ? (sc.gitHead ?? "${SHA}") : "fedcba9876543210") + "\\n");
   }
 }
@@ -75,7 +82,11 @@ else if (args[0] === "search") out(JSON.stringify(sc.search ?? []));
 else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(args.join(" ").includes("mergeStateStatus") ? (sc.prMerge ?? sc.pr) : sc.pr));
 else if (args[0] === "api") {
   const m = args[1].match(/contents\\/\\.github\\/workflows(?:\\/([^?]+))?/);
-  if (m && !m[1]) { if (!sc.workflows) { process.stderr.write("gh: Not Found (HTTP 404)"); process.exit(1); } out(JSON.stringify(Object.keys(sc.workflows).map((name) => ({ name })))); }
+  if (/pulls\\/\\d+\\/files/.test(args[1])) {
+    if (sc.filesApiFail) { process.stderr.write("gh: API error (HTTP 502)"); process.exit(1); }
+    out(JSON.stringify([(sc.apiFiles ?? sc.pr?.files ?? []).map((f) => ({ filename: f.path, additions: f.additions, deletions: f.deletions }))]));
+  }
+  else if (m && !m[1]) { if (!sc.workflows) { process.stderr.write("gh: Not Found (HTTP 404)"); process.exit(1); } out(JSON.stringify(Object.keys(sc.workflows).map((name) => ({ name })))); }
   else if (m) out(JSON.stringify({ content: Buffer.from(sc.workflows[m[1]]).toString("base64") }));
   else if (new RegExp("commits/[^/]+/check-runs").test(args[1])) {
     if (sc.e2eCheck?.apiFail) { process.stderr.write("gh: API error (HTTP 500)"); process.exit(1); }
@@ -191,10 +202,14 @@ test("--dry-run prints and does not post", () => {
   assert.match(r.stdout, /reviewed/);
 });
 
-test("oversize diff is truncated to 120000 chars and the comment says so", () => {
+test("diff over 120000 chars is reviewed in parts; every char reaches a model, each prompt stays under the cap", () => {
   const r = run(["o/r", "1"], { pr: pr(), diff: "x".repeat(130000) });
-  assert.match(r.posts[0].bodyFile, /truncated/i);
-  assert.ok(r.claudes[0].stdin.length < 125000);
+  const reviews = r.claudes.filter((c) => c.stdin.startsWith("You are reviewing"));
+  assert.equal(reviews.length, 2);
+  assert.ok(reviews.every((c) => c.stdin.length < 125000));
+  assert.match(reviews[1].stdin, /part 2 of 2/);
+  assert.match(r.posts[0].bodyFile, /Reviewed in 2 parts/);
+  assert.ok(!/Diff truncated/.test(r.posts[0].bodyFile));
 });
 
 test("sweep respects --max, newest first", () => {
@@ -564,38 +579,106 @@ test("cost.jev_calls still 0 when no review happens (claude BLOCK short-circuits
 // ---- diff too large (GitHub 300-file cap) ----
 const DIFF_TOO_LARGE_MSG = "gh: the diff exceeded the maximum number of files (300) (HTTP 406); PullRequest.diff too_large";
 
-test("gh pr diff 406 too_large -> skipped-too-large, comment posted once with marker, no merge, no throw", () => {
-  const r = run(["o/r", "1"], { pr: pr(), diffTooLarge: true });
-  assert.equal(r.status, 0, "must not throw");
-  assert.match(r.stdout, /skipped-too-large/);
-  // Posted via `gh pr comment`, not `gh pr review`.
-  assert.equal(r.posts.length, 0, "no review post");
-  assert.equal(r.comments.length, 1, "one comment posted");
-  const body = r.comments[0].bodyFile;
-  assert.match(body, /Too large for automatic review \(diff over GitHub's 300-file limit\)\. Needs a human\./);
-  assert.match(body, /VERDICT: BLOCK/);
-  assert.ok(body.includes(`<!-- haiku-review sha=${SHA} -->`), "must include the seen-marker so later sweeps hit skipped-seen");
-  assert.equal(merges(r).length, 0, "no merge");
-  // No Claude call needed: the diff never reached the models.
-  assert.equal(r.claudes.length, 0);
-});
-
-test("gh pr diff 406 too_large in dry-run -> skipped-too-large, no comment posted", () => {
-  const r = run(["o/r", "1", "--dry-run"], { pr: pr(), diffTooLarge: true });
-  assert.equal(r.status, 0, "must not throw");
-  assert.match(r.stdout, /skipped-too-large/);
-  assert.equal(r.posts.length, 0, "--dry-run never posts a review");
-  assert.equal(r.comments.length, 0, "--dry-run never posts a comment");
-  assert.match(r.stdout, /Too large for automatic review/);
-});
-
-test("gh pr diff 406 too_large on already-reviewed PR -> skipped-too-large, no duplicate comment", () => {
-  // The seen-marker is missing for the current sha: later sweep should hit skipped-seen after we post.
-  const r = run(["o/r", "1"], { pr: pr(), diffTooLarge: true });
+test("gh pr diff 406 too_large -> blobless clone diffed against the merge base, reviewed, note in the body", () => {
+  const r = go({ pr: pr({ baseRefName: "main" }), diffTooLarge: true, cloneDiff: "diff --git a/y.js b/y.js\n+CLONED\n" });
   assert.equal(r.status, 0);
+  const clone = r.calls.find((c) => c.cmd === "gh" && c.args[0] === "repo" && c.args[1] === "clone");
+  assert.ok(clone.args.includes("--filter=blob:none") && clone.args.includes("--no-checkout"));
+  const d = r.calls.find((c) => c.cmd === "git" && c.args[0] === "diff" && !c.args.includes("--numstat"));
+  assert.ok(d.args.includes("-D") && d.args.includes("origin/main...prhead"));
+  assert.ok(r.claudes.some((c) => c.stdin.includes("+CLONED")));
+  assert.match(r.posts[0].bodyFile, /Diff from a clone against the merge base/);
+  assert.equal(merges(r).length, 1);
+});
+
+test("clone fallback: a risky path only in the clone's file list still blocks the merge", () => {
+  const r = go({ diffTooLarge: true, cloneNumstat: "1\t0\ty.js\n2\t1\t.github/workflows/deploy.yml\n" });
+  assert.equal(merges(r).length, 0);
+  assert.match(r.decisions[0].reason, /^risky-path:\.github/);
+});
+
+test("clone head differs from the PR head -> error, nothing posted", () => {
+  const r = go({ diffTooLarge: true, cloneHead: "9999999999999999" });
+  assert.notEqual(r.status, 0);
+  assert.equal(r.posts.length, 0);
+});
+
+test("old 300-file or truncated notice alone -> one fresh review; with a real review present -> skipped-seen, no model call", () => {
+  const old300 = `Too large for automatic review (diff over GitHub's 300-file limit). Needs a human.\n\nVERDICT: BLOCK\n\n<!-- haiku-review sha=${SHA} -->`;
+  const oldTrunc = `**Haiku 5.5 review**\n\n> Diff truncated: only the first 120000 characters were reviewed.\n\nok\nVERDICT: PASS\n\n<!-- haiku-review sha=${SHA} -->`;
+  for (const body of [old300, oldTrunc]) {
+    const a = go({ pr: pr({ comments: [{ body }] }) });
+    assert.equal(a.posts.length, 1, "fresh review posted");
+    const real = `**Haiku 5.5 review**\n\nok\nVERDICT: PASS\n\n**Second review (m)**\n\nok\nVERDICT: PASS\n\n<!-- haiku-review sha=${SHA} -->`;
+    const b = go({ pr: pr({ comments: [{ body }], reviews: [{ body: real }] }) });
+    assert.match(b.stdout, /skipped-seen/);
+    assert.equal(b.claudes.length, 0);
+    assert.equal(piCalls(b).length, 0);
+  }
+});
+
+test("more than 8 parts -> final notice posted once, no model call; that notice is never re-reviewed or fixed", () => {
+  const r = go({ diff: "x".repeat(120000 * 8 + 10) });
+  assert.equal(r.claudes.length, 0);
+  assert.equal(r.posts.length, 0);
+  assert.equal(r.comments.length, 1);
+  assert.match(r.comments[0].bodyFile, /Too large to review even in parts \(9 parts/);
   assert.match(r.stdout, /skipped-too-large/);
-  assert.equal(r.comments.length, 1, "one comment posted so future sweeps find the marker");
-  assert.ok(r.comments[0].bodyFile.includes(`<!-- haiku-review sha=${SHA} -->`));
+  const seen = run(["o/r", "1"], { pr: fixPr({ comments: [{ body: r.comments[0].bodyFile }] }), prMerge: green(), gitStatus: " M a\n" });
+  assert.match(seen.stdout, /skipped-seen/);
+  assert.equal(seen.claudes.length, 0);
+  assert.equal(guardCalls(seen).length, 0);
+});
+
+test("parts: verdict PASS only if every part of both reviews passes; one BLOCK part blocks", () => {
+  const diff = "x".repeat(250000);
+  const ok = go({ diff });
+  assert.equal(merges(ok).length, 1);
+  const bad = go({ diff, partOut: { 2: "P1 x:1 broken\nVERDICT: BLOCK" } });
+  assert.equal(merges(bad).length, 0);
+  assert.equal(bad.decisions[0].reason, "verdict-block");
+  assert.match(bad.posts[0].bodyFile, /### Part 2\/3[\s\S]*Part verdict: BLOCK[\s\S]*\nVERDICT: BLOCK\n\n\*\*Second review/);
+});
+
+test("parts: second reviewer missing on any part -> no-second-reviewer, B not called after the miss", () => {
+  const r = go({ diff: "x".repeat(250000), files: { "exhausted.json": { commandcode: future, "opencode-go": future } } });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "no-second-reviewer");
+});
+
+test("parts: 8 long part reviews keep the posted body under GitHub's 65536 limit", () => {
+  const r = go({ diff: "x".repeat(120000 * 8), claudeOut: `${"P2 a.js:1 note ".repeat(3000)}\nVERDICT: PASS`, bOut: `${"P2 b ".repeat(5000)}\nVERDICT: PASS` });
+  assert.equal(r.posts.length, 1);
+  assert.ok(r.posts[0].bodyFile.length < 65536, String(r.posts[0].bodyFile.length));
+  assert.equal(merges(r).length, 1);
+});
+
+test("guard scans the whole diff, not only the first 120000 chars", () => {
+  const r = go({ diff: `diff --git a/x.js b/x.js\n${"+x\n".repeat(70000)}+TAILMARK\n` });
+  const states = guardCalls(r).map((c) => JSON.parse(c.stdin).state).join("");
+  assert.ok(states.includes("TAILMARK"));
+});
+
+test("file list comes from the paginated API: a risky path past the first 100 files blocks the merge", () => {
+  const apiFiles = Array.from({ length: 150 }, (_, i) => ({ path: `src/f${i}.js`, additions: 1, deletions: 0 }));
+  apiFiles[120] = { path: "db/migrations/9.sql", additions: 1, deletions: 0 };
+  const r = go({ apiFiles });
+  assert.equal(merges(r).length, 0);
+  assert.equal(r.decisions[0].reason, "risky-path:db/migrations/9.sql");
+  assert.ok(r.calls.some((c) => c.cmd === "gh" && c.args[0] === "api" && c.args.includes("--paginate")));
+});
+
+test("files API failure -> error, nothing posted, no merge", () => {
+  const r = go({ filesApiFail: true });
+  assert.notEqual(r.status, 0);
+  assert.equal(r.posts.length, 0);
+  assert.equal(merges(r).length, 0);
+});
+
+test("sweep: each reviewed part counts toward --max (a 3-part PR uses a --max 3 budget)", () => {
+  const search = [1, 2].map((n) => ({ repository: { nameWithOwner: "bardoun7894/r" }, number: n, updatedAt: `2026-10-0${n}T00:00:00Z` }));
+  const r = run(["--sweep", "--max", "3"], { search, pr: pr(), diff: "x".repeat(250000) });
+  assert.equal(r.posts.length, 1);
 });
 
 // ---- e2e gate for UI PRs ----
@@ -884,7 +967,6 @@ test("no fix: dry-run, --no-merge, dirty guard, guard error, cross-repo, bot aut
   none(fixGo({ pr: fixPr({ isCrossRepository: undefined }) }), "cross-repo unknown");
   none(fixGo({ pr: fixPr({ author: { login: "dependabot[bot]", is_bot: true } }) }), "dependabot");
   none(fixGo({ pr: fixPr({ author: { login: "app/renovate" } }) }), "renovate");
-  none(fixGo({ diff: "x".repeat(130000) }), "truncated");
   none(fixGo({ files: { "cfg/no-autofix.txt": "x/y\no/r#1\n" } }), "no-autofix pr");
   none(fixGo({ files: { "cfg/no-autofix.txt": "o/r\n" } }), "no-autofix repo");
   none(fixGo({ files: { "cfg/OFF": "" } }), "kill switch");
@@ -944,11 +1026,4 @@ test("jev-block (both reviews PASS) does not spend the fix round", () => {
 test("round used up on a skipped-seen PR is logged as already-tried, not guard-not-clean", () => {
   const r = run(["o/r", "1"], { pr: fixPr({ comments: [{ body: SEEN_BLOCK }] }), prMerge: green(), files: { "log/fix-attempts.json": { "o/r#1": { sha: SHA, status: "pushed" } } } });
   assert.equal(r.decisions[0].fix.reason, "already-tried");
-});
-
-test("skipped-seen too-large notice counts as truncated: no guard, no fix round", () => {
-  const body = `Too large for automatic review (diff over GitHub's 300-file limit). Needs a human.\n\nVERDICT: BLOCK\n\n<!-- haiku-review sha=${SHA} -->`;
-  const r = run(["o/r", "1"], { pr: fixPr({ comments: [{ body }] }), prMerge: green(), diffTooLarge: true, gitStatus: " M src/a.js\n" });
-  assert.equal(guardCalls(r).length, 0);
-  assert.equal(fixCalls(r).length, 0);
 });
