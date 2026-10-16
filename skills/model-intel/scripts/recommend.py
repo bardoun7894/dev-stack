@@ -101,7 +101,7 @@ def reachable_sub(r):
 def allowed(r, use):
     if r["key"] in RULES["never_worker_families"] and use not in ("orchestration", "fallback_claude"):
         return False
-    if r["creator"] == "OpenAI" and use not in RULES["openai_only_for"] + ["orchestration"]:
+    if r["creator"] == "OpenAI" and use not in RULES["openai_only_for"]:
         return False
     return True
 

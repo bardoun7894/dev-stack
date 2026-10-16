@@ -84,7 +84,8 @@
     "chains": [
       "kinds.language",
       "kinds.test",
-      "kinds.review"
+      "kinds.review",
+      "kinds.judge"
     ]
   },
   "kie": {

@@ -74,9 +74,9 @@ def parse_llm(html):
     rows, seen = [], set()
     for o in iter_objs(txt, "intelligenceIndex"):
         slug = o.get("slug")
-        if not slug or slug in seen or "name" not in o:
+        if not slug or "name" not in o or (slug, effort_of(o["name"])) in seen:
             continue
-        seen.add(slug)
+        seen.add((slug, effort_of(o["name"])))
         pin, pout = o.get("price1mInputTokens"), o.get("price1mOutputTokens")
         blended = round((3 * pin + pout) / 4, 4) if pin is not None and pout is not None else ""
 

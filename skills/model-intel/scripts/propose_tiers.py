@@ -188,7 +188,11 @@ def apply_changes(path, auto, today):
     tmp = path.with_name(path.name + ".model-intel.tmp")
     tmp.write_text(json.dumps(tiers, indent=2, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
-    err = validate(path)
+    try:
+        err = validate(path)
+    except Exception:
+        shutil.copy2(backup, path)
+        raise
     if err:
         shutil.copy2(backup, path)
         raise RuntimeError(f"validation failed, restored backup: {err}")
