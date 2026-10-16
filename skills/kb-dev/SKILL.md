@@ -165,6 +165,7 @@ The full classifier and per-role defaults live in `~/code/dev-stack/agents/orche
 1. **Never skip phase 0** — always run `/kb-query` first, even if you think you know the answer. The KB has history you will not remember.
 2. **Never skip phase 2a** — Research (KB prior art + library docs at repo versions + 2-3 competitor references with URLs + risks) must land in `specs/NNN/research.md` before any Phase 3 design decision. Dispatch `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher`; one read-only pass, output is `specs/NNN/research.md`.
 3. **Never skip phase 8** — `verification-before-completion` runs the full test suite and the user's definition of done. Saying "done" without it is the most common failure mode.
+   - Web change with WebMCP tools: unit test with the modelContext mock + live check in Chrome with the testing flag.
 4. **Phase 9 review is mandatory** — `requesting-code-review` runs on every change that touches code. The only exemption is a diff that contains zero code/config changes (docs-only). One reviewer pass + one `receiving-code-review` fix round; only **P0** and **P1** findings block. P2/P3 are informational and do not gate the branch. Treat phase 9 as a gate: no `finishing-a-development-branch` (phase 11) before review findings are triaged.
 5. **Capture knowledge in phase 12** — without `/kb-spec post` + `/kb-compile`, the next feature will not benefit from what you just learned.
 6. **Fan-out guardrail** — never spawn more than 4 parallel workers without user confirmation. Cost and debugging difficulty grow non-linearly past that.
@@ -397,6 +398,7 @@ When Phase 5 hits a UI/frontend task, route to the right specialist skill instea
 | "confusing copy", "label", "error message", "microcopy"               | `clarify`                    |
 | "too bold", "too loud", "calmer", "overstimulating"                   | `quieter`                    |
 | React / Next.js component or perf work                                | `vercel-react-best-practices`|
+| website page / form / user flow (search, booking, cart, contact)     | `webmcp` (register tools for the flow's public actions) |
 
 These routing rules apply both to **solo mode** (Phase 5a — current session) and **fan-out mode** (Phase 5b — each Sonnet worker spawns the relevant UI skill inside its own context). The orchestrator does not need to invoke them; the worker recognizes its task and pulls in the matching skill.
 
