@@ -945,3 +945,10 @@ test("round used up on a skipped-seen PR is logged as already-tried, not guard-n
   const r = run(["o/r", "1"], { pr: fixPr({ comments: [{ body: SEEN_BLOCK }] }), prMerge: green(), files: { "log/fix-attempts.json": { "o/r#1": { sha: SHA, status: "pushed" } } } });
   assert.equal(r.decisions[0].fix.reason, "already-tried");
 });
+
+test("skipped-seen too-large notice counts as truncated: no guard, no fix round", () => {
+  const body = `Too large for automatic review (diff over GitHub's 300-file limit). Needs a human.\n\nVERDICT: BLOCK\n\n<!-- haiku-review sha=${SHA} -->`;
+  const r = run(["o/r", "1"], { pr: fixPr({ comments: [{ body }] }), prMerge: green(), diffTooLarge: true, gitStatus: " M src/a.js\n" });
+  assert.equal(guardCalls(r).length, 0);
+  assert.equal(fixCalls(r).length, 0);
+});

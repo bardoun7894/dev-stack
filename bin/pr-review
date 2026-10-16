@@ -325,7 +325,7 @@ function parseSections(body) {
   const a = bi >= 0 ? body.slice(0, bi) : body;
   const b = bi >= 0 ? body.slice(bi) : "";
   const model = b.match(/^\*\*Second review \(([^)\n]+)\)\*\*/)?.[1];
-  return { aText: a, bText: b, bModel: model && model !== "unavailable" ? model : null, truncated: /Diff truncated/.test(a) };
+  return { aText: a, bText: b, bModel: model && model !== "unavailable" ? model : null, truncated: /Diff truncated|Too large for automatic review/.test(a) };
 }
 
 const DEPLOY_RE = /deploy|release|production|prod\b/i;
