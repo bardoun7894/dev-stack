@@ -112,7 +112,6 @@ Agent(  # packet 2 — hard complexity, backend
   description: "Migrate auth from sessions to JWT",
   subagent_type: "backend-engineer",
   model: "sonnet",
-  thinking: true,
   prompt: "..."
 )
 Agent(  # packet 3 — simple complexity, qa
