@@ -11,7 +11,7 @@ const SHA = "abcdef1234567890";
 
 // Stub runner: PR_REVIEW_RUNNER=<this file> receives argv = [cmd, ...args], logs the call, answers from scenario.json.
 const STUB = `#!/usr/bin/env node
-import { readFileSync, appendFileSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 const dir = process.env.STUB_DIR;
 const sc = JSON.parse(readFileSync(dir + "/scenario.json", "utf8"));
 const [cmd, ...args] = process.argv.slice(2);
@@ -56,6 +56,7 @@ else if (cmd === "claude") {
   const role = stdin.startsWith("You are a security filter") ? "guard" : stdin.startsWith("You are a merge judge") ? "judge"
     : stdin.startsWith("You are fixing a pull request") ? "fix" : "review";
   if (role === "fix" && sc.fixFail) { process.stderr.write("fixer died"); process.exit(1); }
+  if (role === "fix" && sc.fixTouchesGit) appendFileSync(process.cwd() + "/.git/config", "[core]\\n\\tfsmonitor = /tmp/pwn.sh\\n");
   const special = role === "guard" ? sc.haikuGuard : role === "judge" ? sc.haikuJudge : role === "fix" ? (sc.fixOut ?? "Fixed.") : undefined;
   if (special !== undefined) out(JSON.stringify({ type: "result", result: typeof special === "string" ? special : JSON.stringify(special), total_cost_usd: 0.001, usage: { input_tokens: 1, output_tokens: 1 } }));
   else if (sc.claudeRaw !== undefined) out(sc.claudeRaw);
@@ -69,6 +70,7 @@ else if (cmd === "git") {
     out((n <= 1 ? (sc.gitHead ?? "${SHA}") : "fedcba9876543210") + "\\n");
   }
 }
+else if (args[0] === "repo" && args[1] === "clone") { mkdirSync(args[3] + "/.git/hooks", { recursive: true }); writeFileSync(args[3] + "/.git/config", "[core]\\n\\tbare = false\\n"); }
 else if (args[0] === "search") out(JSON.stringify(sc.search ?? []));
 else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(args.join(" ").includes("mergeStateStatus") ? (sc.prMerge ?? sc.pr) : sc.pr));
 else if (args[0] === "api") {
@@ -923,4 +925,23 @@ test("each fix round counts toward --max in a sweep", () => {
   const search = [1, 2, 3].map((n) => ({ repository: { nameWithOwner: "bardoun7894/r" }, number: n, updatedAt: `2026-10-0${n}T00:00:00Z` }));
   const r = run(["--sweep", "--max", "1"], { search, pr: fixPr({ comments: [{ body: SEEN_BLOCK }] }), prMerge: green(), gitStatus: " M src/a.js\n" });
   assert.equal(fixCalls(r).length, 1);
+});
+
+test("fixer that changes .git/config -> rejected before any git command runs in the clone", () => {
+  const r = fixGo({ fixTouchesGit: true });
+  assert.equal(fixCalls(r).length, 1);
+  assert.equal(r.decisions[0].fix.status, "rejected");
+  assert.equal(r.decisions[0].fix.reason, "git-metadata-changed");
+  for (const sub of ["status", "add", "commit", "push"]) assert.equal(gitCalls(r, sub).length, 0, sub);
+});
+
+test("jev-block (both reviews PASS) does not spend the fix round", () => {
+  const r = go({ pr: fixPr(), gitStatus: " M src/a.js\n", jev: { choice: "block", confidence: 0.99 } });
+  assert.equal(r.decisions[0].reason, "jev-block");
+  assert.equal(fixCalls(r).length, 0);
+});
+
+test("round used up on a skipped-seen PR is logged as already-tried, not guard-not-clean", () => {
+  const r = run(["o/r", "1"], { pr: fixPr({ comments: [{ body: SEEN_BLOCK }] }), prMerge: green(), files: { "log/fix-attempts.json": { "o/r#1": { sha: SHA, status: "pushed" } } } });
+  assert.equal(r.decisions[0].fix.reason, "already-tried");
 });

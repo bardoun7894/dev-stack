@@ -29,7 +29,7 @@
  * Tests stub every gh/claude call via PR_REVIEW_RUNNER (an executable called as `runner <cmd> <args...>`).
  */
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -59,7 +59,8 @@ const RISKY_RE = /\.github\/workflows\/|migrations?\/|\.env|secret|credential|Do
 // Paths an auto-fix may never push, on top of RISKY_RE.
 const FIX_DENY_RE = /(^|\/)\.github\/|(^|\/)\.claude\/|(^|\/)\.githooks?\/|(^|\/)CLAUDE\.md$|(^|\/)AGENTS\.md$/i;
 const BOT_RE = /\[bot\]$|^app\/|^dependabot|^renovate/i;
-const FIX_REASONS = ["verdict-block", "second-verdict-block", "jev-block"];
+// jev-block is left out: both reviews said PASS there, so the fixer would have nothing to fix and spend the round.
+const FIX_REASONS = ["verdict-block", "second-verdict-block"];
 const UI_PATH_RE = /\.(tsx|jsx|vue|svelte|css|scss|dart|html)$|\.blade\.php$|resources\/views|\/components\/|\/pages\//;
 const JEV_QUESTION = "Do these code reviews report any blocking problem (bug, security issue, data loss, broken test) that must be fixed before merge?";
 const INJECTION_BAR = 0.7;
@@ -632,13 +633,23 @@ ${tail(r.bText ?? "", 30000)}
 </reviews>
 `;
 
+// Fingerprint of the clone's git metadata that can make git run code (config, hooks, info/attributes).
+// The fixer can write inside the clone, so anything changed here means no git command may run in it.
+function gitSnapshot(dir) {
+  const g = join(dir, ".git");
+  const read = (p) => { try { return readFileSync(join(g, p), "utf8"); } catch { return null; } };
+  const ls = (p) => { try { return readdirSync(join(g, p)).sort().map((f) => `${f}:${read(join(p, f))}`).join("\n"); } catch { return null; } };
+  return JSON.stringify([read("config"), read("config.worktree"), read("HEAD"), ls("hooks"), ls("info")]);
+}
+
 // One Haiku 5.5 fix round. Returns { status: "skipped"|"noop"|"rejected"|"pushed"|"error", reason?, sha? }.
 function autoFix(repo, n, r) {
   const skipped = (reason) => ({ status: "skipped", reason });
+  if (listedIn("no-autofix.txt", [repo, `${repo}#${n}`])) return skipped("no-autofix");
+  if (fixUsed(repo, n, [])) return skipped("already-tried");
   const inj = r.injection ?? {};
   if (!inj.engine || typeof inj.max !== "number" || inj.max >= (inj.bar ?? INJECTION_BAR)) return skipped("guard-not-clean");
   if (r.truncated) return skipped("diff-truncated");
-  if (listedIn("no-autofix.txt", [repo, `${repo}#${n}`])) return skipped("no-autofix");
   const v = JSON.parse(gh(["pr", "view", String(n), "-R", repo, "--json", "isCrossRepository,author,headRefName,headRefOid,state,comments"]));
   if (fixUsed(repo, n, v.comments)) return skipped("already-tried");
   if (v.state && v.state !== "OPEN") return skipped("not-open");
@@ -663,7 +674,9 @@ function autoFix(repo, n, r) {
     gh(["repo", "clone", repo, dir, "--", "--depth", "50", "--single-branch", "--branch", v.headRefName], { timeout: 600000 });
     const head = exec("git", ["rev-parse", "HEAD"], { cwd: dir }).trim();
     if (head !== r.sha) return done({ status: "skipped", reason: "head-moved" });
+    const before = gitSnapshot(dir);
     parseClaude(exec("claude", FIX_ARGS, { input: FIX_PROMPT(r), cwd: dir, timeout: FIX_TIMEOUT_MS }));
+    if (gitSnapshot(dir) !== before) return done({ status: "rejected", reason: "git-metadata-changed" });
     const paths = exec("git", ["status", "--porcelain", "-uall"], { cwd: dir }).split("\n").filter((l) => l.trim())
       .map((l) => l.slice(3).split(" -> ").pop().replace(/^"|"$/g, ""));
     if (!paths.length) return done({ status: "noop" });
