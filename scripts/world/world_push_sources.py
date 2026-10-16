@@ -208,7 +208,7 @@ def _git_out(repo: Path, args: list[str], timeout: int = 20) -> str | None:
 
 def _git_log(repo: Path, since: str, rev: str = "") -> list[tuple[str, str, str]]:
     """Return [(short_sha, committer_iso, subject)]; rev like 'abc..HEAD' or ''."""
-    args = ["log", "--pretty=format:%h %cI %s", "-n", "5000"]
+    args = ["log", "--pretty=format:%h %cI", "-n", "5000"]
     args += [rev] if rev else [f"--since={since}"]
     out_s = _git_out(repo, args)
     if out_s is None:
@@ -267,10 +267,6 @@ def collect_git(roots: list[Path] | None = None) -> Iterable[dict]:
             key, {"canonical": canonical_dir, "project": project,
                   "roots": []},
         )
-        # Trust the first main-checkout discovery; later worktrees reach the
-        # same canonical and should not flip project names.
-        if len(str(repo)) < len(str(bucket["canonical"])):
-            bucket["canonical"] = repo
         bucket["roots"].append(repo)
     for bucket in by_canonical.values():
         canonical_dir: Path = bucket["canonical"]
@@ -291,7 +287,7 @@ def collect_git(roots: list[Path] | None = None) -> Iterable[dict]:
             out.append(event(
                 id=make_id(SRC_GIT, f"{project}:{sha}"),
                 ts=ts, project=project, kind="commit", status="done",
-                title=subject, ref=sha, url="", actor="owner",
+                title=f"commit {sha}", ref=sha, url="", actor="owner",
                 source=SRC_GIT,
             ))
     return out
@@ -345,7 +341,7 @@ def collect_prs() -> Iterable[dict]:
             proj = canonical_project(canonical_dir)
         else:
             proj = slug(repo_short)
-        title = pr.get("title") or f"PR #{num}"
+        title = f"PR #{num}"
         ts = pr.get("createdAt") or pr.get("closedAt") or ""
         if state == "merged":
             kind, status = "merge", "done"
@@ -465,6 +461,9 @@ def collect_skill_use() -> Iterable[dict]:
         cursor = {}
     # tracks last-seen (size, mtime) per file path (str).
     files: dict[str, dict] = cursor.get("files", {}) or {}
+    # Cumulative "skill|proj|day" -> count across runs, so each event reports the
+    # day's total rather than this run's delta.
+    totals: dict[str, int] = cursor.get("totals", {}) or {}
     cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=90)).timestamp()
 
     # Counters keyed by (skill, project, day). The day comes from the file's
@@ -552,18 +551,22 @@ def collect_skill_use() -> Iterable[dict]:
             counts[(skill, proj, day)] = counts.get((skill, proj, day), 0) + 1
         files[spath] = {"size": size, "mtime": mtime}
 
-    # Persist cursor only when at least one file changed; this way an empty
-    # re-run still records the file as scanned.
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        cursor_path.write_text(json.dumps({"files": files}))
-    except Exception:
-        pass
+    touched: dict[str, tuple[str, str, str]] = {}
+    for (skill, proj, day), n in counts.items():
+        key = f"{skill}|{proj}|{day}"
+        totals[key] = totals.get(key, 0) + n
+        touched[key] = (skill, proj, day)
+
+    # Cursor is committed by commit_state() only after a successful send, so a
+    # failed run re-scans the same delta instead of losing it.
+    _PENDING_STATE[cursor_path] = json.dumps({"files": files, "totals": totals})
 
     out: list[dict] = []
-    for (skill, proj, day), n in sorted(counts.items()):
+    for key, (skill, proj, day) in sorted(touched.items()):
+        n = totals[key]
         out.append(event(
-            id=make_id(SRC_SKILL_USE, f"{skill}:{proj}:{day}"),
+            # The total is part of the id so a later, larger total is a new event.
+            id=make_id(SRC_SKILL_USE, f"{skill}:{proj}:{day}:{n}"),
             ts=f"{day}T00:00:00Z",
             project=proj, kind="skill", status="done",
             title=f"{skill} used {n}x", ref="", url="",
@@ -650,7 +653,7 @@ def collect_herdr() -> Iterable[dict]:
     panes = (data.get("result") or {}).get("panes") or []
     out: list[dict] = []
     for p in panes:
-        title = (p.get("terminal_title_stripped") or p.get("title") or "").strip() or "worker"
+        title = "worker"  # pane titles can carry message text; never send them
         cwd = p.get("cwd") or ""
         status = "running"
         # Canonicalise the cwd against git so workers in a worktree / feature
@@ -681,7 +684,7 @@ def collect_transcripts() -> Iterable[dict]:
     root = Path.home() / ".claude" / "projects"
     out: list[dict] = []
     if not root.exists():
-        return
+        return []
     buckets: dict[tuple[str, str], int] = {}
     for dirpath, dirnames, filenames in os.walk(root):
         proj = None

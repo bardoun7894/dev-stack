@@ -13,6 +13,7 @@ Flags:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -30,6 +31,32 @@ def bucket(events, sources=wps.SOURCES):
     for ev in events:
         by_source.setdefault(ev.get("source", "track"), []).append(ev)
     return by_source
+
+
+def send_dropping_rejects(events, url, timeout, token, chunk=500) -> dict:
+    """POST in chunks. A 4xx that names one event (`event N:`) moves just that
+    event to rejected.jsonl and retries the rest; any other failure raises.
+    Rejected events are counted in the result and their ids are still saved as
+    sent by the caller, so they are not re-collected and rejected again.
+    """
+    remaining = list(events)
+    total = {"accepted": 0, "duplicate": 0, "rejected": 0}
+    while remaining:
+        batch = remaining[:chunk]
+        try:
+            rep = lib_world.post_events(batch, url=url, timeout=timeout, token=token)
+        except RuntimeError as e:
+            msg = str(e)
+            m = re.search(r"event (\d+):", msg)
+            if not re.match(r"server rejected 4\d\d", msg) or not m or int(m.group(1)) >= len(batch):
+                raise
+            lib_world.rejected_append(remaining.pop(int(m.group(1))), msg)
+            total["rejected"] += 1
+            continue
+        total["accepted"] += int(rep.get("accepted", 0) or 0)
+        total["duplicate"] += int(rep.get("duplicate", 0) or 0)
+        remaining = remaining[len(batch):]
+    return total
 
 
 def main(argv: list[str]) -> int:
@@ -91,17 +118,15 @@ def main(argv: list[str]) -> int:
         print("# by kind:")
         for k, v in sorted(by_kind_counts.items()):
             print(f"  {k}: {v}")
-        if os.environ.get("WORLD_DRY_RUN_WRITE_STATE"):
-            wps.commit_state()
         return 0
 
     try:
-        rep = lib_world.send(new_events, url=url, timeout=timeout, token=token)
-        print(f"sent={rep.get('accepted',0)} dup={rep.get('duplicate',0)} new={len(new_events)} skipped={skipped}")
+        rep = send_dropping_rejects(new_events, url=url, timeout=timeout, token=token)
+        print(f"sent={rep.get('accepted',0)} dup={rep.get('duplicate',0)} rejected={rep.get('rejected',0)} new={len(new_events)} skipped={skipped}")
     except Exception as e:
-        # Network/server failure → outbox whatever's new.
-        lib_world.outbox_append(new_events)
-        print(f"network failed, queued {len(new_events)} to outbox: {e}", file=sys.stderr)
+        # Network/server failure: nothing is marked sent, so the next run
+        # re-collects these events (collector cursors are not committed either).
+        print(f"send failed, will retry next run: {e}", file=sys.stderr)
         return 2
 
     wps.commit_state()

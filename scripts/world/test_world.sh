@@ -63,48 +63,30 @@ assert_contains() {
 
 # ---------------------------------------------------------------------------
 echo "## 1) task-line parsing (worktree exclusion)" | tee -a "$LOG"
-ROOT_FIX="$(mktemp -d -t proj.XXXXXX)"
-mkdir -p "$ROOT_FIX/specs/_session"
-mkdir -p "$ROOT_FIX.worktrees/specs/_session"
-mkdir -p "$ROOT_FIX-fakewt/specs/_session"
-mkdir -p "$ROOT_FIX/FashionVerse-wt/specs/_session"
+PROJ_BASE="$(mktemp -d -t proj.XXXXXX)"
+mkdir -p "$PROJ_BASE/FashionVerse/specs/_session"
+mkdir -p "$PROJ_BASE/FashionVerse-wt/specs/_session"
 
-cat > "$ROOT_FIX/specs/_session/2026-10-01-tasks.md" <<'EOF'
+cat > "$PROJ_BASE/FashionVerse/specs/_session/2026-10-01-tasks.md" <<'EOF'
 # Session task log — 2026-10-01
 - [x] 09:30 — Write brief ✓ 09:55 [green: outputs ok]
 - [x] 10:00 — Plain done
 - [ ] 11:00 — Plain pending
 - garbage line
 EOF
-cat > "$ROOT_FIX.worktrees/specs/_session/2026-10-01-tasks.md" <<'EOF'
-- [x] 09:30 — should NOT count ✓ 09:55 [x]
-EOF
-cat > "$ROOT_FIX-fakewt/specs/_session/2026-10-01-tasks.md" <<'EOF'
-- [x] 09:30 — should NOT count either ✓ 09:55 [x]
-EOF
-cat > "$ROOT_FIX/FashionVerse-wt/specs/_session/2026-10-01-tasks.md" <<'EOF'
-- [x] 09:30 — FashionVerse-wt must be skipped ✓ 09:55 [x]
+cat > "$PROJ_BASE/FashionVerse-wt/specs/_session/2026-10-01-tasks.md" <<'EOF'
+- [x] 09:30 — should NOT count, FashionVerse-wt must be skipped ✓ 09:55 [x]
 EOF
 
+# Real collector over a fixture base: one repo dir with a main checkout and a
+# `-wt` feature copy beside it.
 OUT_TASKS="$(mktemp)"
-PYTHONPATH="$ROOT" python3 - "$ROOT_FIX" "$OUT_TASKS" <<'PY' 2>&1 | tee -a "$LOG"
+PYTHONPATH="$ROOT" python3 - "$PROJ_BASE" "$OUT_TASKS" <<'PY' 2>&1 | tee -a "$LOG"
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import lib_world, task_lines
-root = pathlib.Path(sys.argv[1])
-out_path = pathlib.Path(sys.argv[2])
-events = []
-for p in lib_world.Path if False else __import__('pathlib').Path(root).rglob('*-tasks.md'):
-    pass
-for p in pathlib.Path(root).rglob('*-tasks.md'):
-    if lib_world.looks_like_worktree(p):
-        continue
-    if '/.worktrees/' in str(p): continue
-    if '/.claude/worktrees/' in str(p): continue
-    proj = p.parts[-4] if len(p.parts) >= 4 else 'unknown'
-    text = p.read_text(encoding='utf-8')
-    events.extend(task_lines.parse_session_tasks(p, text, proj))
-with out_path.open('w') as fh:
+import world_push_sources as w
+w._SESSION_GLOBS = [pathlib.Path(sys.argv[1])]
+events = list(w.collect_session_tasks())
+with open(sys.argv[2], 'w') as fh:
     for e in events: fh.write(json.dumps(e)+'\n')
 PY
 
@@ -151,7 +133,6 @@ EOF
 OUT_JD="$(mktemp)"
 PYTHONPATH="$ROOT" python3 - "$JDIR" "$OUT_JD" <<'PY' 2>&1 | tee -a "$LOG"
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import jdelegate_runs
 import pathlib
 events = list(jdelegate_runs.iter_runs(pathlib.Path(sys.argv[1])))
@@ -181,7 +162,6 @@ touch -t 202601010000 "$JD2/2026-10-02T10-00-00-123Z-dead-old/run.sh"
 echo $$ > "$JD2/2026-10-02T10-00-00-123Z-live-fresh/pid"
 OUT_JD2="$(PYTHONPATH="$ROOT" python3 - "$JD2" <<'PY' 2>&1
 import sys, json, pathlib
-sys.path.insert(0, '/Users/mohamedbardouni/code/dev-stack-world/scripts/world')
 import jdelegate_runs
 for e in jdelegate_runs.iter_runs(pathlib.Path(sys.argv[1])):
     print(e["title"], "|", e["status"], "|", e["project"], "|", e["id"])
@@ -201,30 +181,15 @@ WORLD_STATE_DIR="$WORLD_STATE_DIR" "$TRACK" add --kind task --project testproj \
   > "$WORLD_STATE_DIR/track.out" || true
 OB_SIZE=$(wc -l < "$WORLD_STATE_DIR/outbox.jsonl" | tr -d ' ')
 assert_eq "outbox has 1 event on network failure" "1" "$OB_SIZE"
-
-# Simulate server accepting the first event by writing to outbox and faking a server.
-# We don't actually hit the network; we exercise the truncate-only-what-was-accepted logic.
-PYTHONPATH="$ROOT" python3 - "$WORLD_STATE_DIR/outbox.jsonl" <<'PY' 2>&1 | tee -a "$LOG"
-import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import lib_world
-events = lib_world.outbox_load()
-# pretend the server accepted everything (acceptance id 0..len-1 accepted+duplicate)
-rep = {"accepted": len(events), "duplicate": 0}
-lib_world.send([{"id":"x","project":"y","kind":"task","status":"done","title":"t","ts":lib_world.now_utc_iso(),"host":"mac","actor":"owner","model":"","cost":None,"dur_s":None,"ref":"","url":"","source":"track"}], dry_run=True)
-lib_world.outbox_rewrite([])
-print("simulated flush ok")
-PY
-OB_AFTER=$(wc -l < "$WORLD_STATE_DIR/outbox.jsonl" 2>/dev/null | tr -d ' ')
-[ -z "$OB_AFTER" ] && OB_AFTER="0"
-assert_eq "outbox truncated to 0 after accept" "0" "$OB_AFTER"
+# Accept/truncate is exercised against a real stub server in section 10. Clear
+# the queued event here so later sections start from an empty outbox.
+rm -f "$WORLD_STATE_DIR/outbox.jsonl"
 
 # ---------------------------------------------------------------------------
 echo "## 4) sent-id dedupe" | tee -a "$LOG"
 WORLD_STATE_DIR2="$(mktemp -d -t worldsent.XXXXXX)"
 PYTHONPATH="$ROOT" python3 - "$WORLD_STATE_DIR2" <<'PY' 2>&1 | tee -a "$LOG"
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import lib_world
 sd = pathlib.Path(sys.argv[1])
 sd.mkdir(parents=True, exist_ok=True)
@@ -286,7 +251,6 @@ OUT_SPEC="$(mktemp)"
 OUT_SUM="$(mktemp)"
 PYTHONPATH="$ROOT" python3 - "$SPEC_BASE" "$OUT_SPEC" "$OUT_SUM" <<'PY' 2>&1 | tee -a "$LOG"
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import world_push_sources
 from task_lines import parse_spec_tasks
 
@@ -536,7 +500,6 @@ STUB_PID=""
 # is inlined as a Python literal (no shell placeholder).
 WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - "$STUB_DIR" <<'PY' 2>&1 | tee -a "$LOG"
 import sys, pathlib, socket
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import lib_world
 out = pathlib.Path(sys.argv[1])
 bad_id = lib_world.make_id("track", "bad-emoji-title")
@@ -610,7 +573,6 @@ fi
 # Seed the outbox: 3 good events + 1 bad event (oversize emoji title).
 WORLD_STATE_DIR="$WORLD_STATE_DIR" PYTHONPATH="$ROOT" python3 - "$BAD_ID" <<'PY' 2>&1 | tee -a "$LOG"
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import lib_world
 bad_id = sys.argv[1]
 ts = lib_world.now_utc_iso()
@@ -737,7 +699,6 @@ done
 # Seed 60 events, each with the same id-key so the stub 400s on all.
 WORLD_STATE_DIR="$WORLD_STATE_DIR2" PYTHONPATH="$ROOT" python3 - <<'PY' 2>&1 | tee -a "$LOG"
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import lib_world
 ts = lib_world.now_utc_iso()
 events = []
@@ -802,7 +763,6 @@ assert_contains "git-common-dir points to base repo" "/FashionVerse/.git" "$COMM
 
 CANON_OUT="$(PYTHONPATH="$ROOT" python3 - "$CANON_BASE" <<'PY' 2>&1
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import lib_world
 base = pathlib.Path(sys.argv[1])
 main = base / "repos" / "FashionVerse"
@@ -852,7 +812,6 @@ EOF
 
 TASKS_OUT="$(PYTHONPATH="$ROOT" python3 - "$TASKS_BASE" <<'PY' 2>&1
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 import pathlib
 w._SESSION_GLOBS = [pathlib.Path(sys.argv[1])]
@@ -926,7 +885,6 @@ EOF
 
 SPEC_OUT="$(PYTHONPATH="$ROOT" python3 - "$SPEC_BASE2" "$SPEC_BASE3" <<'PY' 2>&1
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 import pathlib
 w._SESSION_GLOBS = [pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])]
@@ -957,7 +915,6 @@ git -C "$GIT_BASE/FashionVerse-g-pricing" -c user.name=t -c user.email=t@t \
 GIT_STATE="$(mktemp -d -t gitstate.XXXXXX)"
 GIT_OUT="$(PYTHONPATH="$ROOT" python3 - "$GIT_BASE" "$GIT_STATE" <<'PY' 2>&1
 import sys, json, pathlib, os
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 import lib_world
 base = pathlib.Path(sys.argv[1])
@@ -993,7 +950,6 @@ echo "## 15) herdr: project from cwd is canonicalised" | tee -a "$LOG"
 HERDR_STATE="$(mktemp -d -t herdrstate.XXXXXX)"
 HERDR_OUT="$(PYTHONPATH="$ROOT" python3 - "$HERDR_STATE" "$TASKS_BASE" <<'PY' 2>&1
 import sys, json, pathlib, os
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 import lib_world
 os.environ["WORLD_STATE_DIR"] = sys.argv[1]
@@ -1019,7 +975,6 @@ echo "## 16) jdelegate: cwd-derived project is canonicalised" | tee -a "$LOG"
 # collector doesn't take a cwd per-run yet.
 JD_CANON_OUT="$(PYTHONPATH="$ROOT" python3 - "$TASKS_BASE" <<'PY' 2>&1
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import lib_world
 base = pathlib.Path(sys.argv[1])
 print("WT=" + lib_world.canonical_project(base / "FashionVerse-g-pricing"))
@@ -1056,7 +1011,6 @@ touch "$CS_BASE/.claude/projects/-tmp-scratch/sess5.jsonl"
 
 CS_OUT="$(PYTHONPATH="$ROOT" HOME="$CS_BASE" python3 - <<'PY' 2>&1
 import sys, json, pathlib, os
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 events = list(w.collect_transcripts())
 for e in events:
@@ -1094,9 +1048,9 @@ touch -t 202401011200 "$TX_OLD" 2>/dev/null || true
 
 SK_OUT="$(PYTHONPATH="$ROOT" HOME="$SK_BASE" WORLD_STATE_DIR="$SK_STATE" python3 - <<'PY' 2>&1
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 events = list(w.collect_skill_use())
+w.commit_state()  # cursor is only persisted after a successful send
 for e in events:
     print(json.dumps(e))
 PY
@@ -1127,7 +1081,6 @@ if [ -f "$CURSOR_FILE" ]; then
   # A second run with the same transcript should be a no-op (offset = size).
   SK_OUT2="$(PYTHONPATH="$ROOT" HOME="$SK_BASE" WORLD_STATE_DIR="$SK_STATE" python3 - <<'PY' 2>&1
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 events = list(w.collect_skill_use())
 for e in events:
@@ -1161,7 +1114,6 @@ chmod +x "$GH_STUB_DIR/gh"
 
 GH_OUT="$(PYTHONPATH="$ROOT" PATH="$GH_STUB_DIR:$PATH" WORLD_STATE_DIR="$GH_STATE" python3 - <<'PY' 2>&1
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 # First call: full discovery (author + reviewed-by, both stubbed). Deduped by
 # (repo, number) so PR #2 and #3 (both reviewed in the same repo) stay distinct.
@@ -1184,7 +1136,6 @@ fi
 # collect_prs reads the cache on entry, so the second call should be empty.
 GH_OUT2="$(PYTHONPATH="$ROOT" PATH="$GH_STUB_DIR:$PATH" WORLD_STATE_DIR="$GH_STATE" python3 - <<'PY' 2>&1
 import sys, json, pathlib, time
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 # Write the cache as if commit_state() had just been called.
 import os
@@ -1219,7 +1170,6 @@ git -C "$WT_GIT_BASE/FashionVerse-g-pricing" -c user.name=t -c user.email=t@t \
 
 WT_GIT_OUT="$(WORLD_STATE_DIR="$WT_GIT_STATE" PYTHONPATH="$ROOT" _WORLD_ROOTS="$WT_GIT_BASE" python3 - <<'PY' 2>&1
 import sys, json, os, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 roots = [pathlib.Path(p) for p in os.environ["_WORLD_ROOTS"].split(os.pathsep)]
 events = list(w.collect_git(roots=roots))
@@ -1259,8 +1209,8 @@ for ln in sys.stdin:
 assert_eq "git: no duplicate shas across worktrees" "0" "$DUPES"
 # ID uniqueness: every emitted event must have a unique id. Compare the
 # emitted event count to the deduped id count.
-assert_contains "git: emitted events > 0" "events>0" "events>0"
-if [ "$WT_EVENTS" -gt 0 ] 2>/dev/null; then
+assert "git: emitted events > 0" [ "${WT_EVENTS:-0}" -gt 0 ]
+if [ "${WT_EVENTS:-0}" -gt 0 ] 2>/dev/null; then
   WT_IDS="$(printf '%s' "$WT_GIT_OUT" | python3 -c '
 import sys
 for ln in sys.stdin:
@@ -1322,7 +1272,6 @@ cp "$TWT_BASE/FashionVerse/specs/_session/2026-10-09-tasks.md" \
 
 TWT_SESS="$(PYTHONPATH="$ROOT" _WORLD_ROOTS="$TWT_BASE" python3 - <<'PY' 2>&1
 import sys, json, pathlib, os
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 w._SESSION_GLOBS = [pathlib.Path(p) for p in os.environ["_WORLD_ROOTS"].split(os.pathsep)]
 events = list(w.collect_session_tasks())
@@ -1360,7 +1309,6 @@ cp "$TWT_BASE/FashionVerse/specs/001-x/tasks.md" \
 
 TWT_SPEC="$(PYTHONPATH="$ROOT" _WORLD_ROOTS="$TWT_BASE" python3 - <<'PY' 2>&1
 import sys, json, pathlib, os
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 w._SESSION_GLOBS = [pathlib.Path(p) for p in os.environ["_WORLD_ROOTS"].split(os.pathsep)]
 events = list(w.collect_specs())
@@ -1400,7 +1348,6 @@ touch "$T_PROJ_BASE/.claude/projects/-Users-mohamedbardouni/sess3.jsonl"
 
 T_PROJ_OUT="$(PYTHONPATH="$ROOT" HOME="$T_PROJ_BASE" python3 - <<'PY' 2>&1
 import sys, json, pathlib
-sys.path.insert(0, str(pathlib.Path('/Users/mohamedbardouni/code/dev-stack-world/scripts/world')))
 import world_push_sources as w
 events = list(w.collect_transcripts())
 for e in events:
