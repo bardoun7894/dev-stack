@@ -120,7 +120,7 @@ def load_jev():
 # --- pure parts (unit tested) ---------------------------------------------------------------
 
 def parse_diff(text):
-    hunks, file, cur, skip = [], None, None, False
+    hunks, file, cur, skip, old = [], None, None, False, None
     for line in text.split("\n"):
         if line.startswith("diff --git "):
             if cur:
@@ -129,9 +129,14 @@ def parse_diff(text):
             skip = False
         elif line.startswith("Binary files "):
             skip = True
+        elif line.startswith("--- ") and cur is None:
+            # Remember the old name: a deleted file has "+++ /dev/null" and must still be screened.
+            old = line[4:][2:] if line[4:].startswith("a/") else line[4:]
         elif line.startswith("+++ "):
             file = line[4:][2:] if line[4:].startswith("b/") else line[4:]
-            skip = skip or file == "/dev/null" or bool(SKIP.search(file))
+            if file == "/dev/null":
+                file = old
+            skip = skip or bool(SKIP.search(file))
         elif line.startswith("@@") and file and not skip:
             if cur:
                 hunks.append(cur)
@@ -306,8 +311,9 @@ def cmd_lint(args, jev):
     repo = repo_root(os.getcwd())
     paths = args["pos"] or [p for p in git(repo, "diff", "--name-only", "HEAD").split("\n") if p]
     rules = DEFAULT_RULES
-    rules_file = args.get("rules") or os.path.join(repo, ".jev-lint.json")
-    if os.path.isfile(rules_file):
+    # Only an explicit --rules file overrides the defaults: a repo-local file could be shipped by the PR being linted.
+    rules_file = args.get("rules")
+    if rules_file and os.path.isfile(rules_file):
         with open(rules_file) as f:
             rules = json.load(f)
     cands = []

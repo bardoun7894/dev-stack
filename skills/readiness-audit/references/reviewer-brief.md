@@ -9,6 +9,7 @@ FILES IN SCOPE (read only these; open other files only if a test proves you must
 - `specs/_audit/<date>/inventory.json` — the deterministic facts
 - `skills/readiness-audit/references/prod-checklist.md` — the PC codes
 - <PROJECT_NAME>'s `specs/` — for the "duplicate of existing spec" check
+- <PROJECT_NAME>'s source tree, read-only, to verify and cite implementation evidence (`file:line`)
 
 DO NOT TOUCH: <paths owned by other running jobs>; specifically `skills/kb-dev/`, `~/.specify/templates/`.
 

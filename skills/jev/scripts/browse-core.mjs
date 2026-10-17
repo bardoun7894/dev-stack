@@ -245,7 +245,7 @@ export function decideStep(answers, questions, data) {
   const head = questions[`${choice.toLowerCase()}_target`];
   if (!head) return { operation: null, target: null, fills: [], stop: 'stuck' };
   const target = validateAnswer(answers?.[`${choice.toLowerCase()}_target`], Object.keys(head.criteria));
-  if (!target) return { operation: null, target: null, fills: [], stop: 'stuck' };
+  if (!target || (target.confidence ?? 0) < ACTION_MIN) return { operation: null, target: null, fills: [], stop: 'stuck' };
 
   const fills = [];
   if (choice === 'TYPE_TEXT') {

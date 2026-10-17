@@ -87,8 +87,11 @@ b_has_plan=$(echo "$out"  | jq '.specs[] | select(.id=="002-b") | .has_plan')
 [ "$(echo "$out" | jq -r .signals.health_route)" = "false" ]|| { echo "FAIL health_route want=false"; fail=1; }
 
 # 7. stubs count >= 1 (TODO in src/x.js)
-stubs=$(echo "$out" | jq -r .signals.stubs)
-if [ "$stubs" -lt 1 ] 2>/dev/null; then echo "FAIL stubs want>=1 got=$stubs"; fail=1; fi
+stubs=$(echo "$out" | jq -r .stubs)
+case "$stubs" in
+  ''|*[!0-9]*) echo "FAIL stubs want>=1 got=$stubs"; fail=1 ;;
+  *) [ "$stubs" -ge 1 ] || { echo "FAIL stubs want>=1 got=$stubs"; fail=1; } ;;
+esac
 
 # 8. generated_at present and ISO 8601-shaped
 ts=$(echo "$out" | jq -r .generated_at)

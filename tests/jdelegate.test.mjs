@@ -796,8 +796,9 @@ test('timeout in herdr tab mode (fake herdr that just nohups run.sh): the worker
 });
 
 // ── W8: agy always bypasses permissions; codex usage limit marks codex exhausted and falls back ──
-test('W8 agy relay runs headless with --dangerously-skip-permissions by default', () => {
-  const relay = join(homedir(), '.claude', 'skills', 'agy-delegate', 'scripts', 'relay.mjs');
+const AGY_RELAY = join(homedir(), '.claude', 'skills', 'agy-delegate', 'scripts', 'relay.mjs');
+test('W8 agy relay runs headless with --dangerously-skip-permissions by default', { skip: !existsSync(AGY_RELAY) && 'agy-delegate relay not installed' }, () => {
+  const relay = AGY_RELAY;
   const agyLog = join(tmp, 'agy-argv.log');
   stub('agy', `echo "$@" >> "${agyLog}"; [ "$1" = changelog ] && echo "1.0.16: x"; echo done`);
   write(join(tmp, 'brief.txt'), 'hello');

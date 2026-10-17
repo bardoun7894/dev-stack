@@ -119,19 +119,13 @@ import { askJev } from "./jev";
 
 type Next = "continue" | "report" | "heal" | "wait" | "look";
 const QUESTIONS = { /* verdict + cause from "Checkpoint questions" above */ };
-const cache = new Map<string, { next: Next; cause: string }>();
 
+// The judge is the assertion, so its verdict is never cached (see "The replay cache" below).
 export async function checkpoint(page: Page, expected: string, region = "main") {
   const snap = (await page.locator(region).ariaSnapshot()).slice(0, 8000);
-  const key = createHash("sha1").update(expected + "\n" + snap).digest("hex");
-  const hit = cache.get(key);
-  if (hit) return hit;
-
   const a = await askJev({ expected, url: new URL(page.url()).pathname, page: snap }, QUESTIONS, 3000)
     .catch(() => null);                                   // fail closed
-  const d = decide(a);
-  if (a) cache.set(key, d);                               // never cache an error
-  return d;
+  return decide(a);
 }
 
 function decide(a: any): { next: Next; cause: string } {
@@ -149,7 +143,7 @@ function decide(a: any): { next: Next; cause: string } {
 
 In the test: `const d = await checkpoint(page, "order placed, confirmation shows an order number");`
 then `expect(d.next, d.cause).toBe("continue")` after handling `heal` / `wait` / `look` in a fixture.
-Persist `cache` to disk (e.g. `.e2e-cache/jev.json`) between runs if the suite is large.
+Cache only selector repairs between runs, never the verdict.
 
 ## From a shell (agent-browser, claude-in-chrome, CI steps)
 

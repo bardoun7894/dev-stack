@@ -285,7 +285,7 @@ async function decide(brief) {
     const answers = JSON.parse(r.stdout).answers ?? {};
     const ui = Number(answers.ui?.noul ?? 0) || 0;
     let tier = TIERS.includes(a.tier) ? a.tier : "T3";
-    if (a.tierConf < 0.4) tier = TIERS[Math.min(3, TIERS.indexOf(tier) + 1)];
+    if (a.tierConf < 0.4 && tier !== "T4") tier = TIERS[Math.min(3, TIERS.indexOf(tier) + 1)];
     // Long multi-requirement briefs were rated T2 ("one file") and went to the cheapest model (2026-09-30).
     if (brief.length > 1500 && ["T0", "T1", "T2"].includes(tier)) tier = "T3";
     let kind = ["general", "code", "reasoning", "agentic", "vision", "language"].includes(a.kind) ? a.kind : "general";

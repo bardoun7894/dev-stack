@@ -74,8 +74,8 @@ const CLAUDE_ARGS = [
 const CLAUDE_ARGS_FALLBACK = [...CLAUDE_ARGS.slice(0, -2), "--disallowedTools", "Bash", "Edit", "Write"];
 
 // The single place gh, claude, pi, opencode and jev are invoked.
-function exec(cmd, args, { input, cwd, timeout = 60000 } = {}) {
-  const env = cmd === "claude" ? { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" } : process.env;
+function exec(cmd, args, { input, cwd, timeout = 60000, env: envOverride } = {}) {
+  const env = envOverride ?? (cmd === "claude" ? { ...process.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" } : process.env);
   const r = RUNNER
     ? spawnSync(RUNNER, [cmd, ...args], { input, cwd, env, timeout, encoding: "utf8", maxBuffer: 64 << 20 })
     : spawnSync(cmd, args, { input, cwd, env, timeout, encoding: "utf8", maxBuffer: 64 << 20 });
@@ -85,6 +85,9 @@ function exec(cmd, args, { input, cwd, timeout = 60000 } = {}) {
 }
 
 const gh = (args, o) => exec("gh", args, o);
+// Markers and verdicts are trusted only from the bot's own account; anyone can post a comment with a forged marker.
+let botLogin;
+const isBot = (x) => x?.author?.login === (botLogin ??= gh(["api", "user", "--jq", ".login"]).trim());
 const isDocs = (p) => /\.(md|mdx|txt|rst)$/.test(p) || p.startsWith("docs/");
 const isUiPath = (p) => UI_PATH_RE.test(p);
 
@@ -183,7 +186,7 @@ function injectionGuard(title, body, diff) {
   const chunks = guardChunks(state);
   if (!chunks) return { max: 1, kind: "injection-too-big" };
   const questions = Object.fromEntries(Object.entries(GUARD_QUESTIONS).map(([k, instr]) => [k, { type: "noul", instructions: instr }]));
-  let max = 0, kind = null;
+  let max = null, kind = null;
   for (const c of chunks) {
     jevCount++;
     const args = ["raw", "--log", "pr-review-guard"];
@@ -198,15 +201,17 @@ function injectionGuard(title, body, diff) {
     const j = JSON.parse(outText);
     const answers = j.answers ?? {};
     for (const k of Object.keys(questions)) {
-      const p = Number(answers?.[k]?.noul);
-      if (Number.isFinite(p) && p > max) { max = p; kind = k; }
+      const raw = answers?.[k]?.noul;
+      const p = typeof raw === "number" ? raw : NaN;
+      if (!Number.isFinite(p)) throw new Error(`jev guard: no numeric answer for ${k}`);
+      if (max === null || p > max) { max = p; kind = k; }
     }
   }
   return { max, kind: kind ?? "none" };
 }
 
 // Second reviewer: first usable model in B_CHAIN that answers. Returns { model, out, usd, tokens } or null.
-function secondReview(prompt) {
+function secondReview(prompt, allowOpencode) {
   const exhausted = readJson(EXHAUSTED_FILE), dead = readJson(DEAD_FILE), quota = readJson(QUOTA_FILE);
   const have = {};
   const dir = mkdtempSync(join(tmpdir(), "pr-review-b-"));
@@ -215,6 +220,7 @@ function secondReview(prompt) {
     writeFileSync(file, prompt);
     for (const [tool, model] of B_CHAIN) {
       if (!modelUsable(model, exhausted, dead, quota)) continue;
+      if (tool === "opencode" && !allowOpencode) continue;
       if (have[tool] === undefined) {
         try { exec(tool, ["--version"], { cwd: dir, timeout: 20000 }); have[tool] = true; } catch { have[tool] = false; }
       }
@@ -224,7 +230,11 @@ function secondReview(prompt) {
            `@${file}`, "Follow the instructions in the attached file. Reply with the review only."]
         : ["run", "-m", model, prompt];
       try {
-        const raw = exec(tool, args, { input: "", cwd: dir, timeout: B_TIMEOUT_MS });
+        // opencode runs on the untrusted diff: no tools, and no tokens from our environment.
+        const env = tool === "opencode"
+          ? { PATH: process.env.PATH, HOME: process.env.HOME, STUB_DIR: process.env.STUB_DIR, OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { edit: "deny", bash: "deny", webfetch: "deny" } }) }
+          : undefined;
+        const raw = exec(tool, args, { input: "", cwd: dir, timeout: B_TIMEOUT_MS, env });
         const r = tool === "pi" ? parsePi(raw) : { text: raw.trim(), usd: null, tokens: null };
         if (r.text) return { model, out: r.text, usd: r.usd, tokens: r.tokens };
       } catch { /* try the next model */ }
@@ -315,8 +325,12 @@ function e2eCheck(repo, n, sha) {
     v = { comments: [] };
   }
   const marker = `<!-- e2e-pass sha=${sha} -->`;
-  if ((v.comments ?? []).some((c) => (c.body ?? "").includes(marker))) {
-    return { status: "pass", source: "comment" };
+  try {
+    if ((v.comments ?? []).some((c) => isBot(c) && (c.body ?? "").includes(marker))) {
+      return { status: "pass", source: "comment" };
+    }
+  } catch (e) {
+    return { status: "unknown", reason: `bot-login:${e.message}` };
   }
   try {
     runs = JSON.parse(gh(["api", `repos/${repo}/commits/${sha}/check-runs`]));
@@ -378,7 +392,8 @@ function mergeGate(repo, n, r, dry) {
   if (r.bVerdict !== "PASS") return skip("second-verdict-block");
   const files = r.files ?? [];
   const nums = files.flatMap((f) => [f.additions, f.deletions]);
-  if (!files.length || nums.some((x) => !Number.isFinite(x))) return skip("size-unknown");
+  // gh pr view lists at most 100 files; a full page may be a partial list.
+  if (!files.length || files.length >= 100 || nums.some((x) => !Number.isFinite(x))) return skip("size-unknown");
   d.lines = nums.reduce((a, b) => a + b, 0);
   if (d.lines > MAX_LINES) return skip(`too-big-${d.lines}`);
   const bad = files.find((f) => RISKY_RE.test(f.path));
@@ -443,14 +458,15 @@ function reviewPr(repo, n, dry) {
   const info = { sha7: sha.slice(0, 7), sha };
   if (pr.isDraft) return { ...info, action: "skipped-draft" };
   const marker = `<!-- haiku-review sha=${sha} -->`;
-  const bodies = [...(pr.comments ?? []), ...(pr.reviews ?? [])].map((x) => x.body ?? "");
+  const bodies = [...(pr.comments ?? []), ...(pr.reviews ?? [])].filter(isBot).map((x) => x.body ?? "");
   const seen = bodies.find((b) => b.includes(marker));
   if (seen) {
     const sec = parseSections(seen);
-    let diff;
-    try { diff = gh(["pr", "diff", String(n), "-R", repo], { timeout: 120000 }); } catch { diff = ""; }
-    let injection;
-    try { injection = injectionGuard(pr.title, pr.body, diff); } catch { injection = { max: null, kind: null }; }
+    let diff, injection;
+    try {
+      diff = gh(["pr", "diff", String(n), "-R", repo], { timeout: 120000 });
+      injection = injectionGuard(pr.title, pr.body, diff);
+    } catch { injection = { max: null, kind: null }; }
     return { ...info, action: "skipped-seen", files: pr.files, ...sec, verdict: parseVerdict(sec.aText), bVerdict: sec.bText ? parseVerdict(sec.bText) : "BLOCK", injection };
   }
   const files = (pr.files ?? []).map((f) => f.path);
@@ -487,7 +503,7 @@ function reviewPr(repo, n, dry) {
   const a = parseClaude(askClaude(prompt));
   const out = a.text.trim();
   if (!out) throw new Error("claude returned empty output");
-  const second = secondReview(prompt);
+  const second = secondReview(prompt, typeof injection.max === "number" && injection.max < INJECTION_BAR);
   const bSection = second ? `**Second review (${second.model})**\n\n${second.out}` : "**Second review (unavailable)**\n\nsecond reviewer unavailable (no quota)";
 
   const body = `${injectionWarning}**Haiku 5.5 review**\n\n${note}${out}\n\n${bSection}\n\n${marker}`;

@@ -81,8 +81,9 @@ async function main() {
     const state = buildJudgeState(opt.expect, obs.url, String(obs.text || '').slice(0, 12000));
     const res = await askJev(state, CHECKPOINT);
     if (!res) { console.error('jev-page: Jev unavailable'); process.exit(3); }
-    console.log(JSON.stringify({ ...judgeFlow(res.answers, []), usage: res.usage }, null, 1));
-    process.exit(0);
+    const verdict = judgeFlow(res.answers, []);
+    console.log(JSON.stringify({ ...verdict, usage: res.usage }, null, 1));
+    process.exit(!res.answers ? 3 : verdict.status === 'pass' ? 0 : 1);
   }
 
   const questions = buildStepQuestions(obs, data, opt);

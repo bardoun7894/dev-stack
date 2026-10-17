@@ -21,10 +21,13 @@ GENERATED_AT="$(now)"
 # Run a command inside REPO; capture stdout. Trim trailing whitespace.
 run_in() { ( cd "$REPO" && "$@" ); }
 
+# True inside a git work tree, including linked worktrees where .git is a file.
+in_git() { git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
+
 # git ls-files prints paths relative to repo root. Empty string if not a repo
 # or repo has no tracked files.
 git_ls_files() {
-  if [ -d "$REPO/.git" ]; then
+  if in_git; then
     git -C "$REPO" ls-files 2>/dev/null || true
   fi
 }
@@ -32,12 +35,25 @@ git_ls_files() {
 # git_grep <pattern> [extra-git-grep-args...] — uses git grep when available
 # for speed; falls back to grep -rI on a bounded file list otherwise.
 git_grep() {
-  local pat="$1"; shift
-  if [ -d "$REPO/.git" ]; then
+  local pat="$1"
+  if in_git; then
+    shift
     git -C "$REPO" grep -Il --color=never -E "$pat" "$@" 2>/dev/null || true
   else
+    # Callers pass "-e PATTERN" or "-iE PATTERN"; the fallback needs the pattern itself.
+    local a icase="" take=0
+    pat=""
+    for a in "$@"; do
+      if [ "$take" = 1 ]; then pat="$a"; break; fi
+      case "$a" in
+        -e) take=1 ;;
+        -*i*) icase="-i" ;;
+        -*) ;;
+        *) pat="$a"; break ;;
+      esac
+    done
     # bounded fallback: top 3 levels, exclude vendor/build
-    grep -rIl --include='*' \
+    grep -rIl --include='*' $icase \
       --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=.git \
       --exclude-dir=build --exclude-dir=dist --exclude-dir=.next \
       --exclude-dir=.cache --exclude-dir=__pycache__ \
@@ -47,7 +63,7 @@ git_grep() {
 
 # --- git info --------------------------------------------------------------
 git_branch=""; git_head=""; git_dirty="false"
-if [ -d "$REPO/.git" ]; then
+if in_git; then
   git_branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
   git_head="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '')"
   # dirty if any tracked file differs from index, or untracked changes in src/specs
@@ -123,7 +139,7 @@ lsf="$(git_ls_files)"
 # When not in a git repo, build a bounded file list with heavy dirs pruned.
 # This is used by signals below via the `lsf` var (overridden here only if
 # git_ls_files returned nothing AND we're not in a git repo).
-if [ ! -d "$REPO/.git" ] && [ -z "$lsf" ]; then
+if ! in_git && [ -z "$lsf" ]; then
   lsf="$(find "$REPO" \
     -type d \( -name node_modules -o -name vendor -o -name .git \
               -o -name build -o -name dist -o -name .next \

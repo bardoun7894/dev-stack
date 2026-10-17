@@ -121,8 +121,8 @@ def log_path():
 
 def _append(rec):
     p = log_path()
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "a") as f:
+    os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    with os.fdopen(os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 

@@ -216,18 +216,20 @@ for p in data:
   while IFS=$'\t' read -r name status rt; do
     [ -z "$name" ] && continue
     if [ "$status" != "online" ]; then
-      add "pm2" "$name status=$status restarts=$rt"
+      add "pm2" "$name status=$status"
       continue
     fi
     prev_v=$(awk -F'\t' -v n="$name" '$2==n {print $1; exit}' "$PM2_PREVIOUS" 2>/dev/null)
     if [ -z "${prev_v:-}" ]; then
       :
     elif [ "$((rt - prev_v))" -gt 20 ]; then
-      add "pm2" "$name restarts=$rt (was $prev_v)"
+      add "pm2" "$name restarted more than 20 times since the last check"
     fi
   done < "$tmp"
-  awk -F'\t' '{printf "%s\t%s\n", $3, $1}' "$tmp" > "$PM2_PREVIOUS.new" 2>/dev/null
-  mv "$PM2_PREVIOUS.new" "$PM2_PREVIOUS" 2>/dev/null || true
+  if [ "$DRY_RUN" = "0" ] && [ "$SUMMARY" = "0" ]; then
+    awk -F'\t' '{printf "%s\t%s\n", $3, $1}' "$tmp" > "$PM2_PREVIOUS.new" 2>/dev/null
+    mv "$PM2_PREVIOUS.new" "$PM2_PREVIOUS" 2>/dev/null || true
+  fi
   rm -f "$tmp"
 }
 
@@ -244,7 +246,7 @@ check_docker() {
       add "docker" "$name not running"
     done <<<"$prev"
   fi
-  printf '%s\n' "$cur" > "$DOCKER_PREVIOUS"
+  if [ "$DRY_RUN" = "0" ] && [ "$SUMMARY" = "0" ]; then printf '%s\n' "$cur" > "$DOCKER_PREVIOUS"; fi
 
   # restart-policy containers that are down, and running ones with no live port mapping
   local info policy status nb err
@@ -288,8 +290,7 @@ check_cron_logs() {
       fi
     done <<<"$last_lines"
     if [ "$hits" -ge 20 ]; then
-      short=$(printf '%s' "$last_line" | cut -c1-160)
-      add "cronlog" "$tfile last line: $short"
+      add "cronlog" "$tfile has $hits error lines in its recent output"
     fi
   done < <(printf '%s\n' "$crontab" | grep -Eo '>>[[:space:]]*/[^[:space:]]+' | sed -E 's/^>>[[:space:]]*//')
 }
@@ -319,7 +320,7 @@ check_chkrootkit() {
     /^(Searching for|Checking)/ { inw = 0; next }
     /WARNING/ { inw = 1; next }
     inw && /^\// && !/lstat\(\/tmp\/runc-process/ { print }
-  ' "$VAR_LOG_CHKROOTKIT" | grep -Ev '^/tmp/' | LC_ALL=C sort -u)
+  ' "$VAR_LOG_CHKROOTKIT" | LC_ALL=C sort -u)
   if [ "$REBASELINE" = "1" ] || [ ! -f "$base" ]; then
     printf '%s\n' "$cur" | sed '/^$/d' | LC_ALL=C sort -u > "$base"
     return 0
@@ -356,7 +357,7 @@ ${FINDINGS}"
   while IFS= read -r finding; do
     [ -z "$finding" ] && continue
     finding_due "$finding" || continue
-    if send_telegram "[server-health] ${finding}"; then mark_sent "$finding"; world_track alert down "$finding"; fi
+    if send_telegram "[server-health] ${finding}"; then [ "$DRY_RUN" = "0" ] && mark_sent "$finding"; world_track alert down "$finding"; fi
   done <<<"$FINDINGS"
 
   # recovery: a previously-sent finding that no longer appears
@@ -367,6 +368,7 @@ ${FINDINGS}"
       printf '%s\n' "$FINDINGS" | grep -Fxq -- "$key" && continue
       send_telegram "[server-health] recovered: ${key}" || continue
       world_track recovery up "$key"
+      [ "$DRY_RUN" = "0" ] || continue
       awk -F'\t' -v k="$key" '$2 != k' "$DEDUPE_FILE" > "$DEDUPE_FILE.new" && mv "$DEDUPE_FILE.new" "$DEDUPE_FILE"
     done < <(awk -F'\t' '{print $2}' "$DEDUPE_FILE" | sort -u)
   fi

@@ -101,7 +101,8 @@
   const isExternal = (e) => {
     try {
       const u = new URL(attr(e, 'href'), location.href);
-      return !['http:', 'https:'].includes(u.protocol) || host(u.hostname) !== host(location.hostname);
+      return !['http:', 'https:'].includes(u.protocol) || host(u.hostname) !== host(location.hostname)
+        || u.port !== location.port;
     } catch { return true; }
   };
   // A password value never leaves the browser; its length is enough to tell "filled" from "empty".

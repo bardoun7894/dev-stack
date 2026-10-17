@@ -1,6 +1,6 @@
 ---
 name: readiness-audit
-description: Run a per-project production-readiness audit (inventory -> research -> adversarial review -> spec updates -> STOP for owner approval -> implement -> verdict). Triggers on "is X ready for production", "what's missing in X", "audit project X", "/readiness-audit <project>", and Arabic "شو ناقص بالمشروع", "جاهز للإنتاج". Flags --report-only (customer projects: no spec/plan edits, report only) and --defects (defects pass: failing/skipped tests, open tasks in specs marked done in roadmap, TODO/FIXME/NotImplemented stubs, unresolved review findings, inbox bug reports). Phase 5 is a hard stop. Phase 6 uses kb-dev flow with researcher + reviewer.
+description: "Run a per-project production-readiness audit (inventory -> research -> adversarial review -> spec updates -> STOP for owner approval -> implement -> verdict). Triggers on \"is X ready for production\", \"what's missing in X\", \"audit project X\", \"/readiness-audit <project>\", and Arabic \"شو ناقص بالمشروع\", \"جاهز للإنتاج\". Flags --report-only (customer projects: no spec/plan edits, report only) and --defects (defects pass: failing/skipped tests, open tasks in specs marked done in roadmap, TODO/FIXME/NotImplemented stubs, unresolved review findings, inbox bug reports). Phase 5 is a hard stop. Phase 6 uses kb-dev flow with researcher + reviewer."
 allowed-tools: Bash Read Glob Grep Skill
 ---
 
