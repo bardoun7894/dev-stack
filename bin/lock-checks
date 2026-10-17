@@ -56,7 +56,7 @@ manifest_path() { echo "$(git rev-parse --path-format=absolute --git-common-dir)
 # Tree hash of the CURRENT working-tree content of $1 (tracked + untracked, not ignored); empty if none.
 dir_tree() {
   local d t; d="$(mktemp -d)"
-  t="$(export GIT_INDEX_FILE="$d/index"; git add -A -- "$1" 2>/dev/null || true; git write-tree 2>/dev/null || true)"
+  t="$(export GIT_INDEX_FILE="$d/index"; git add -A -f -- "$1" 2>/dev/null || true; git write-tree 2>/dev/null || true)"
   rm -rf "$d"
   [ -z "$t" ] || git rev-parse --verify -q "$t:$1" 2>/dev/null || true
 }
