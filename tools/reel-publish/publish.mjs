@@ -1,26 +1,31 @@
 #!/usr/bin/env node
 // reel-publish <post.json> [--only a,b] [--dry-run] [--yes]
-//        reel-publish login
+//        reel-publish pair          (once: write the bridge secret, then reload File Drop Bridge)
+//        reel-publish check-login   (open each site in a bridge tab, report signed in / SIGNED OUT)
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { loadPost, selectPlatforms, pendingPlatforms, scheduleParts } from './lib/post.mjs';
 import { readResults, recordResult } from './lib/results.mjs';
+import { Bridge, readSecret, pair } from './lib/bridge.mjs';
 
 const HOME_DIR = path.join(os.homedir(), '.reel-publish');
-const PROFILE = path.join(HOME_DIR, 'chrome-profile');
-const BROWSER_PLATFORMS = new Set(['tiktok', 'facebook_page', 'facebook_profile', 'linkedin', 'drive']);
-const LOGIN_URLS = ['https://www.tiktok.com/', 'https://www.facebook.com/', 'https://business.facebook.com/',
-  'https://www.linkedin.com/', 'https://drive.google.com/drive/u/1/'];
+const LOGIN_CHECKS = [
+  ['tiktok', 'https://www.tiktok.com/tiktokstudio/upload', /\/login/],
+  ['facebook_profile', 'https://www.facebook.com/reels/create/', /login/],
+  ['facebook_page', 'https://business.facebook.com/latest/home?asset_id=1290399254155522', /loginpage|\/login/],
+  ['linkedin', 'https://www.linkedin.com/feed/', /\/login|authwall|\/uas\//],
+  ['drive', 'https://drive.google.com/drive/u/1/', /accounts\.google|workspace\.google/],
+];
 
 function parseArgs(argv) {
-  const args = { file: null, only: null, dryRun: false, yes: false, login: false };
+  const args = { file: null, only: null, dryRun: false, yes: false, command: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--only') args.only = (argv[++i] || '').split(',').filter(Boolean);
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--yes') args.yes = true;
-    else if (a === 'login') args.login = true;
+    else if (a === 'pair' || a === 'check-login') args.command = a;
     else if (!args.file) args.file = a;
     else throw new Error(`unexpected argument ${a}`);
   }
@@ -39,28 +44,56 @@ function printPlan(post, names) {
   return lines.join('\n');
 }
 
-async function launchContext() {
-  const { chromium } = await import('playwright');
-  fs.mkdirSync(PROFILE, { recursive: true });
-  return chromium.launchPersistentContext(PROFILE, {
-    channel: 'chrome', headless: false, viewport: { width: 1440, height: 900 },
-  });
+// One Bridge per run, started on first use. A failed start is remembered so later platforms fail at once.
+function makeShared() {
+  let bridge = null;
+  let ready = null;
+  return {
+    newPage() {
+      ready ||= (async () => {
+        bridge = new Bridge({ secret: readSecret() });
+        await bridge.connect({ timeout: 90_000 });
+      })();
+      return ready.then(() => bridge.newPage());
+    },
+    close: async () => { if (bridge) await bridge.close().catch(() => {}); },
+  };
 }
 
-async function login() {
-  const context = await launchContext();
-  for (const url of LOGIN_URLS) {
-    const page = context.pages()[0] || (await context.newPage());
-    await page.goto(url).catch(() => {});
-    if (context.pages().length < LOGIN_URLS.length) await context.newPage();
+function doPair() {
+  const { secretFile, jsFile } = pair();
+  console.log(`wrote ${secretFile} and ${jsFile}`);
+  console.log('Reload File Drop Bridge at chrome://extensions (one time)');
+  return 0;
+}
+
+async function checkLogin() {
+  const shared = makeShared();
+  let out = 0;
+  try {
+    for (const [name, url, outRe] of LOGIN_CHECKS) {
+      const page = await shared.newPage();
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+        await page.waitForTimeout(6000);
+        const final = await page.currentUrl();
+        const signedOut = outRe.test(final);
+        if (signedOut) out = 1;
+        console.log(`${name}: ${signedOut ? 'SIGNED OUT' : 'signed in'} ${final}`);
+      } finally {
+        await page.close().catch(() => {});
+      }
+    }
+  } finally {
+    await shared.close();
   }
-  console.log('Sign in by hand, then close the browser window. Credentials are never typed by this tool.');
-  await new Promise((resolve) => context.on('close', resolve));
+  return out;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.login) return login();
+  if (args.command === 'pair') return doPair();
+  if (args.command === 'check-login') return checkLogin();
   if (!args.file) throw new Error('usage: reel-publish <post.json> [--only a,b] [--dry-run] [--yes]');
 
   const post = loadPost(args.file);
@@ -88,13 +121,7 @@ async function main() {
   for (const n of names) if (!todo.includes(n)) log(`${n}: already ok, skipping`);
   log(`${mode} ${post.slug}: ${todo.join(', ') || 'nothing to do'}`);
 
-  let context = null;
-  const shared = {
-    async newPage() {
-      if (!context) context = await launchContext();
-      return context.newPage();
-    },
-  };
+  const shared = makeShared();
   let failed = 0;
   for (const name of todo) {
     const adapter = (await import(`./adapters/${name}.mjs`)).default;
@@ -120,7 +147,7 @@ async function main() {
       log(`${name}: FAILED: ${e.message}`);
     }
   }
-  if (context) await context.close().catch(() => {});
+  await shared.close();
   log(`done: ${todo.length - failed} ok, ${failed} failed`);
   return failed ? 1 : 0;
 }

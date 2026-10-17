@@ -1,4 +1,4 @@
-// Shared Playwright helpers for the browser adapters. Adapters never launch a browser themselves.
+// Shared helpers for the browser adapters (pages are BridgePage from lib/bridge.mjs). Adapters never open a browser themselves.
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeText } from './post.mjs';
