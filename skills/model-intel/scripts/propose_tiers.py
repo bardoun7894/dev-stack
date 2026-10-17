@@ -73,8 +73,7 @@ def at_effort(rows_by_key, key, want):
         for r in fam:
             if r["effort"] == e:
                 return r
-    fam = [r for r in fam if r["effort"] != "max"]  # F13: never max
-    return max(fam, key=lambda r: r["index"]) if fam else None
+    return None  # no listed level matches: skip rather than compare at a different effort
 
 
 def decide(tiers, rows, reach, probe, today=None):
