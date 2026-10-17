@@ -23,9 +23,10 @@
  * to $PR_REVIEW_LOG. --no-merge disables.
  * Jev down (any jev error): the guard and the judge fall back to Haiku 5.5 (strict JSON, guard bar 0.3, judge >= 0.95);
  * a Haiku failure is still a skip. Guard results are cached per repo#pr@sha.
- * Auto-fix: a PR blocked by a reviewer or the judge, with a clean guard and an untruncated diff, gets ONE Haiku 5.5 fix
- * round (claimed in fix-attempts.json before it runs): clone the head branch, Haiku edits with Read/Edit/Write/Glob/Grep
- * only, commit, push (never forced, never risky/CI paths); the next sweep re-reviews the new sha. Skipped for
+ * Auto-fix: a PR blocked by a reviewer or the judge, with a clean guard and an untruncated diff, gets up to 3 fix rounds,
+ * one per reviewed sha (round 1 Haiku 5.5, later rounds Sonnet 5.5; each claimed in fix-attempts.json before it runs):
+ * clone the head branch, the model edits with Read/Edit/Write/Glob/Grep only, commit, push (never forced, never CI paths;
+ * risky paths only when the PR already has one, so a human still merges); the next sweep re-reviews the new sha. Skipped for
  * cross-repo heads, bot authors and repo or repo#n lines in $PR_REVIEW_CFG/no-autofix.txt.
  * One stdout line per PR: repo#N sha7 action seconds.
  * Tests stub every gh/claude call via PR_REVIEW_RUNNER (an executable called as `runner <cmd> <args...>`).
@@ -42,6 +43,8 @@ const B_TIMEOUT_MS = 240000;
 const MIN_CONF = 0.9;
 const HAIKU_MIN_CONF = 0.95;
 const FIX_TIMEOUT_MS = 900000;
+// Owner 2026-10-17: open PRs close by fixing, automatically. Round 1 Haiku 5.5, rounds 2+ Sonnet 5.5; one round per sha.
+const MAX_FIX_ROUNDS = Number(process.env.PR_REVIEW_FIX_ROUNDS) || 3;
 const RUNNER = process.env.PR_REVIEW_RUNNER;
 const HOME = homedir();
 const CFG_DIR = process.env.PR_REVIEW_CFG || `${HOME}/.config/pr-review`;
@@ -633,7 +636,7 @@ function reviewPr(repo, n, dry, merge = true) {
     const sec = parseSections(seen);
     const verdict = parseVerdict(sec.aText), bVerdict = sec.bText ? parseVerdict(sec.bText) : "BLOCK";
     // The guard only matters when the PR could merge or could get its fix round; it is cached per sha either way.
-    const need = !sec.truncated && ((verdict === "PASS" && bVerdict === "PASS") || (merge && !dry && !fixUsed(repo, n, pr.comments)));
+    const need = !sec.truncated && ((verdict === "PASS" && bVerdict === "PASS") || (merge && !dry && fixRound(repo, n, sha, pr.comments).ok));
     let injection = { max: 0, kind: "not-needed", engine: null };
     let files = apiFiles;
     if (need) {
@@ -709,10 +712,16 @@ function reviewPr(repo, n, dry, merge = true) {
   };
 }
 
-// True when this PR already had its one fix round (state file or an autofix comment on the PR).
-function fixUsed(repo, n, comments) {
-  if ((readJson(FIX_FILE) ?? {})[`${repo}#${n}`]) return true;
-  return (comments ?? []).some((c) => (c.body ?? "").includes("<!-- haiku-autofix"));
+// Which fix round this sha may get: { ok, round } or { ok: false, reason }. Rounds come from the state file and the
+// autofix comments on the PR (whichever counts more); an old entry without `rounds` is one round. A sha is fixed once.
+function fixRound(repo, n, sha, comments) {
+  const e = (readJson(FIX_FILE) ?? {})[`${repo}#${n}`];
+  const stateShas = e ? (e.shas ?? [e.sha]) : [];
+  const commentShas = (comments ?? []).flatMap((c) => [...String(c.body ?? "").matchAll(/<!-- haiku-autofix sha=([0-9a-f]+)/g)].map((m) => m[1]));
+  const used = Math.max(e ? (e.rounds ?? 1) : 0, commentShas.length);
+  if ([...stateShas, ...commentShas].some((s) => s && sha.startsWith(s))) return { ok: false, reason: "already-tried" };
+  if (used >= MAX_FIX_ROUNDS) return { ok: false, reason: "rounds-used" };
+  return { ok: true, round: used + 1 };
 }
 
 function listedIn(file, keys) {
@@ -745,16 +754,23 @@ function gitSnapshot(dir) {
   return JSON.stringify([read("config"), read("config.worktree"), read("HEAD"), ls("hooks"), ls("info")]);
 }
 
-// One Haiku 5.5 fix round. Returns { status: "skipped"|"noop"|"rejected"|"pushed"|"error", reason?, sha? }.
+// One fix round (round 1 Haiku 5.5, later rounds Sonnet 5.5). Returns { status: "skipped"|"noop"|"rejected"|"pushed"|"error", reason?, sha?, round? }.
 function autoFix(repo, n, r) {
   const skipped = (reason) => ({ status: "skipped", reason });
   if (listedIn("no-autofix.txt", [repo, `${repo}#${n}`])) return skipped("no-autofix");
-  if (fixUsed(repo, n, [])) return skipped("already-tried");
+  const pre = fixRound(repo, n, r.sha, []);
+  if (!pre.ok) return skipped(pre.reason);
   const inj = r.injection ?? {};
   if (!inj.engine || typeof inj.max !== "number" || inj.max >= (inj.bar ?? INJECTION_BAR)) return skipped("guard-not-clean");
   if (r.truncated) return skipped("diff-truncated");
   const v = JSON.parse(gh(["pr", "view", String(n), "-R", repo, "--json", "isCrossRepository,author,headRefName,headRefOid,state,comments"]));
-  if (fixUsed(repo, n, v.comments)) return skipped("already-tried");
+  const fr = fixRound(repo, n, r.sha, v.comments);
+  if (!fr.ok) return skipped(fr.reason);
+  const round = fr.round;
+  const model = round === 1 ? "claude-haiku-5-5" : "claude-sonnet-5-5";
+  const modelName = round === 1 ? "Haiku 5.5" : "Sonnet 5.5";
+  // The merge gate already blocks a PR with a risky path, so a fix there may touch risky paths too (a human merges it).
+  const prRisky = (r.files ?? []).some((f) => RISKY_RE.test(f.path));
   if (v.state && v.state !== "OPEN") return skipped("not-open");
   if (v.isCrossRepository !== false) return skipped("cross-repo");
   if (v.author?.is_bot || BOT_RE.test(v.author?.login ?? "")) return skipped("bot-author");
@@ -762,9 +778,12 @@ function autoFix(repo, n, r) {
   if (v.headRefOid !== r.sha) return skipped("new-commit");
   // Claim the round before anything runs, so a crash or a second sweep can never retry it.
   const state = readJson(FIX_FILE) ?? {};
-  state[`${repo}#${n}`] = { sha: r.sha, at: new Date().toISOString(), status: "started" };
+  const prev = state[`${repo}#${n}`];
+  const shas = [...(prev ? (prev.shas ?? [prev.sha]) : []), r.sha];
+  state[`${repo}#${n}`] = { sha: r.sha, shas, rounds: round, model, at: new Date().toISOString(), status: "started" };
   writeJsonFile(FIX_FILE, state);
-  const done = (res) => {
+  const done = (res0) => {
+    const res = { ...res0, round };
     const s2 = readJson(FIX_FILE) ?? {};
     // Keep the reviewed sha; the pushed commit goes in fix_sha.
     s2[`${repo}#${n}`] = { ...s2[`${repo}#${n}`], status: res.status, ...(res.reason ? { reason: res.reason } : {}), ...(res.sha ? { fix_sha: res.sha } : {}) };
@@ -779,20 +798,21 @@ function autoFix(repo, n, r) {
     const head = exec("git", ["rev-parse", "HEAD"], { cwd: dir }).trim();
     if (head !== r.sha) return done({ status: "skipped", reason: "head-moved" });
     const before = gitSnapshot(dir);
-    parseClaude(exec("claude", FIX_ARGS, { input: FIX_PROMPT(r), cwd: dir, timeout: FIX_TIMEOUT_MS }));
+    parseClaude(exec("claude", FIX_ARGS.map((a) => (a === "claude-haiku-5-5" ? model : a)), { input: FIX_PROMPT(r), cwd: dir, timeout: FIX_TIMEOUT_MS }));
     if (gitSnapshot(dir) !== before) return done({ status: "rejected", reason: "git-metadata-changed" });
     const paths = exec("git", ["status", "--porcelain", "-uall"], { cwd: dir }).split("\n").filter((l) => l.trim())
       .map((l) => l.slice(3).split(" -> ").pop().replace(/^"|"$/g, ""));
     if (!paths.length) return done({ status: "noop" });
-    const bad = paths.find((p) => RISKY_RE.test(p) || FIX_DENY_RE.test(p));
+    const bad = paths.find((p) => FIX_DENY_RE.test(p) || (!prRisky && RISKY_RE.test(p)));
     if (bad) return done({ status: "rejected", reason: `touches ${bad}` });
     exec("git", ["add", "-A"], { cwd: dir });
     exec("git", ["-c", "user.name=pr-review", "-c", "user.email=bardoun7894@users.noreply.github.com", "commit", "-q", "-m",
-      "fix: address review findings (pr-review auto-fix, Haiku 5.5)"], { cwd: dir });
+      `fix: address review findings (pr-review auto-fix round ${round}, ${modelName})`], { cwd: dir });
     const sha = exec("git", ["rev-parse", "HEAD"], { cwd: dir }).trim();
     exec("git", ["push", "origin", `HEAD:refs/heads/${v.headRefName}`], { cwd: dir, timeout: 300000 });
     try {
-      postComment(repo, n, `Auto-fix pushed ${sha.slice(0, 7)}: Haiku 5.5 addressed the P0/P1 review findings (${paths.length} file${paths.length === 1 ? "" : "s"}). This was the one fix round; the next sweep re-reviews the new head, and a BLOCK after it needs a human.\n\n<!-- haiku-autofix sha=${r.sha} -->`);
+      const next = round < MAX_FIX_ROUNDS ? `a BLOCK on it gets round ${round + 1}` : "a BLOCK after it needs a human";
+      postComment(repo, n, `Auto-fix pushed ${sha.slice(0, 7)} (round ${round} of ${MAX_FIX_ROUNDS}, ${modelName}): addressed the P0/P1 review findings (${paths.length} file${paths.length === 1 ? "" : "s"}). The next sweep re-reviews the new head; ${next}.\n\n<!-- haiku-autofix sha=${r.sha} -->`);
     } catch (e) { console.error(`pr-review: ${repo}#${n}: autofix comment: ${e.message}`); }
     return done({ status: "pushed", sha });
   } catch (e) {

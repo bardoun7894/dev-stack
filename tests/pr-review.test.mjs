@@ -931,13 +931,46 @@ test("BLOCK + clean guard -> one fix round: clone head, Haiku fixes with edit-on
   assert.match(r.stdout, /o\/r#1 abcdef1 fix-pushed/);
 });
 
-test("one fix round per PR: a later BLOCK on the new head is reported, not fixed again", () => {
+// Owner 2026-10-17: open PRs must close by fixing, automatically -> up to 3 rounds, Haiku then Sonnet.
+const onHead = (h) => ({ pr: fixPr({ headRefOid: h }), prMerge: green({ headRefOid: h }), gitHead: h });
+test("a later BLOCK on the new head gets round 2 on Sonnet; the same sha is never fixed twice", () => {
   const shared = mkdtempSync(join(tmpdir(), "pr-review-shared-"));
   const env = { PR_REVIEW_LOG: join(shared, "decisions.jsonl") };
   assert.equal(fixCalls(fixGo({}, [], env)).length, 1);
-  const r = fixGo({ pr: fixPr({ headRefOid: "1111111111111111" }), prMerge: green({ headRefOid: "1111111111111111" }), gitHead: "1111111111111111" }, [], env);
+  const again = fixGo({}, [], env);
+  assert.equal(fixCalls(again).length, 0);
+  assert.equal(again.decisions.at(-1).fix.reason, "already-tried");
+  const r = fixGo(onHead("1111111111111111"), [], env);
+  assert.equal(fixCalls(r).length, 1);
+  assert.ok(fixCalls(r)[0].args.includes("claude-sonnet-5-5"), "round 2 escalates to Sonnet");
+  assert.equal(r.decisions.at(-1).fix.round, 2);
+  const c = r.comments.find((x) => x.bodyFile.includes("<!-- haiku-autofix"));
+  assert.match(c.bodyFile, /round 2 of 3/);
+});
+
+test("after 3 rounds a BLOCK is not fixed again (rounds-used)", () => {
+  const shared = mkdtempSync(join(tmpdir(), "pr-review-shared-"));
+  const env = { PR_REVIEW_LOG: join(shared, "decisions.jsonl") };
+  for (const h of [SHA, "1111111111111111", "2222222222222222"]) assert.equal(fixCalls(fixGo(onHead(h), [], env)).length, 1, h);
+  const r = fixGo(onHead("3333333333333333"), [], env);
   assert.equal(fixCalls(r).length, 0);
-  assert.equal(r.decisions.at(-1).fix.reason, "already-tried");
+  assert.equal(r.decisions.at(-1).fix.reason, "rounds-used");
+});
+
+test("an old one-round state entry counts as round 1: the next head gets round 2", () => {
+  const r = fixGo({ ...onHead("1111111111111111"), files: { "log/fix-attempts.json": { "o/r#1": { sha: SHA, status: "pushed", fix_sha: "1111111111111111" } } } });
+  assert.equal(fixCalls(r).length, 1);
+  assert.equal(r.decisions[0].fix.round, 2);
+});
+
+test("a PR that already touches a risky path may get a fix in risky paths (merge stays blocked); CI/.claude never", () => {
+  const riskyPr = { apiFiles: [{ path: "bin/jev", additions: 5, deletions: 1 }, { path: "src/a.js", additions: 1, deletions: 0 }] };
+  const ok = fixGo({ ...riskyPr, gitStatus: " M bin/jev\n" });
+  assert.equal(ok.decisions[0].fix.status, "pushed");
+  const bad = fixGo({ ...riskyPr, gitStatus: " M bin/jev\n?? .github/workflows/ci.yml\n" });
+  assert.equal(bad.decisions[0].fix.status, "rejected");
+  const plain = fixGo({ gitStatus: " M bin/jev\n" });
+  assert.equal(plain.decisions[0].fix.status, "rejected", "a PR without risky paths still may not gain one");
 });
 
 test("the round is claimed before the fixer runs: a fixer crash still uses it up", () => {
@@ -951,10 +984,15 @@ test("the round is claimed before the fixer runs: a fixer crash still uses it up
   assert.equal(b.decisions.at(-1).fix.reason, "already-tried");
 });
 
-test("an autofix comment on the PR also counts as the round being used", () => {
-  const r = fixGo({ pr: fixPr({ comments: [{ body: "x <!-- haiku-autofix sha=0000000 -->" }] }) });
-  assert.equal(fixCalls(r).length, 0);
-  assert.equal(r.decisions[0].fix.reason, "already-tried");
+test("autofix comments on the PR count as rounds: same sha -> already-tried, other sha -> next round", () => {
+  const same = fixGo({ pr: fixPr({ comments: [{ body: `x <!-- haiku-autofix sha=${SHA} -->` }] }) });
+  assert.equal(fixCalls(same).length, 0);
+  assert.equal(same.decisions[0].fix.reason, "already-tried");
+  const other = fixGo({ pr: fixPr({ comments: [{ body: "x <!-- haiku-autofix sha=0000000 -->" }] }) });
+  assert.equal(fixCalls(other).length, 1);
+  assert.equal(other.decisions[0].fix.round, 2);
+  const three = fixGo({ pr: fixPr({ comments: ["1111111", "2222222", "3333333"].map((s) => ({ body: `<!-- haiku-autofix sha=${s} -->` })) }) });
+  assert.equal(three.decisions[0].fix.reason, "rounds-used");
 });
 
 test("no fix: dry-run, --no-merge, dirty guard, guard error, cross-repo, bot author, truncated diff, no-autofix list, head moved", () => {
