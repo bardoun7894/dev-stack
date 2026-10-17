@@ -84,5 +84,40 @@ class ErrorTest(unittest.TestCase):
             del os.environ["OPENROUTER_API_KEY"]
 
 
+class OpenRouterFallbackTest(unittest.TestCase):
+    def run_post(self, ts_code):
+        """TypeSafe answers ts_code (or 200); returns (urls hit, result or JevError)."""
+        import io
+        import urllib.error
+        import urllib.request
+        from unittest import mock
+        urls = []
+
+        def fake(req, timeout=None):
+            urls.append(req.full_url)
+            if req.full_url == jev.TYPESAFE_URL and ts_code != 200:
+                raise urllib.error.HTTPError(req.full_url, ts_code, "x", {}, io.BytesIO(b"billing"))
+            return io.BytesIO(b'{"answers": {"q": {"type": "score", "score": 3}}}')
+
+        env = {"TYPESAFE_API_KEY": "ts", "OPENROUTER_API_KEY": "or", "JEV_NO_LAYA": "1"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(urllib.request, "urlopen", fake):
+            os.environ.pop("JEV_DECISIONS_URL", None)
+            try:
+                return urls, jev.post({"model": jev.MODEL, "state": "s", "questions": {}})
+            except jev.JevError as e:
+                return urls, e
+
+    def test_billing_error_retries_on_openrouter(self):
+        for code in (401, 402, 403):
+            urls, res = self.run_post(code)
+            self.assertEqual(urls, [jev.TYPESAFE_URL, jev.URL])
+            self.assertEqual(res["answers"]["q"]["score"], 3)
+
+    def test_other_errors_do_not_retry(self):
+        urls, res = self.run_post(500)
+        self.assertEqual(urls, [jev.TYPESAFE_URL])
+        self.assertIsInstance(res, jev.JevError)
+
+
 if __name__ == "__main__":
     unittest.main()

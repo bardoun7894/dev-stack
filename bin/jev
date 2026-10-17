@@ -150,7 +150,23 @@ def laya_post(body):
 
 
 def post_jev(body, timeout=None):
+    orig = body
     url, key, body = route(body)
+    try:
+        return _send(url, key, body, timeout)
+    except JevError as e:
+        code = str(e).split(":")[0]
+        if url != TYPESAFE_URL or code not in ("HTTP 401", "HTTP 402", "HTTP 403"):
+            raise
+        try:
+            or_key = api_key()
+        except JevError:
+            raise e
+        print(f"jev: fallback=openrouter ({code})", file=sys.stderr)
+        return _send(URL, or_key, orig, timeout)
+
+
+def _send(url, key, body, timeout=None):
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
