@@ -40,6 +40,7 @@ Also importable (the other jev-* tools load it): post(), ask(), ask_many(), log_
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -138,7 +139,8 @@ def log_decision(tag, state, question, answer):
     did = hashlib.sha1(f"{time.time_ns()}{tag}{s}{json.dumps(question, sort_keys=True)}".encode()).hexdigest()[:12]
     _append({
         "kind_of_record": "decision", "id": did, "ts": int(time.time()), "tag": tag,
-        "state_hash": hashlib.sha1(s.encode()).hexdigest()[:12], "state_preview": s[:600],
+        "state_hash": hashlib.sha1(s.encode()).hexdigest()[:12], "state_len": len(s),
+        "state_preview": s[:600] if os.environ.get("JEV_LOG_PREVIEW") == "1" else None,
         "question": question, "kind": kind, "value": value, "confidence": answer.get("confidence"),
     })
     return did
@@ -213,9 +215,19 @@ def parse_state(text):
         return text
 
 
+SECRET_RE = re.compile(
+    r"sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|(?i:(?:api[_-]?key|secret|token|passw(?:or)?d)(?:\\?[\"']?\s*[:=]\s*\\?[\"']))[^\"'\\\s]{6,}")
+
+
+def redact(state):
+    """Mask key- and secret-shaped strings before the state leaves the machine."""
+    return json.loads(SECRET_RE.sub("[REDACTED]", json.dumps(state, ensure_ascii=False)))
+
+
 def ask_many(state, questions, tag=None, timeout=None):
     """Several questions over one state in one request. Returns (answers, ids, cost)."""
-    res = post({"model": MODEL, "state": state, "questions": questions}, timeout)
+    res = post({"model": MODEL, "state": redact(state), "questions": questions}, timeout)
     answers = res.get("answers") or {}
     if not all(k in answers for k in questions):
         raise JevError(f"unexpected response: {json.dumps(res)[:300]}")

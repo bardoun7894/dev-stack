@@ -140,8 +140,8 @@ async function runFlow(chromium, flow, opt, persona = 'normal', shared = null) {
       return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'no_browser', detail: String(e.message).slice(0, 200), stop: 'no_browser', steps: [] };
     }
   }
-  const ctx = await browser.newContext(shared ? { viewport: { width: 1366, height: 900 } } : {});
-  const page = await ctx.newPage();
+  let ctx = null;
+  let page = null;
   const shots = [];
   const shotDir = opt.screenshots ? join(opt.screenshots, slug(`${flow.name || flow.goal}-${persona}`)) : null;
   if (shotDir) mkdirSync(shotDir, { recursive: true });
@@ -151,13 +151,15 @@ async function runFlow(chromium, flow, opt, persona = 'normal', shared = null) {
     try { await page.screenshot({ path: p, fullPage }); shots.push(p); } catch { /* keep going without it */ }
   };
   const errors = [];
-  page.on('pageerror', (e) => errors.push(e.message));
   const data = personaData(persona, flow.data || {});
   const history = [];
   let stop = 'max_steps';
   let lastClick = null;
   let repeats = 0;
   try {
+    ctx = await browser.newContext(shared ? { viewport: { width: 1366, height: 900 } } : {});
+    page = await ctx.newPage();
+    page.on('pageerror', (e) => errors.push(e.message));
     await page.goto(flow.url, { waitUntil: 'load' });
     for (let step = 0; step < opt.maxSteps; step++) {
       const els = await elements(page);
@@ -198,7 +200,7 @@ async function runFlow(chromium, flow, opt, persona = 'normal', shared = null) {
     await shot('error');
     return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'driver_error', detail: String(e.message || e).slice(0, 200), stop, steps: history, screenshots: shots };
   } finally {
-    await ctx.close().catch(() => {});
+    if (ctx) await ctx.close().catch(() => {});
     if (!shared) await browser.close().catch(() => {});
   }
 }
@@ -245,4 +247,4 @@ async function main() {
   process.exit(bad.length ? 1 : 0);
 }
 
-main();
+main().catch((e) => { console.error(`jev-browse: ${e.message || e}`); process.exit(3); });

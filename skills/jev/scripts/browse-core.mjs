@@ -56,7 +56,7 @@ export function personaData(persona, data) {
 // leaves the site under test (off-site links are reported in the state instead of clicked).
 export function clickable(elements, data, { allowSubmit = false } = {}) {
   const canSubmit = allowSubmit || Object.keys(data || {}).length > 0;
-  return elements.filter((x) => (x.kind === 'link' && !x.external) || (x.kind === 'button' && (canSubmit || !x.inForm)));
+  return elements.filter((x) => (x.kind === 'link' && !x.external) || (x.kind === 'button' && canSubmit));
 }
 
 export function buildStepQuestions(elements, data, opts = {}) {

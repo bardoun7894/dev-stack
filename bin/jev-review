@@ -120,18 +120,22 @@ def load_jev():
 # --- pure parts (unit tested) ---------------------------------------------------------------
 
 def parse_diff(text):
-    hunks, file, cur, skip = [], None, None, False
+    hunks, file, old, cur, skip = [], None, None, None, False
     for line in text.split("\n"):
         if line.startswith("diff --git "):
             if cur:
                 hunks.append(cur)
-            cur, file = None, None
+            cur, file, old = None, None, None
             skip = False
         elif line.startswith("Binary files "):
             skip = True
+        elif line.startswith("--- "):
+            old = line[4:][2:] if line[4:].startswith("a/") else line[4:]
         elif line.startswith("+++ "):
             file = line[4:][2:] if line[4:].startswith("b/") else line[4:]
-            skip = skip or file == "/dev/null" or bool(SKIP.search(file))
+            if file == "/dev/null":  # deleted file: screen it under its old path
+                file = old
+            skip = skip or not file or bool(SKIP.search(file))
         elif line.startswith("@@") and file and not skip:
             if cur:
                 hunks.append(cur)
@@ -273,6 +277,13 @@ def cmd_diff(args, jev):
     repo = repo_root(args.get("repo") or os.getcwd())
     base = args["pos"][0] if args["pos"] else None
     text = git(repo, "diff", "-U20", f"{base}...HEAD") if base else git(repo, "diff", "-U20", "HEAD")
+    if not base:  # untracked files are part of the change too; --no-index exits 1 when files differ
+        for f in git(repo, "ls-files", "--others", "--exclude-standard").split("\n"):
+            if f:
+                p = subprocess.run(["git", "-C", repo, "diff", "--no-index", "-U20", "--", "/dev/null", f],
+                                   capture_output=True, text=True)
+                if p.returncode in (0, 1):
+                    text += "\n" + p.stdout
     hunks = parse_diff(text)
     qs = {d: {"type": "noul", "instructions": q} for d, q in DIMENSIONS.items()}
     qs["severity"] = {"type": "score", "instructions": "If this change has a problem, how bad is the worst one?",
