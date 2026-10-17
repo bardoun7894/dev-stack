@@ -7,7 +7,7 @@ W=$1; NAME=$2; N=${3:-1}
 W=$(cd "$W" && pwd)
 ROOT=$(cd "$W" && cd "$(git rev-parse --git-common-dir)" && cd .. && pwd)
 REPO=$(basename "$ROOT"); S=$HOME/.cache/gate/$REPO; mkdir -p "$S"
-CONF=$ROOT/.gate.conf; [ -f "$CONF" ] || CONF=$W/.gate.conf
+CONF=$ROOT/.gate.conf
 [ -f "$CONF" ] || { echo "no .gate.conf in $ROOT" >&2; exit 2; }
 MAIN=main
 # shellcheck disable=SC1090

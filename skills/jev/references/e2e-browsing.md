@@ -35,7 +35,7 @@ Rules of the ladder:
 `\.(tsx|jsx|vue|svelte|css|scss|dart|html)$|\.blade\.php$|resources\/views|\/components\/|\/pages\//`), on a
 passing e2e run for the exact head sha. Sign it with one of:
 
-- a PR comment `<!-- e2e-pass sha=<full sha> -->`, or
+- a PR comment `<!-- e2e-pass sha=<full sha> -->` posted by the bot account (the gate ignores the marker from any other author), or
 - a commit status/check with context `jev-e2e` (or `e2e`) in `success` on that sha.
 
 Missing marker, failing check, or lookup error all block auto-merge (`e2e-missing` / `e2e-failed` /

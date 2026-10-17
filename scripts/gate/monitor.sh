@@ -2,7 +2,7 @@
 # monitor.sh [repo-name...]: zero-AI watcher. Exits on the FIRST event: PASS, FAIL (with failing steps + names), or STALL.
 # Repos default to every dir under ~/.cache/gate/. A finished gate (gate-<n>.done) fires once (.seen-gate-<n>).
 G=$HOME/.cache/gate; HERE=$(cd "$(dirname "$0")" && pwd); STALL_SECS=${STALL_SECS:-1800}; POLL=${POLL:-60}
-mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 [ $# -gt 0 ] && REPOS=("$@") || { REPOS=(); for d in "$G"/*/; do [ -d "$d" ] && REPOS+=("$(basename "$d")"); done; }
 while true; do
   for r in "${REPOS[@]}"; do D=$G/$r

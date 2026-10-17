@@ -47,6 +47,13 @@
     return { done: true };
   }
 
+  // A submit control whose form posts to another origin would send the supplied values off-site.
+  if (req.kind === 'click' && e.form && e.matches('button:not([type]),button[type=submit],input[type=submit],input[type=image]')) {
+    try {
+      if (new URL(e.formAction || e.form.action, location.href).origin !== location.origin) return null;
+    } catch (err) { return null; }
+  }
+
   if (req.realInput && point) return { point };
 
   if (req.kind === 'fill') {

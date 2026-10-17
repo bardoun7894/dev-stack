@@ -78,7 +78,7 @@ async function main() {
 
   // Judge mode: the same verdict + cause checkpoint jev-browse ends a flow with.
   if (!opt.goal) {
-    const state = buildJudgeState(opt.expect, obs.url, String(obs.text || '').slice(0, 12000));
+    const state = buildJudgeState(opt.expect, (() => { try { return new URL(obs.url).pathname; } catch { return undefined; } })(),String(obs.text || '').slice(0, 12000));
     const res = await askJev(state, CHECKPOINT);
     if (!res) { console.error('jev-page: Jev unavailable'); process.exit(3); }
     const verdict = judgeFlow(res.answers, []);

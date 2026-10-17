@@ -290,7 +290,7 @@ check_cron_logs() {
       fi
     done <<<"$last_lines"
     if [ "$hits" -ge 20 ]; then
-      add "cronlog" "$tfile has $hits error lines in its recent output"
+      add "cronlog" "$tfile has $hits error lines in its recent output; last line: $(printf '%s' "$last_line" | cut -c1-120)"
     fi
   done < <(printf '%s\n' "$crontab" | grep -Eo '>>[[:space:]]*/[^[:space:]]+' | sed -E 's/^>>[[:space:]]*//')
 }
@@ -321,10 +321,12 @@ check_chkrootkit() {
     /WARNING/ { inw = 1; next }
     inw && /^\// && !/lstat\(\/tmp\/runc-process/ { print }
   ' "$VAR_LOG_CHKROOTKIT" | LC_ALL=C sort -u)
-  if [ "$REBASELINE" = "1" ] || [ ! -f "$base" ]; then
+  if [ "$REBASELINE" = "1" ]; then
     printf '%s\n' "$cur" | sed '/^$/d' | LC_ALL=C sort -u > "$base"
     return 0
   fi
+  # No baseline yet: report every current path; only --rebaseline trusts them.
+  [ -f "$base" ] || base=/dev/null
   while IFS= read -r pth; do
     [ -z "$pth" ] && continue
     add "chkrootkit" "$pth"
@@ -343,8 +345,8 @@ check_chkrootkit
 
 # --- emit ---
 emit() {
-  if [ -z "$FINDINGS" ]; then
-    [ "$SUMMARY" = "1" ] && send_telegram "[server-health] all green ($(hostname -s 2>/dev/null || echo host))"
+  if [ -z "$FINDINGS" ] && [ "$SUMMARY" = "1" ]; then
+    send_telegram "[server-health] all green ($(hostname -s 2>/dev/null || echo host))"
     return 0
   fi
   if [ "$SUMMARY" = "1" ]; then

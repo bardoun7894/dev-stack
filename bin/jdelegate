@@ -403,7 +403,8 @@ function mcpQuestions() {
   const qs = {};
   try {
     for (const [name, { def, trusted }] of Object.entries(autoMcpServers())) {
-      const what = trusted ? def?.description || [def?.command ?? def?.url, ...(def?.args ?? [])].filter(Boolean).join(" ") : String(def?.command ?? def?.url ?? "").slice(0, 200);
+      // args and url can carry tokens: trusted servers send only the description, never args/url.
+      const what = trusted ? String(def?.description ?? "").slice(0, 200) : String(def?.command ?? def?.url ?? "").slice(0, 200);
       qs[`mcp:${name}`] = { type: "noul", instructions: `This coding brief needs the ${name} MCP server (${what})` };
     }
   } catch { /* none */ }

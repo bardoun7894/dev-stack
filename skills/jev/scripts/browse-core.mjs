@@ -112,7 +112,7 @@ export function actionSpace(actions, data, { allowSubmit = false, autofill = fal
     if (a.kind === 'scroll') { controls[a.id] = a; continue; }
     if (a.kind === 'click') {
       if (a.external) continue;
-      if (a.inForm && !canSubmit) continue;
+      if ((a.inForm || a.role === 'button') && !canSubmit) continue;
       add('CLICK', a.index, a);
     } else if (a.kind === 'fill') {
       if (!canType) continue;
@@ -181,11 +181,16 @@ function describe(a) {
   return out;
 }
 
+// Query and hash can carry reset, OAuth or session tokens: only origin + pathname leave the machine.
+function originAndPath(u) {
+  try { const p = new URL(u); return p.origin + p.pathname; } catch { return undefined; }
+}
+
 export function buildStepState(goal, observation, history, data) {
   const actions = observation.actions || [];
   const s = {
     goal,
-    url: observation.url,
+    url: originAndPath(observation.url),
     page: observation.text,
     elements: actions.filter((a) => a.index).map((a) => `[${a.index}] ${a.role} "${a.label}"${a.value ? ` · ${a.value}` : ''}`),
     history: history.slice(-8),

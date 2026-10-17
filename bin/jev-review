@@ -278,6 +278,19 @@ def cmd_diff(args, jev):
     repo = repo_root(args.get("repo") or os.getcwd())
     base = args["pos"][0] if args["pos"] else None
     text = git(repo, "diff", "-U20", f"{base}...HEAD") if base else git(repo, "diff", "-U20", "HEAD")
+    if not base:
+        # `git diff HEAD` omits untracked files: diff each against /dev/null (exit 1 just means "differs").
+        for f in git(repo, "ls-files", "--others", "--exclude-standard").split("\n"):
+            if not f:
+                continue
+            try:
+                p = subprocess.run(["git", "-C", repo, "diff", "--no-index", "-U20", "--", "/dev/null", f],
+                                   capture_output=True, text=True)
+            except OSError as e:
+                raise GitError(str(e)) from e
+            if p.returncode not in (0, 1):
+                raise GitError(f"git diff --no-index {f}: {p.stderr.strip()[:300]}")
+            text += p.stdout
     hunks = parse_diff(text)
     qs = {d: {"type": "noul", "instructions": q} for d, q in DIMENSIONS.items()}
     qs["severity"] = {"type": "score", "instructions": "If this change has a problem, how bad is the worst one?",

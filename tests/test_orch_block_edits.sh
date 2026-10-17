@@ -4,6 +4,9 @@ HOOK=${HOOK:-$HOME/.claude/hooks/orch-block-edits.sh}
 fail=0
 run() { # tool path -> prints deny|allow
   out=$(jq -nc --arg t "$1" --arg p "$2" '{tool_name:$t,tool_input:{file_path:$p}}' | CLAUDE_ORCH=1 bash "$HOOK")
+  rc=$?
+  # A crashing or missing hook is neither allow nor deny.
+  [ $rc -eq 0 ] || { echo "error(rc=$rc)"; return; }
   [ -n "$out" ] && echo deny || echo allow
 }
 check() { got=$(run "$2" "$3"); [ "$got" = "$1" ] || { echo "FAIL expected $1 got $got: $2 $3"; fail=1; }; }

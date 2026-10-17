@@ -399,7 +399,11 @@ async function runFlow(session, flow, opt, persona = 'normal') {
     // The judge is NEVER replayed from cache. It is the assertion — caching it would make a green run mean
     // "it was green once", which is how a suite quietly stops testing anything.
     jevCalls++;
-    const verdict = judgeFlow(await askJev(state, judge), errors);
+    let verdict = judgeFlow(await askJev(state, judge), errors);
+    // A pass needs a flow that finished, and a normal flow needs an explicit `expect` to assert.
+    if (verdict.status === 'pass' && (!['done', 'replayed'].includes(stop) || (persona === 'normal' && !flow.expect))) {
+      verdict = { status: 'uncertain', cause: 'incomplete_flow' };
+    }
     await shot('final');
     await shot('final-full', true);
     if (cache && verdict.status === 'pass' && fresh.length) {

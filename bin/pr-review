@@ -165,16 +165,21 @@ function modelUsable(ref, exhausted, dead, quota) {
   return !(q && ["five_hour", "weekly", "monthly"].some((w) => typeof q[w] === "number" && q[w] >= MIN_CONF));
 }
 
-// Adds "+" lines of the diff (excluding "+++" file headers) into the state the guard sees.
+// Adds "+" and "-" lines of the diff (excluding "+++"/"---" file headers) into the state the guard sees.
 function guardState(title, body, diff) {
-  const added = diff.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++"));
-  return `PR title: ${title}\n\nPR description:\n${body ?? ""}\n\nAdded diff lines:\n${added.join("\n")}\n`;
+  const added = diff.split("\n").filter((l) => (l.startsWith("+") && !l.startsWith("+++")) || (l.startsWith("-") && !l.startsWith("---")));
+  return `PR title: ${title}\n\nPR description:\n${body ?? ""}\n\nChanged diff lines:\n${added.join("\n")}\n`;
 }
 
 // Splits state into chunks of at most INJECTION_CHUNK chars. Returns null if more than INJECTION_MAX_CHUNKS.
 function guardChunks(state) {
   const chunks = [];
-  for (let i = 0; i < state.length; i += INJECTION_CHUNK) chunks.push(state.slice(i, i + INJECTION_CHUNK));
+  // Consecutive chunks overlap so a phrase split at a boundary appears whole in at least one chunk.
+  const step = INJECTION_CHUNK - 500;
+  for (let i = 0; i < state.length; i += step) {
+    chunks.push(state.slice(i, i + INJECTION_CHUNK));
+    if (i + INJECTION_CHUNK >= state.length) break;
+  }
   if (chunks.length > INJECTION_MAX_CHUNKS) return null;
   return chunks;
 }
@@ -232,7 +237,7 @@ function secondReview(prompt, allowOpencode) {
       try {
         // opencode runs on the untrusted diff: no tools, and no tokens from our environment.
         const env = tool === "opencode"
-          ? { PATH: process.env.PATH, HOME: process.env.HOME, STUB_DIR: process.env.STUB_DIR, OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { edit: "deny", bash: "deny", webfetch: "deny" } }) }
+          ? { PATH: process.env.PATH, HOME: process.env.HOME, STUB_DIR: process.env.STUB_DIR, OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { edit: "deny", bash: "deny", webfetch: "deny", read: "deny", list: "deny", glob: "deny", grep: "deny", external_directory: "deny" } }) }
           : undefined;
         const raw = exec(tool, args, { input: "", cwd: dir, timeout: B_TIMEOUT_MS, env });
         const r = tool === "pi" ? parsePi(raw) : { text: raw.trim(), usd: null, tokens: null };
@@ -294,6 +299,7 @@ function guardCheck(repo, n, sha, dry) {
   if (!["CLEAN", "HAS_HOOKS"].includes(v.mergeStateStatus)) return `merge-skipped:state-${String(v.mergeStateStatus).toLowerCase()}`;
   const ok = (c) => (c.state !== undefined && c.conclusion === undefined ? c.state === "SUCCESS"
     : c.__typename === "StatusContext" ? c.state === "SUCCESS" : ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(c.conclusion));
+  if (!(v.statusCheckRollup ?? []).length) return "merge-skipped:no-checks";
   if (!(v.statusCheckRollup ?? []).every(ok)) return "merge-skipped:checks-not-green";
   if ((v.labels ?? []).some((l) => l.name === "no-automerge")) return "merge-skipped:no-automerge-label";
   if (v.headRefOid !== sha) return "merge-skipped:new-commit";
@@ -503,7 +509,8 @@ function reviewPr(repo, n, dry) {
   const a = parseClaude(askClaude(prompt));
   const out = a.text.trim();
   if (!out) throw new Error("claude returned empty output");
-  const second = secondReview(prompt, typeof injection.max === "number" && injection.max < INJECTION_BAR);
+  const guarded = typeof injection.max === "number";
+  const second = guarded ? secondReview(prompt, injection.max < INJECTION_BAR) : null;
   const bSection = second ? `**Second review (${second.model})**\n\n${second.out}` : "**Second review (unavailable)**\n\nsecond reviewer unavailable (no quota)";
 
   const body = `${injectionWarning}**Haiku 5.5 review**\n\n${note}${out}\n\n${bSection}\n\n${marker}`;

@@ -22,6 +22,9 @@ owner says yes.
 
 - `--report-only` — customer projects (sanad_app and up): produce the report
   but do **not** edit `specs/` or `plan.md`. Report goes to the owner only.
+  Write `inventory.json`, `research.md` and `gap-report.md` to `.audit/<date>/`
+  instead of `specs/_audit/<date>/`, and finish by checking that
+  `git status --porcelain -- specs` is empty.
 - `--defects` — adds a defects pass to Phase 2 (board has it on by default):
   failing/skipped tests, open `- [ ]` tasks in specs that roadmap.md marks as
   done, TODO/FIXME/NotImplemented stubs, unresolved review findings in

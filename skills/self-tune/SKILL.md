@@ -21,7 +21,7 @@ Finding → fix:
 | `HOOK:` a block that was legitimate work | Narrow the hook pattern (step 2) and add the case to `hooktest.sh` as `expect 0` |
 | `OLD:` / `HEAVY:` process | Stop it if it is a worker of yours; tell the owner if it belongs to another session |
 | `WASTED:` gate with no failure names | Make the step save full output (`tee $FULL`), never tail-only |
-| `CLEANUP:` test DBs | Drop the `board_t_*`/`*_gw*` DBs you created (never `board`, never `board_test` base DBs in use) |
+| `CLEANUP:` test DBs | List the `board_t_*`/`*_gw*` DBs you created and ask the owner to confirm before dropping any (never `board`, never `board_test` base DBs in use) |
 | `LOAD:` CLAUDE.md > 30 KB | Move a rarely used section to `~/.claude/reference/` with a one-line pointer |
 | Subagent "still running" wake-ups | Brief template: tests in the FOREGROUND |
 | Subagent pass > 250k tokens | Brief was too wide: add exact files + line ranges, do-not-touch list |
@@ -30,7 +30,7 @@ Finding → fix:
 
 1. Back up: `cp -p <file> ~/.claude/backups/$(date +%F)/`.
 2. Edit with the smallest change. For the hook, write `no-poll-guard.sh.new` first.
-3. Test the hook: `HOOK_SUFFIX=.new bash scripts/hooktest.sh` then install with `mv`. Never put a blocked pattern literally in a live command: split it (`SL="sl""eep"`), the way `hooktest.sh` does, or the hook blocks your own test.
+3. Get the owner's approval before changing `no-poll-guard.sh`, `hooktest.sh` or `check-hook.sh` (they are a safety control and its test oracle; never edit the hook and its tests in the same unapproved run). Then test the hook: `HOOK_SUFFIX=.new bash scripts/hooktest.sh` then install with `mv`. Never put a blocked pattern literally in a live command: split it (`SL="sl""eep"`), the way `hooktest.sh` does, or the hook blocks your own test.
 4. Run `check-hook.sh` again → must print `PASS n/n`.
 5. If the rule text changed, update the TOKEN BUDGET section and the memory note `loops-in-scripts-not-ai`.
 

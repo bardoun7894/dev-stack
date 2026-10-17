@@ -193,18 +193,20 @@ echo "$out" | grep -q "unit: nginx.service failed" && ok "unit" || bad "unit" "m
 
 # ---- 4. pm2 restart jump 0 -> 30 alerts; second run without growth does not ----
 PM2_BASE='[{"name":"web","pid":1,"pm2_env":{"status":"online","restart_time":0},"monit":{"cpu":0}},{"name":"db","pid":1,"pm2_env":{"status":"online","restart_time":1},"monit":{"cpu":0}}]'
-HEALTH_STUB_PM2LIST="$PM2_BASE"; run_script >/dev/null
+# --dry-run never writes the baseline, so seed the previous restart counts ("count<TAB>name") directly.
+printf '0\tweb\n1\tdb\n' > "$T/state/health/pm2-restarts.previous"
 PM2_BAD='[{"name":"web","pid":1,"pm2_env":{"status":"online","restart_time":30},"monit":{"cpu":0}},{"name":"db","pid":1,"pm2_env":{"status":"online","restart_time":1},"monit":{"cpu":0}}]'
 HEALTH_STUB_PM2LIST="$PM2_BAD"
 HEALTH_STUB_FAILED=""
 HEALTH_STUB_HOSTS="beldify.example.com=200
 ostudio.example.com=200"
 out="$(run_script)"
-echo "$out" | grep -q "pm2: web .*restarts=30" && ok "pm2-jump" || bad "pm2-jump" "no jump finding in: $out"
-echo "$out" | grep -q "pm2: db .*restarts=" && bad "pm2-stable" "stable app flagged: $out" || ok "pm2-stable"
+echo "$out" | grep -q "pm2: web restarted more than 20 times" && ok "pm2-jump" || bad "pm2-jump" "no jump finding in: $out"
+echo "$out" | grep -q "pm2: db restarted" && bad "pm2-stable" "stable app flagged: $out" || ok "pm2-stable"
 
 # Second run with the same restart counts (no growth) must be silent.
 PM2_SAME="$PM2_BAD"
+printf '30\tweb\n1\tdb\n' > "$T/state/health/pm2-restarts.previous"
 HEALTH_STUB_PM2LIST="$PM2_SAME"
 out="$(run_script)"
 echo "$out" | grep -q "^\[server-health\] pm2:" && bad "pm2-dedupe" "still emitting pm2 findings after stable run: $out" || ok "pm2-dedupe"
@@ -244,6 +246,9 @@ ostudio.example.com=200"
 out="$(run_script)"
 echo "$out" | grep -q "cronlog: .*cron-targets/app.log" && ok "dedupe-1" || bad "dedupe-1" "no alert on first run: $out"
 
+# --dry-run never records sent findings, so record the first run's finding as sent just now.
+key=$(echo "$out" | grep "^\[server-health\] cronlog: .*cron-targets/app.log" | head -1 | sed 's/^\[server-health\] //')
+printf '%s\t%s\n' "$(date +%s)" "$key" >> "$T/state/health/findings.sent"
 # Second run, the same finding MUST NOT be reprinted.
 out="$(run_script)"
 echo "$out" | grep -q "cronlog: .*cron-targets/app.log" && bad "dedupe-2" "duplicated finding on second run: $out" || ok "dedupe-2"
@@ -277,7 +282,7 @@ CHK
 touch "$LOGD"
 HEALTH_STUB_HOSTS="beldify.example.com=200
 ostudio.example.com=200"
-out="$(run_script)"
+out="$(run_script --rebaseline)"
 echo "$out" | grep -q "chkrootkit:" && bad "chkrootkit-seed" "first run not silent: $out" || ok "chkrootkit-seed"
 printf 'WARNING: more\n/usr/bin/x\n/usr/bin/x\n' >> "$LOGD"
 HEALTH_STUB_HOSTS="beldify.example.com=200
