@@ -236,7 +236,7 @@ if [ -n "$root" ]; then
             # "./sub/file.md 1234" -> "raw/sub/file.md"
             rel="${entry% *}"
             rel="raw/${rel#./}"
-            grep -qE "(^|[^A-Za-z0-9_./-])$(printf '%s' "$rel" | sed 's/[][\.*^$+?(){}|/]/\\&/g')($|[^A-Za-z0-9_./-])" "$kb_log" 2>/dev/null || pending_count=$((pending_count + 1))
+            grep -qE "(^|[^A-Za-z0-9_./-])$(printf '%s' "$rel" | sed 's/[][\.*^$+?(){}|\/]/\\&/g')($|[^A-Za-z0-9_./-])" "$kb_log" 2>/dev/null || pending_count=$((pending_count + 1))
           done <<RAWSTATE
 $current_state
 RAWSTATE

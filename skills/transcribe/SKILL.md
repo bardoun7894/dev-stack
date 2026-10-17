@@ -16,6 +16,8 @@ Two tools do the work:
 
 `yt-transcribe` (in `~/.local/bin/`) wires them together and is the **default entry point**. Reach for raw `yt-dlp` only for download-shaped tasks (see [references/yt-dlp.md](references/yt-dlp.md)).
 
+`yt-transcribe` is a separately provisioned helper, not shipped with this repo. If `command -v yt-transcribe` finds nothing, fall back to the manual pipeline: fetch captions with `yt-dlp --skip-download --write-auto-subs --sub-langs <lang> -- <url>`; if none exist, download audio with `yt-dlp -x --audio-format wav -- <url>`, then run `whisper-cli -m <model> -f <audio.wav>`.
+
 ## The one rule that matters: captions before ASR
 
 **Always let the captions fast path run first.** Most YouTube videos already have captions (including auto-generated ones). Pulling them takes ~30 seconds and zero compute. Running whisper on the same video takes minutes.
