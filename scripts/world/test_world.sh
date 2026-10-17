@@ -188,10 +188,10 @@ rm -f "$WORLD_STATE_DIR/outbox.jsonl"
 # ---------------------------------------------------------------------------
 echo "## 4) sent-id dedupe" | tee -a "$LOG"
 WORLD_STATE_DIR2="$(mktemp -d -t worldsent.XXXXXX)"
-PYTHONPATH="$ROOT" python3 - "$WORLD_STATE_DIR2" <<'PY' 2>&1 | tee -a "$LOG"
+WORLD_STATE_DIR="$WORLD_STATE_DIR2" PYTHONPATH="$ROOT" python3 - "$WORLD_STATE_DIR2" <<'PY' 2>&1 | tee -a "$LOG"
 import sys, json, pathlib
 import lib_world
-sd = pathlib.Path(sys.argv[1])
+sd =pathlib.Path(sys.argv[1])
 sd.mkdir(parents=True, exist_ok=True)
 ids = [lib_world.make_id('test', f'k{i}') for i in range(5)]
 lib_world.sent_ids_save(ids)

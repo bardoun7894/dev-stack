@@ -303,10 +303,10 @@ def collect_prs() -> Iterable[dict]:
             return []
     except Exception:
         pass
-    def _run(query_flag: str) -> list[dict]:
+    def _run(query_flag: str, *extra: str) -> list[dict]:
         try:
             cp = subprocess.run(
-                ["gh", "search", "prs", query_flag, "@me", "--limit", "1000",
+                ["gh", "search", "prs", query_flag, "@me", *extra, "--limit", "1000",
                  "--json", "number,title,state,repository,url,createdAt,closedAt"],
                 capture_output=True, text=True, timeout=60,
             )
@@ -323,6 +323,11 @@ def collect_prs() -> Iterable[dict]:
     # Author first, then reviewed-by. The server dedupes by id; we also
     # dedupe locally so a PR that is BOTH authored and reviewed doesn't get
     # two events.
+    # `gh search prs` reports merged PRs as state "closed"; --merged tells them apart.
+    merged_keys = {
+        ((p.get("repository") or {}).get("nameWithOwner") or "unknown/unknown", str(p.get("number")))
+        for p in _run("--author", "--merged") + _run("--reviewed-by", "--merged")
+    }
     for pr in _run("--author") + _run("--reviewed-by"):
         repo = (pr.get("repository") or {}).get("nameWithOwner") or "unknown/unknown"
         num = pr.get("number")
@@ -344,7 +349,7 @@ def collect_prs() -> Iterable[dict]:
             proj = slug(repo_short)
         title = f"PR #{num}"
         ts = pr.get("createdAt") or pr.get("closedAt") or ""
-        if state == "merged":
+        if state == "merged" or key in merged_keys:
             kind, status = "merge", "done"
         elif state == "open":
             kind, status = "pr", "pending"

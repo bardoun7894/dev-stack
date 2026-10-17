@@ -12,6 +12,7 @@ Flags:
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import sys
@@ -66,6 +67,15 @@ def main(argv: list[str]) -> int:
     timeout = float(os.environ.get("WORLD_TIMEOUT", "5"))
     state_dir = Path(os.environ.get("WORLD_STATE_DIR", str(Path.home() / ".local/state/world")))
 
+    if not dry_run:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        lock_fh = open(state_dir / "world-push.lock", "w")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("another world-push run holds the lock; exiting", file=sys.stderr)
+            return 0
+
     collectors = [
         ("session-tasks", wps.collect_session_tasks),
         ("spec-kit",      wps.collect_specs),
@@ -80,6 +90,7 @@ def main(argv: list[str]) -> int:
         ("claude-sessions", wps.collect_transcripts),
     ]
 
+    collector_failed = False
     all_events: list[dict] = []
     by_source_counts: dict[str, int] = {}
     by_kind_counts: dict[str, int] = {}
@@ -91,6 +102,7 @@ def main(argv: list[str]) -> int:
         except Exception as e:
             print(f"[{src_name}] ERROR: {e}", file=sys.stderr)
             events = []
+            collector_failed = True
         if dry_run:
             print(f"[timing] {src_name}: {time.time()-t0:.1f}s n={len(events)}", file=sys.stderr)
         by_source_counts[src_name] = len(events)
@@ -129,7 +141,10 @@ def main(argv: list[str]) -> int:
         print(f"send failed, will retry next run: {e}", file=sys.stderr)
         return 2
 
-    wps.commit_state()
+    # A failed collector may have advanced a cursor without emitting its events;
+    # leave cursors uncommitted so the next run re-collects them.
+    if not collector_failed:
+        wps.commit_state()
     # Persist full id set (existing + new).
     lib_world.sent_ids_save(list(sent | {ev["id"] for ev in all_events if ev["id"] not in sent}))
     return 0
