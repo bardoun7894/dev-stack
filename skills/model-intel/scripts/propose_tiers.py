@@ -128,7 +128,8 @@ def decide(tiers, rows, reach, probe, today=None):
         gain = best["index"] - inc["index"]
         qualifies = (gain >= AUTO["min_index_gain"] and best["cost"] <= inc["cost"]) or \
                     (abs(gain) <= AUTO["equal_index_tolerance"] and best["cost"] <= AUTO["equal_index_cost_ratio"] * inc["cost"])
-        slow = bool(best["tps"] and inc["tps"] and best["tps"] < 0.7 * inc["tps"])
+        no_speed = not (best["tps"] and inc["tps"])
+        slow = bool(not no_speed and best["tps"] < 0.7 * inc["tps"])
         info = {"chain": chain, "tier": tier, "incumbent": head, "inc_model": inc["base"], "inc_index": inc["index"],
                 "inc_cost": inc["cost"], "inc_tps": inc["tps"], "candidate": best["base"], "effort": best["effort"],
                 "index": best["index"], "cost": best["cost"], "tps": best["tps"], "gain": round(gain, 2)}
@@ -147,6 +148,8 @@ def decide(tiers, rows, reach, probe, today=None):
             reasons.append("below auto-apply margin")
         if slow:
             reasons.append(f"much slower ({best['tps']:.0f} vs {inc['tps']:.0f} tok/s)")
+        elif no_speed:
+            reasons.append("speed data missing")
         if not reasons and sub is not None:
             ok = probe(sub["id"])
             if ok:
@@ -169,7 +172,8 @@ def apply_changes(path, auto, today):
     """Back up, insert candidates ahead of the incumbent, validate, restore on failure. Returns backup path."""
     path = Path(path)
     backup = path.with_name(path.name + f".bak-model-intel-{today}")
-    shutil.copy2(path, backup)
+    if not backup.exists():
+        shutil.copy2(path, backup)
     tiers = json.loads(path.read_text())
     before = {c: claude_count(l) for c, _, _, l in chains(tiers)}
     notes = []
