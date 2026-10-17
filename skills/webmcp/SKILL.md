@@ -62,7 +62,7 @@ Copy `assets/blade/webmcp.blade.php` to `resources/views/partials/`, then in the
 </form>
 ```
 
-Add `toolautosubmit` only for non-consequential forms. In the submit handler: `e.preventDefault(); if (e.agentInvoked) e.respondWith(promise)`. Style agent activity with `:tool-form-active` and `:tool-submit-active`. Listen for `toolactivated` / `toolcancel` on `document.modelContext` (window.ontool* is unsupported from Chrome 156).
+Add `toolautosubmit` only for non-consequential forms. In the submit handler: `if (e.agentInvoked) { e.preventDefault(); e.respondWith(promise); }` (never call `preventDefault()` for human submits). Style agent activity with `:tool-form-active` and `:tool-submit-active`. Listen for `toolactivated` / `toolcancel` on `document.modelContext` (window.ontool* is unsupported from Chrome 156).
 
 ## Testing recipe
 
