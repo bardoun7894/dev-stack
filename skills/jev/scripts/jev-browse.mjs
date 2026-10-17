@@ -63,8 +63,12 @@ function askJev(state, questions) {
   return new Promise((resolve) => {
     const p = spawn('python3', [JEV, 'raw', '--log', 'browse'], { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
+    const timer = setTimeout(() => p.kill(), 120000);
     p.stdout.on('data', (d) => { out += d; });
+    p.on('error', () => { clearTimeout(timer); resolve(null); });
+    p.stdin.on('error', () => {});
     p.on('close', (code) => {
+      clearTimeout(timer);
       if (code !== 0) return resolve(null);
       try {
         const r = JSON.parse(out);
@@ -99,7 +103,7 @@ async function elements(page) {
         } catch { external = true; }
       }
       out.push({ id: i, kind, label: label(e), type: e.type || tag, href: tag === 'a' ? e.getAttribute('href') : undefined,
-        external, inForm: isButton && !!e.closest('form'), empty: kind === 'input' ? !e.value : undefined });
+        external, inForm: isButton && !!e.form, empty: kind === 'input' ? !e.value : undefined });
     });
     return out;
   });
@@ -218,7 +222,7 @@ async function main() {
     const exe = findChrome();
     if (!exe) { console.error('jev-browse: no Chrome/Chromium found; set JEV_BROWSER=/path/to/chrome'); process.exit(3); }
     shared = await chromium.launch({ headless: !opt.headful, slowMo: opt.headful ? 250 : 0, executablePath: exe,
-      args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+      args: [...(process.env.JEV_NO_SANDBOX ? ['--no-sandbox'] : []), '--disable-dev-shm-usage'] });
   } else {
     try { await (await chromium.connectOverCDP(opt.cdp)).close(); } catch (e) { console.error(`jev-browse: no browser at ${opt.cdp}: ${e.message}`); process.exit(3); }
   }

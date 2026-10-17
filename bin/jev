@@ -305,6 +305,8 @@ def main(argv):
     if cmd == "raw":
         body = json.load(sys.stdin)
         body.setdefault("model", MODEL)
+        if "state" in body:
+            body["state"] = redact(body["state"])
         res = post(body)
         if opts["log"]:
             for k, a in (res.get("answers") or {}).items():
