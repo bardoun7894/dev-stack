@@ -85,6 +85,7 @@ cmd_list() {
 
 cmd_approve() {
   [ "$#" -gt 0 ] || die "approve needs at least one path"
+  cmd_verify >&2   # never record tampered locked checks as the new baseline
   local srcs=() dsts=() rel sub
   for p in "$@"; do
     rel="$(repo_rel "$p")"
@@ -249,6 +250,7 @@ cmd_rebaseline() {
 cmd_unlock() {
   [ "$#" -gt 0 ] || die "unlock needs at least one path"
   echo "WARNING: unlock is a human-only action. An agent must never run it." >&2
+  cmd_verify >&2   # never record tampered locked checks as the new baseline
   local rel sub
   for p in "$@"; do
     rel="$(repo_rel "$p")"

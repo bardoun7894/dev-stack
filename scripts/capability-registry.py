@@ -227,7 +227,7 @@ def park_plan(reg, policy, home):
         dirname = os.path.basename(it["path"]) if kind == "skill" and it.get("path") else name
         if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", dirname):
             continue
-        sub = ("skills" if kind == "skill" else "agents") + ("" if it["location"] == "live" else "-parked")
+        sub = ("skills" if kind == "skill" else "agents") + ("" if want_live else "-parked")
         path = os.path.join(home, sub, dirname if kind == "skill" else name + ".md")
         if os.path.exists(path) and not os.path.islink(path):
             out.append(f"real {kind} {dirname} {'real directory' if os.path.isdir(path) else 'real file'} (left alone)")

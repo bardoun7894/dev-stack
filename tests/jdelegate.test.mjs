@@ -646,7 +646,7 @@ test('quota: review and language chains follow quota but never gain GPT elsewher
 // ── W4: the worker writes exit/out.log itself; `jdelegate wait` collects them ──
 test('W4 run.sh writes exit via an EXIT trap and opencode/pi workers also write out.log', () => {
   for (const harness of ['opencode', 'pi']) {
-    const r = dry(['--harness', harness].slice(0, 0));
+    const r = dry(['--harness', harness]);
     assert.equal(r.status, 0);
   }
   const r = dry([]);
