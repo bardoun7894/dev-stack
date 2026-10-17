@@ -8,6 +8,7 @@ no message text, no file contents (counts and metadata only).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -271,7 +272,7 @@ def collect_git(roots: list[Path] | None = None) -> Iterable[dict]:
     for bucket in by_canonical.values():
         canonical_dir: Path = bucket["canonical"]
         project: str = bucket["project"]
-        sf = STATE_DIR / f"git.{project}.sha"
+        sf = STATE_DIR / f"git.{hashlib.sha1(str(canonical_dir.resolve()).encode()).hexdigest()[:16]}.sha"
         head = (_git_out(canonical_dir, ["rev-parse", "HEAD"], 5) or "").strip()
         if not head:
             continue
@@ -517,39 +518,48 @@ def collect_skill_use() -> Iterable[dict]:
             start = 0
         # Project from the parent folder name (no transcript content needed).
         proj = project_from_transcript_folder(p.parent.name)
+        prev_counts = prev.get("counts") if isinstance(prev, dict) else None
+        if not isinstance(prev_counts, dict):
+            prev_counts = {}
         if start == 0:
-            pairs = _scan_file_for_skill_use(p)
+            # Full rescan: back out this file's earlier contribution first.
+            for k, v in prev_counts.items():
+                if k in totals:
+                    totals[k] = max(0, totals[k] - int(v))
+            file_counts: dict[str, int] = {}
         else:
-            # Only read the appended tail. Skip if the appended region is empty.
-            if size == start:
+            file_counts = dict(prev_counts)
+        pairs = []
+        consumed = start
+        if size > start:
+            try:
+                with p.open("rb") as fh:
+                    fh.seek(start)
+                    for raw in fh:
+                        if not raw.endswith(b"\n"):
+                            break  # partial trailing line: rescan next run
+                        consumed += len(raw)
+                        ln = raw.decode("utf-8", errors="replace")
+                        if '"Skill"' not in ln:
+                            continue
+                        if not _SKILL_TOOL_RE.search(ln):
+                            continue
+                        m = _SKILL_FIELD_RE.search(ln)
+                        if not m:
+                            continue
+                        skill = m.group(1)
+                        day = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+                        pairs.append((skill, day))
+            except OSError:
                 pairs = []
-            else:
-                pairs = []
-                try:
-                    with p.open("rb") as fh:
-                        fh.seek(start)
-                        for raw in fh:
-                            try:
-                                ln = raw.decode("utf-8", errors="replace")
-                            except Exception:
-                                continue
-                            if '"Skill"' not in ln:
-                                continue
-                            if not _SKILL_TOOL_RE.search(ln):
-                                continue
-                            m = _SKILL_FIELD_RE.search(ln)
-                            if not m:
-                                continue
-                            skill = m.group(1)
-                            day = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d")
-                            pairs.append((skill, day))
-                except OSError:
-                    pairs = []
+                consumed = start
         if pairs:
             affected_files.add(spath)
         for skill, day in pairs:
             counts[(skill, proj, day)] = counts.get((skill, proj, day), 0) + 1
-        files[spath] = {"size": size, "mtime": mtime}
+            fk = f"{skill}|{proj}|{day}"
+            file_counts[fk] = file_counts.get(fk, 0) + 1
+        files[spath] = {"size": consumed, "mtime": mtime, "counts": file_counts}
 
     touched: dict[str, tuple[str, str, str]] = {}
     for (skill, proj, day), n in counts.items():
@@ -650,9 +660,14 @@ def collect_herdr() -> Iterable[dict]:
         data = json.loads(cp.stdout)
     except Exception:
         return []
-    panes = (data.get("result") or {}).get("panes") or []
+    if not isinstance(data, dict):
+        return []
+    result = data.get("result")
+    panes = (result.get("panes") if isinstance(result, dict) else None) or []
     out: list[dict] = []
     for p in panes:
+        if not isinstance(p, dict):
+            continue
         title = "worker"  # pane titles can carry message text; never send them
         cwd = p.get("cwd") or ""
         status = "running"

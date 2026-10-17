@@ -129,7 +129,7 @@ def iter_runs(root: Path) -> Iterable[dict]:
                 status = "failed"
                 title += " (no exit)"
         yield event(
-            id=make_id(SRC_JDELEGATE, child.name + ":v2"),
+            id=make_id(SRC_JDELEGATE, child.name + ":" + status + ":v2"),
             ts=ts, project=project,
             kind="worker", status=status, title=title,
             ref="", url="", actor="jdelegate", model=model,

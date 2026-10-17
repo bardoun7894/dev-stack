@@ -69,7 +69,7 @@ def parse_session_tasks(path: Path, text: str, project: str) -> Iterable[dict]:
             ts = _ts_from_date_and_time(fdate, hhm2)
             title = f"{body} [evidence: {evidence}]"
             yield event(
-                id=make_id(SRC_TASKS, f"{key_path}:L{ln_no}"),
+                id=make_id(SRC_TASKS, f"{key_path}:L{ln_no}:done"),
                 ts=ts, project=proj, kind="task", status="done",
                 title=title, ref="", url="", actor="owner", model="",
                 source=SRC_TASKS,
@@ -80,7 +80,7 @@ def parse_session_tasks(path: Path, text: str, project: str) -> Iterable[dict]:
             hhm, body = m.groups()
             ts = _ts_from_date_and_time(fdate, hhm)
             yield event(
-                id=make_id(SRC_TASKS, f"{key_path}:L{ln_no}"),
+                id=make_id(SRC_TASKS, f"{key_path}:L{ln_no}:done"),
                 ts=ts, project=proj, kind="task", status="done",
                 title=body, source=SRC_TASKS,
             )
@@ -90,7 +90,7 @@ def parse_session_tasks(path: Path, text: str, project: str) -> Iterable[dict]:
             hhm, body = m.groups()
             ts = _ts_from_date_and_time(fdate, hhm)
             yield event(
-                id=make_id(SRC_TASKS, f"{key_path}:L{ln_no}"),
+                id=make_id(SRC_TASKS, f"{key_path}:L{ln_no}:pending"),
                 ts=ts, project=proj, kind="task", status="pending",
                 title=body, source=SRC_TASKS,
             )

@@ -77,6 +77,12 @@ def cmd_add(args: argparse.Namespace, dry_run: bool) -> int:
         print(f"queued to outbox: {e}", file=sys.stderr)
         return 2  # non-zero so callers can re-run `track flush`
 
+def _rewrite_keep_new(remaining: list[dict], snapshot: list[dict]) -> None:
+    """Rewrite the outbox, preserving events appended since `snapshot` was read."""
+    seen = {e.get("id") for e in snapshot}
+    extras = [e for e in outbox_load() if e.get("id") not in seen]
+    outbox_rewrite(remaining + extras)
+
 def cmd_flush(dry_run: bool) -> int:
     pending = outbox_load()
     if not pending:
@@ -113,12 +119,12 @@ def cmd_flush(dry_run: bool) -> int:
             msg = str(e)
             m = _REJECTED_BODY_RE.search(msg)
             if not m or rejected_count >= REJECT_LIMIT_PER_FLUSH:
-                outbox_rewrite(remaining)
+                _rewrite_keep_new(remaining, pending)
                 print(f"flush failed, kept {len(remaining)}: {msg}", file=sys.stderr)
                 return 2
             idx = int(m.group(1))
             if not (0 <= idx < len(batch)):
-                outbox_rewrite(remaining)
+                _rewrite_keep_new(remaining, pending)
                 print(f"flush failed, bad index in error: {msg}", file=sys.stderr)
                 return 2
             bad = batch[idx]
@@ -129,10 +135,10 @@ def cmd_flush(dry_run: bool) -> int:
             remaining = rest + remaining[len(batch):]
             continue
         except Exception as e:
-            outbox_rewrite(remaining)
+            _rewrite_keep_new(remaining, pending)
             print(f"flush failed, kept {len(remaining)}: {e}", file=sys.stderr)
             return 2
-    outbox_rewrite(remaining)  # empty list clears the outbox
+    _rewrite_keep_new(remaining, pending)  # empty list clears the outbox
     print(json_dumps({"accepted": accepted, "duplicate": duplicate,
                       "rejected": rejected_count, "remaining": len(remaining)}))
     return 0

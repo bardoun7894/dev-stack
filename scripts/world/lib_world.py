@@ -475,7 +475,8 @@ def iter_git_roots(roots: Iterable[str], max_depth: int = 3) -> Iterable[Path]:
             continue
         for cur, dirs, files in _walk(rp, max_depth):
             if ".git" in dirs or (cur / ".git").exists():
-                if looks_like_worktree(cur):
+                # A linked worktree has a .git *file*; its main repo is scanned itself.
+                if (cur / ".git").is_file() or looks_like_worktree(cur):
                     dirs[:] = []
                     continue
                 real = str(cur.resolve())
