@@ -1039,3 +1039,18 @@ process.exit(1);
   assert.ok(Math.abs(Date.parse(j.until) - want) < 120000, j.until);
   assert.ok(Date.parse(j.seen) >= before - 1000);
 });
+
+// F17: agy as a router candidate: a chain-picked agy ref launches on agy with the model from the ref; exhausted agy is skipped.
+const agyChain = join(tmp, 'agy-chain-tiers.json');
+write(agyChain, JSON.stringify({ provider_priority: { agy: 0, cliproxy: 1 }, tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['agy/gemini-test-high', 'cliproxy/claude-test']])) }));
+
+test('F17 routing: an agy ref in a chain launches on the agy harness (no UI work)', () => {
+  jevStub();
+  assert.match(agyRoute(exFile('chain-absent'), [], { JEV_ROUTER_CONFIG: agyChain, UI_ANSWER: '0' }), /→ agy · agy\/gemini-test-high/);
+});
+
+test('F17 routing: an exhausted agy ref in a chain is skipped for the next candidate', () => {
+  jevStub();
+  const out = agyRoute(exFile('chain-future', new Date(Date.now() + 36e5).toISOString()), [], { JEV_ROUTER_CONFIG: agyChain, UI_ANSWER: '0' });
+  assert.match(out, /→ claude · cliproxy\/claude-test/);
+});

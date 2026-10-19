@@ -318,11 +318,11 @@ const PRIORITY = CONFIG.provider_priority ?? { cliproxy: 0, "openai-codex": 0, "
 const provider = (ref) => ref.slice(0, ref.indexOf("/"));
 const alive = (ref) => {
   const now = Date.now();
-  return !(DEAD[ref] > now) && !(EXHAUSTED[provider(ref)] > now);
+  return !(DEAD[ref] > now) && !(EXHAUSTED[provider(ref)] > now) && !(provider(ref) === "agy" && agyExhaustedUntil() > now);
 };
-/** Provider -> worker CLI. Small OpenCode Go models run in opencode itself; pi takes the rest. */
+/** Provider -> worker CLI. Small OpenCode Go models run in opencode itself; agy refs run through the agy relay; pi takes the rest. */
 const harnessFor = (ref) =>
-  ({ cliproxy: "claude", "openai-codex": "codex", "opencode-go": "opencode" })[provider(ref)] ?? "pi";
+  ({ cliproxy: "claude", "openai-codex": "codex", "opencode-go": "opencode", agy: "agy" })[provider(ref)] ?? "pi";
 
 // Quota-aware ranking (tiers.json quota_policy + bin/quota-snapshot). No quota_policy -> the static ranking above.
 const POLICY = CONFIG.quota_policy;
