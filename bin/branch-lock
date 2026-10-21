@@ -60,7 +60,9 @@ OWNER="${AGENT:-$KIND:$TOP}"
 HOST="$(hostname -s 2>/dev/null || hostname)"
 
 if [ -z "$BRANCH" ] && [ "$cmd" != list ] && [ "$cmd" != install-hook ]; then
-  BRANCH="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || die "detached HEAD: pass a branch name"
+  BRANCH="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
+    case "$cmd" in check|status) [ "$cmd" = status ] && echo "detached HEAD: no branch to lock"; exit 0 ;; esac
+    die "detached HEAD: pass a branch name"; }
 fi
 lockfile() { echo "$LOCKDIR/$(printf '%s' "$1" | sed 's#/#__#g').lock"; }
 field() { sed -n "s/^$1=//p" "$2" 2>/dev/null | head -1; }
@@ -149,7 +151,7 @@ case "$cmd" in
     hd="$(git config --get core.hooksPath || true)"
     case "$hd" in "") hd="$COMMON/hooks" ;; "~"*) hd="$HOME${hd#\~}" ;; /*) ;; *) hd="$TOP/$hd" ;; esac
     mkdir -p "$hd"
-    line='command -v branch-lock >/dev/null 2>&1 && { branch-lock check || exit 1; }  # branch-lock guard (BRANCH_LOCK_IGNORE=1 to bypass)'
+    line='if command -v branch-lock >/dev/null 2>&1; then branch-lock check; [ $? -eq 1 ] && exit 1; fi  # branch-lock guard (BRANCH_LOCK_IGNORE=1 to bypass)'
     for h in pre-commit pre-push; do
       f="$hd/$h"
       if [ -f "$f" ] && grep -q 'branch-lock guard' "$f"; then echo "ok      $f"; continue; fi

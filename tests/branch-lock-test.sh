@@ -30,6 +30,7 @@ git config core.hooksPath "$T/hooks"; mkdir -p "$T/hooks"; printf '#!/bin/sh\nec
 ok "install-hook"          '"$BL" install-hook | grep -q added && grep -q "branch-lock guard" "$T/hooks/pre-commit" && grep -q chained "$T/hooks/pre-commit" && [ -x "$T/hooks/pre-push" ]'
 ok "install-hook idempotent" '"$BL" install-hook | grep -q "^ok"'
 ok "pre-commit blocks"     '( cd ../wt2 && echo x>f && git add f && ! CLAUDECODE=1 git commit -qm t 2>/dev/null )'
+ok "detached check ok"     '( cd ../wt2 && git checkout -q --detach && CLAUDECODE=1 "$BL" check; rc=$?; git checkout -q feat; [ $rc = 0 ] )'
 ok "pre-commit allows own" '( cd ../wt2 && git commit -qm t )'
 # Claude hook
 J() { printf '{"cwd":"%s","tool_input":{"command":"%s"}}' "$1" "$2"; }
