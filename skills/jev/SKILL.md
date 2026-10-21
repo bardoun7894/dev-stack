@@ -100,6 +100,11 @@ fallback path for exit ≠ 0. Run `jev --help` for everything.
   T0 means no agent at all — just call `jev`.
 - Never send secrets. Client messages are fine for Jev (it's a decision, not training data on a free tier),
   but keep state to what the question needs.
+  `bin/jev` enforces it: `post()` runs the whole request body (state, questions, any extra field)
+  through `lib/jev_redact.py` and sends nothing if that fails; the decision log stores the redacted
+  copy only (mode 0600); `--state-file` refuses `.env` / key / credential files; the key only goes to
+  https. Check what would leave the machine with `--dry-run` (or `JEV_DRY_RUN=1` for the jev-* tools).
+  Pattern redaction is a safety net, not a licence: don't put credentials in state on purpose.
 
 ## Designing questions (what makes Jev accurate)
 
