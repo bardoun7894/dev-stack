@@ -15,6 +15,7 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 1. Brainstorm options      | `brainstorming` (obra)                                                                 | inline         |
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
 | 2a. Research (mandatory)   | `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher` (one pass, read-only) → `specs/NNN/research.md` | Sonnet (read-only + web) |
+| 2c. System design          | `system-design` → `specs/NNN/system-design.md`, check.sh gate; HARD STOP for owner approval of D/Q codes. Required for new projects and features adding a service/datastore/queue/provider/host | inline         |
 | 3. Architectural plan      | `/kb-spec plan` → `/speckit.plan` → `writing-plans` (obra)                             | inline         |
 | 4. Task breakdown          | `/kb-spec tasks` → `/speckit.tasks`                                                    | inline         |
 | 4b. **Branch (MANDATORY)** | **`git checkout -b <NNN-short-name>` — branch must match the spec dir. Never implement on `main`.** | inline |
@@ -215,6 +216,7 @@ This skips Spec Kit entirely for small-to-medium features. Use the full Spec Kit
 | Trigger phrase (EN)                | Trigger phrase (AR)                          | What kb-dev does                                                  |
 |------------------------------------|----------------------------------------------|-------------------------------------------------------------------|
 | "new feature X"                    | "ميزة جديدة X" / "خاصية جديدة X"             | Run phases 0 → 2a → 4, pause for solo/fan-out decision            |
+| "system design" / "design the system"| "تصميم النظام" / "معمارية النظام" / "صمم النظام قبل البناء" | Run `system-design` (phase 2c), then hard stop for D/Q approval |
 | "build X" / "implement X"          | "ابني X" / "اعمل X" / "نفّذ X" / "صنع X"     | Run phases 0 → 12 (full pipeline)                                 |
 | "implement the spec at specs/NNN"  | "نفّذ المواصفات في specs/NNN"                | Run phase 0, then jump to phase 5, then 6–12                      |
 | "fix bug Y" (< 30 LOC)             | "أصلح خطأ Y" / "صلح Y" / "إصلاح Y"           | Run phase 0, then solo-mode phase 5a straight through to 12       |
@@ -293,6 +295,13 @@ This is the canonical map of how all 39 installed skills relate to each other. k
               │   → specs/NNN/research.md (KB prior art, library docs for   │
               │     repo versions, 2-3 competitors with URLs, risks)        │
               │   Mandatory before Phase 3 design decisions.                │
+              └──────────────────────────────┬───────────────────────────────┘
+                                             │
+                                             ▼
+              ┌──────────────────────────────────────────────────────────────┐
+              │   Phase 2c: System design — system-design skill             │
+              │   → specs/NNN/system-design.md (D-codes, Q-codes, diagrams) │
+              │   HARD STOP: owner approves. New projects + new-infra work. │
               └──────────────────────────────┬───────────────────────────────┘
                                              │
                                              ▼
