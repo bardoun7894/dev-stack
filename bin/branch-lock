@@ -141,7 +141,7 @@ case "$cmd" in
     found=0
     for f in "$LOCKDIR"/*.lock; do
       [ -f "$f" ] || continue; found=1
-      printf '[%s] %s' "$(state_of "$f")" "$(describe "$f")"
+      printf '[%s] %s\n' "$(state_of "$f")" "$(describe "$f")"
     done
     [ "$found" = 1 ] || echo "no locks" ;;
   install-hook)
