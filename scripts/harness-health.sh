@@ -12,6 +12,7 @@ out=$(python3 "$DS/scripts/sync-rules-harnesses.py" 2>&1 | grep -E '^would')
 # 2. Duplicate skills that are copies (not links) with different content
 drift=""; for n in $(find "$H/.claude/skills" "$H/.agents/skills" "$H/.codex/skills" "$H/.gemini/skills" "$H/.gemini/config/skills" "$H/.gemini/antigravity-ide/skills" "$H/.config/opencode/skills" "$H/.opencode/skills" -mindepth 1 -maxdepth 1 2>/dev/null | xargs -n1 basename | sort | uniq -d); do
   hs=$(for d in "$H/.claude/skills" "$H/.agents/skills" "$H/.codex/skills" "$H/.gemini/skills" "$H/.gemini/config/skills" "$H/.gemini/antigravity-ide/skills" "$H/.config/opencode/skills" "$H/.opencode/skills"; do [ -f "$d/$n/SKILL.md" ] && md5 -q "$d/$n/SKILL.md"; done | sort -u | wc -l | tr -d ' ')
+  case $n in impeccable|karpathy-guidelines) continue;; esac  # intentional per-harness variants
   [ "$hs" -gt 1 ] && drift="$drift $n($hs versions)"; done
 [ -z "$drift" ] && ok "skills: no diverged duplicates" || warn "skills diverged:$drift"
 
