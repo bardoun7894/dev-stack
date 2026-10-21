@@ -25,7 +25,9 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 7. Debug if something fails| `systematic-debugging` (obra)                                                          | Sonnet         |
 | 8. Verify before claiming  | `verification-before-completion` (obra); UI change → web: `jev-browse --flows` first (Jev System 1 agent, see `skills/jev/references/e2e-browsing.md`); mobile (Expo/RN): `npx e2e run` (see Phase 8: e2e suites) | Sonnet |
 | 9. Request review          | `jev-review diff` first (System 1 screen): its `route` picks the reviewer alone, plus `/codex`, or plus `/panel`; then `requesting-code-review` (obra) | Sonnet |
+| 9b. PR brief               | When opening the PR: `pr-pipeline` L3 brief (evidence, merge danger, diagram); L2 stays the existing `pr-review` bin. Diffs touching auth, payments or uploads also get `cso` | inline |
 | 10. Apply review           | `receiving-code-review` (obra)                                                         | Sonnet         |
+| 10b. Drift check           | `/direction` (`skills/direction`): report only, owner decides keep+update spec or revert. Run before phase 11 | inline |
 | 11. Finish branch          | `finishing-a-development-branch` (obra) — **always ends in a PR** — optional: `using-git-worktrees` | inline |
 | 12. Capture knowledge      | `/kb-spec post` → `/kb-docs-sync` → `/kb-compile` → `/kb-lint`                         | inline         |
 
@@ -216,12 +218,16 @@ This skips Spec Kit entirely for small-to-medium features. Use the full Spec Kit
 | "build X" / "implement X"          | "ابني X" / "اعمل X" / "نفّذ X" / "صنع X"     | Run phases 0 → 12 (full pipeline)                                 |
 | "implement the spec at specs/NNN"  | "نفّذ المواصفات في specs/NNN"                | Run phase 0, then jump to phase 5, then 6–12                      |
 | "fix bug Y" (< 30 LOC)             | "أصلح خطأ Y" / "صلح Y" / "إصلاح Y"           | Run phase 0, then solo-mode phase 5a straight through to 12       |
+| "are we drifting" / "direction"    | "هل انحرفنا عن الخطة"                        | Run `/direction` (drift.sh, one judge pass, report to `specs/_direction/`) |
+| "retro the week" / after a long run| "راجع الأسبوع"                               | Run `/retro session`; human picks the fixes, never auto-apply     |
 | "ship this branch"                 | "انشر هذا الفرع" / "إطلاق"                   | Run phases 9 → 12                                                 |
 | "debug this"                       | "صحح هذا" / "ابحث عن المشكلة"                | Run `systematic-debugging` directly                               |
 | "brainstorm X"                     | "فكّر في X" / "اقتراحات لـ X"                | Run `brainstorming` directly                                      |
 | "spec out X" / "write a spec for X"| "اكتب مواصفات X" / "حدد X"                   | Run `kb-spec` standalone (phases 0,2,3,4 only — no implementation)|
 
 **Language note:** I (Claude) understand Arabic natively. Even prompts in mixed Arabic/English/French route correctly based on semantic content, not just keyword matching. The hook regex covers the most common Arabic engineering vocabulary as a safety net.
+
+Parked skills (`dogfood`, ...) are read from `~/.claude/skills-parked/<name>/SKILL.md`.
 
 ## What kb-dev explicitly does NOT do
 
