@@ -202,8 +202,11 @@ fi
 [ -s "$tmp/rules.h" ] && cat "$tmp/rules.h" >> "$tmp/rules"
 awk '!seen[$0]++' "$tmp/rules" > "$tmp/rules.u"
 
-# candidate enforcement files
-git ls-files 2>/dev/null | grep -Ei '(^|/)(tests?|__tests__|e2e|spec)/|\.(test|spec)\.[a-z]+$|(^|/)test_[^/]*$|eslint|ruff|\.pre-commit-config|(^|/)\.husky/|(^|/)\.githooks/|(^|/)hooks/|\.github/workflows/|\.gitlab-ci|lint|semgrep|sonar' | head -400 > "$tmp/checks"
+# candidate enforcing files: tests, CI workflows, lint/analyzer configs, hooks. Docs, KB and reports never count.
+git ls-files 2>/dev/null \
+  | grep -Ei '(^|/)tests/|\.(test|spec)\.[a-z]+$|(^|/)test_[^/]*$|Test\.php$|(^|/)\.github/workflows/|(^|/)infra/github/workflows/|(^|/)\.gitlab-ci\.yml$|(^|/)\.?eslint[^/]*$|(^|/)phpstan[^/]*$|(^|/)\.semgrep[^/]*$|(^|/)\.?ruff\.toml$|(^|/)pyproject\.toml$|(^|/)pint\.json$|(^|/)\.husky/|(^|/)\.githooks/|(^|/)\.claude/hooks/|(^|/)lefthook[^/]*$|(^|/)\.pre-commit-config\.yaml$' \
+  | grep -Eiv '(^|/)(ai-knowledge-base|okf|reports|docs|specs|node_modules|vendor)/|\.md$' \
+  | head -400 > "$tmp/checks"
 
 stop=" which their there these those would should could shall about after before every other never always must without within using where while when then than that this with from have been into only also each does done will your ours they them what"
 echo "## Non-negotiables"

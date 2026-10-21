@@ -21,12 +21,14 @@ Agents make building cheap, so every idea becomes a feature. Volume of work says
    bash ~/.claude/skills/direction/scripts/drift.sh <repo> [--since <git-ref>]
    ```
    Default range: merge-base with main/master, else the last 30 commits. Output is markdown: specs with open/done task counts, every commit mapped to a spec (by spec name or number in the subject, files under `specs/<dir>/` (most files wins), a backticked file path in that spec's `tasks.md` (`task-path`), a unique T-number, or the branch name) or `UNMAPPED`. Housekeeping commits (only `ai-knowledge-base/`, `specs/_session/`, `specs/_direction/`, `okf/` or `docs/*.md` files, or subjects `docs(kb)` / `docs(specs)` / `chore(kb)`) get their own HOUSEKEEPING count and are not judged. The non-negotiables are `HAS-CHECK` / `NO-CHECK`.
-   The check match is a keyword heuristic over tests, lint configs, hooks and CI files. Open the named file before trusting a HAS-CHECK.
+   The check match is a keyword heuristic over candidate files only: tests, CI workflows, lint/analyzer configs and hooks. Docs, `*.md`, `ai-knowledge-base/`, `okf/`, `reports/`, `specs/` and `node_modules/`/`vendor/` never count as a check.
 2. ONE judge pass over the `UNMAPPED` commits only (not the mapped ones). Read the commit subject and file list, and the spec titles. Label each: `in plan` (covered by a spec, just not referenced), `out of plan`, or `unclear`. Do not read whole diffs unless a label is truly unclear.
+   Also open each HAS-CHECK file named in the non-negotiables table and confirm it actually enforces that rule. If it only mentions the keywords, report that rule as WEAK-CHECK, not HAS-CHECK.
 3. Scorecard:
    - on-plan % = (mapped + `in plan`) / (total commits - housekeeping)
    - unmapped work: count of `out of plan` and `unclear`
    - NO-CHECK non-negotiables: list them
+   - WEAK-CHECK non-negotiables: list them, with the file that only mentions the rule
 4. Actions, per `out of plan` item: keep and update the spec (name the spec and the line to add), or revert (name the commits). Per NO-CHECK rule: propose the cheapest enforcing check (test, lint rule, hook, CI step).
 5. Save the full report (script output + judgement + scorecard + actions) to `specs/_direction/<YYYY-MM-DD>.md` in the target repo.
 

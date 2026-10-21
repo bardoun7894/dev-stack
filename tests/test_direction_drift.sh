@@ -12,12 +12,16 @@ cat > CLAUDE.md <<'MD'
 ## Non-negotiable rules
 - Passwords must be hashed with bcrypt before storage
 - Invoices must never be deleted, only voided
+- Refunds must be audited in the ledger
 MD
 printf '# Feature Specification: Login flow\n' > specs/001-login-flow/spec.md
 printf -- '- [x] T001 form\n- [ ] T002 hashing\n' > specs/001-login-flow/tasks.md
 printf '# Feature Specification: Billing\n' > specs/002-billing/spec.md
 printf -- '- [ ] T010 invoices\n- [ ] T011 ledger in `src/billing/invoice.ts`\n' > specs/002-billing/tasks.md
 echo "assert passwords hashed with bcrypt before storage" > tests/auth.test.js
+mkdir -p ai-knowledge-base/scripts reports
+echo "refunds are audited in the ledger" > reports/lint-2026-10-03.md
+echo "refunds audited ledger" > ai-knowledge-base/scripts/lint.py
 git add -A && git commit -qm "chore: base"
 git checkout -q -b 001-login-flow
 echo a > a.txt && git add -A && git commit -qm "feat: 001-login-flow form"
@@ -35,6 +39,7 @@ case "$out" in *"random dark mode toggle | UNMAPPED"*) ;; *) bad "unmapped not f
 case "$out" in *"- commits: 1, mapped to a spec: 0, housekeeping: 0, UNMAPPED: 1"*) ;; *) bad "summary scratch";; esac
 case "$out" in *"bcrypt before storage"*"HAS-CHECK"*"tests/auth.test.js"*) ;; *) bad "HAS-CHECK";; esac
 case "$out" in *"never be deleted, only voided"*"NO-CHECK"*) ;; *) bad "NO-CHECK";; esac
+case "$out" in *"Refunds must be audited in the ledger | CLAUDE.md | NO-CHECK"*) ;; *) bad "md + ai-knowledge-base mention must be NO-CHECK: $out";; esac
 
 git checkout -q 001-login-flow
 out=$(bash "$SH" "$R" --since main 2>&1)
