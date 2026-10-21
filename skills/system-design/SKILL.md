@@ -1,6 +1,6 @@
 ---
 name: system-design
-description: Write specs/NNN/system-design.md before a project or feature is built (after spec.md + research.md, before /kb-spec plan + /speckit.plan), then hard-stop for owner approval of the D-codes and Q-codes. Triggers on "system design", "design the system", "architecture before we build", "/system-design", and Arabic "تصميم النظام", "معمارية النظام", "صمم النظام قبل البناء". Required for every new project and any feature that adds a service, datastore, queue, external provider or host. Skip for UI-only or small features.
+description: Write specs/NNN/system-design.md before a new app/project is built (after spec.md + research.md, before /kb-spec plan + /speckit.plan), then hard-stop for owner approval of the D-codes and Q-codes. Triggers on "system design", "design the system", "architecture before we build", "/system-design", and Arabic "تصميم النظام", "معمارية النظام", "صمم النظام قبل البناء". Runs only for new apps/projects (owner rule 2026-10-21); never for features in an existing app, even ones adding a service or datastore.
 allowed-tools: Bash Read Write Edit Glob Grep Skill
 ---
 
@@ -23,8 +23,7 @@ cites.
 ## When to run
 
 - Every NEW project (owner rule: new project = folder + kb-dev + specs).
-- Any feature that adds a new service, datastore, queue, external provider, or host.
-- Skip: UI-only changes, copy changes, small features inside existing components.
+- Skip: every feature or change inside an existing app (owner rule 2026-10-21).
 
 ## Pick the size
 

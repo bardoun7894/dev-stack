@@ -81,7 +81,7 @@ kb-dev                       → kb-query                          [phase 0 — 
 kb-query                     → brainstorming                     [phase 0 → 1]
 brainstorming                → kb-spec pre                       [phase 1 → 2]
 kb-spec pre                  → /speckit.specify                  [phase 2 — spec authoring]
-/speckit.specify             → system-design                     [phase 2 → 2c — new project / new infra]
+/speckit.specify             → system-design                     [phase 2 → 2c — new apps only]
 kb-dev                       → system-design                     [phase 2c — hard stop for owner approval]
 system-design                → fusion                            [one /opinion on load-bearing decisions]
 system-design                → kb-spec plan                      [phase 2c → 3 — after owner approves D/Q codes]

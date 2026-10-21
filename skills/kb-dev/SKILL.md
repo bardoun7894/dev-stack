@@ -15,7 +15,7 @@ This skill is the **single entry point** for any non-trivial engineering task. I
 | 1. Brainstorm options      | `brainstorming` (obra)                                                                 | inline         |
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
 | 2a. Research (mandatory)   | `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher` (one pass, read-only) → `specs/NNN/research.md` | Sonnet (read-only + web) |
-| 2c. System design          | `system-design` → `specs/NNN/system-design.md`, check.sh gate; HARD STOP for owner approval of D/Q codes. Required for new projects and features adding a service/datastore/queue/provider/host | inline         |
+| 2c. System design          | `system-design` → `specs/NNN/system-design.md`, check.sh gate; HARD STOP for owner approval of D/Q codes. New apps/projects only; skip for features in existing apps | inline         |
 | 3. Architectural plan      | `/kb-spec plan` → `/speckit.plan` → `writing-plans` (obra)                             | inline         |
 | 4. Task breakdown          | `/kb-spec tasks` → `/speckit.tasks`                                                    | inline         |
 | 4b. **Branch (MANDATORY)** | **`git checkout -b <NNN-short-name>` — branch must match the spec dir. Never implement on `main`.** | inline |

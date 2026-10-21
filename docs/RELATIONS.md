@@ -45,7 +45,7 @@ an explicit standalone branch. Nothing is orphaned. Nothing duplicates.
 | 0   | Ground in prior art         | `/kb-query`                                                           | yes → 1                               |
 | 1   | Brainstorm                  | `brainstorming`                                                       | yes → 2                               |
 | 2   | Pre-spec KB research        | `/kb-spec pre` → `/speckit.specify` → `spec.md`                       | yes → 3                               |
-| 2c  | System design (hard stop)   | `system-design` → `system-design.md` (fusion /opinion once)           | no: owner approves D/Q codes → 3      |
+| 2c  | System design (hard stop)   | `system-design` (new apps only) → `system-design.md` (fusion /opinion once)           | no: owner approves D/Q codes → 3      |
 | 3   | Architectural plan          | `/kb-spec plan` → `/speckit.plan` → `writing-plans` → `plan.md`       | yes → 4                               |
 | 4   | Task breakdown              | `/kb-spec tasks` → `/speckit.tasks` → `tasks.md`                      | yes → 5 (decision: solo vs fan-out)   |
 | 5a  | Implement (solo)            | `executing-plans` in current session                                  | yes → 6                               |
