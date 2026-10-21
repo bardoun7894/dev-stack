@@ -70,17 +70,41 @@ echo
 # ---- commits ----
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 git log --no-merges --name-only --format='@@%h%x09%s' $logargs 2>/dev/null > "$tmp/log"
-total=0; mapped=0
-: > "$tmp/rows"; : > "$tmp/unmapped"
+total=0; mapped=0; housekeeping=0
+: > "$tmp/rows"; : > "$tmp/unmapped"; : > "$tmp/hkrows"
 # current branch equals a spec dir => branch mapping
 branch_spec=""
 printf '%s' "$specs" | cut -f1 > "$tmp/specnames"
 while IFS= read -r n; do [ "$n" = "$branch" ] && branch_spec="$n"; done < "$tmp/specnames"
+# task-path: exact file paths in backticks in specs/<n>/tasks.md (>=2 segments, has an extension)
+: > "$tmp/taskpaths"
+while IFS= read -r n; do
+  [ -n "$n" ] && [ -f "specs/$n/tasks.md" ] || continue
+  awk '{ k=split($0,a,"`"); for(i=2;i<=k;i+=2) if (a[i] ~ /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)+\.[A-Za-z0-9]+$/) print a[i] }' "specs/$n/tasks.md" | sort -u | awk -v s="$n" '{print s "\t" $0}' >> "$tmp/taskpaths"
+done < "$tmp/specnames"
 
 flush() {
   [ -n "${sha:-}" ] || return 0
   total=$((total+1))
   lsub=$(printf '%s' "$subj" | tr '[:upper:]' '[:lower:]')
+  nf=$(printf '%s' "$files" | grep -c .)
+  fl=$(printf '%s' "$files" | grep . | head -4 | tr '\n' ' ')
+  [ "$nf" -gt 4 ] && fl="$fl(+$((nf-4)) more)"
+  printf '%s' "$files" > "$tmp/cfiles"
+  # housekeeping first: not drift, own bucket, never sent to the judge
+  hk=0
+  case "$lsub" in docs\(kb\)*|docs\(specs\)*|chore\(kb\)*) hk=1 ;; esac
+  if [ "$hk" = 0 ] && [ "$nf" -gt 0 ]; then
+    hk=1
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      case "$f" in ai-knowledge-base/*|specs/_session/*|specs/_direction/*|okf/*|docs/*.md) ;; *) hk=0; break ;; esac
+    done < "$tmp/cfiles"
+  fi
+  if [ "$hk" = 1 ]; then
+    housekeeping=$((housekeeping+1)); echo "| $sha | $subj | HOUSEKEEPING | $fl |" >> "$tmp/hkrows"
+    return 0
+  fi
   hit="" how=""
   while IFS= read -r n; do
     [ -n "$n" ] || continue
@@ -88,8 +112,12 @@ flush() {
     num=$(printf '%s' "$n" | sed -n 's/^\([0-9][0-9]*\)-.*/\1/p')
     case "$lsub" in *"$ln"*) hit="$n"; how="subject"; break ;; esac
     if [ -n "$num" ] && printf '%s' "$lsub" | grep -Eq "(^|[^0-9])(spec[ -]?)?0*$num([^0-9]|$)" && printf '%s' "$lsub" | grep -Eq "spec|$num-|$num:|\\[$num\\]"; then hit="$n"; how="spec-id"; break; fi
-    case "$files" in *"specs/$n/"*) hit="$n"; how="files"; break ;; esac
   done < "$tmp/specnames"
+  # spec-files: the spec dir holding the most of this commit's files (ties: first by name)
+  if [ -z "$hit" ]; then
+    hit=$(awk -v names="$tmp/specnames" 'BEGIN{while((getline l < names)>0) ok[l]=1} /^specs\// {split($0,p,"/"); if (p[2] in ok) c[p[2]]++} END{for(s in c) print c[s], s}' "$tmp/cfiles" | sort -k1,1nr -k2,2 | head -1 | awk '{print $2}')
+    [ -n "$hit" ] && how="spec-files"
+  fi
   if [ -z "$hit" ]; then
     tid=$(printf '%s' "$subj" | grep -Eo '\bT[0-9]{2,4}\b' | head -1)
     if [ -n "$tid" ]; then
@@ -100,10 +128,12 @@ flush() {
       [ "$cnt" = 1 ] && { hit="$cand"; how="T-number $tid"; }
     fi
   fi
+  # task-path: a commit file is an exact backticked path in one spec's tasks.md (most files wins)
+  if [ -z "$hit" ]; then
+    hit=$(awk -F'\t' 'FNR==NR {want[$0]=1; next} ($2 in want) && !seen[$1 SUBSEP $2]++ {c[$1]++} END{for(s in c) print c[s], s}' "$tmp/cfiles" "$tmp/taskpaths" | sort -k1,1nr -k2,2 | head -1 | awk '{print $2}')
+    [ -n "$hit" ] && how="task-path"
+  fi
   if [ -z "$hit" ] && [ -n "$branch_spec" ]; then hit="$branch_spec"; how="branch"; fi
-  nf=$(printf '%s' "$files" | grep -c .)
-  fl=$(printf '%s' "$files" | grep . | head -4 | tr '\n' ' ')
-  [ "$nf" -gt 4 ] && fl="$fl(+$((nf-4)) more)"
   if [ -n "$hit" ]; then
     mapped=$((mapped+1)); echo "| $sha | $subj | $hit ($how) | $fl |" >> "$tmp/rows"
   else
@@ -124,10 +154,18 @@ flush
 
 echo "## Commits"
 echo
-if [ "$total" = 0 ]; then echo "No commits in range."; else
+if [ "$((total-housekeeping))" = 0 ]; then echo "No commits in range outside housekeeping."; else
   echo "| sha | subject | spec | files |"
   echo "|---|---|---|---|"
   cat "$tmp/rows"
+fi
+echo
+echo "## Housekeeping (not drift, not sent to the judge)"
+echo
+if [ "$housekeeping" = 0 ]; then echo "none"; else
+  echo "| sha | subject | bucket | files |"
+  echo "|---|---|---|---|"
+  cat "$tmp/hkrows"
 fi
 echo
 echo "## UNMAPPED commits (for the judge pass)"
@@ -200,6 +238,6 @@ fi
 echo
 echo "## Summary"
 echo
-if [ "$total" -gt 0 ]; then pct=$((mapped*100/total)); else pct=100; fi
-echo "- commits: $total, mapped to a spec: $mapped, UNMAPPED: $((total-mapped))"
-echo "- mechanical on-plan: $pct%"
+if [ "$((total-housekeeping))" -gt 0 ]; then pct=$((mapped*100/(total-housekeeping))); else pct=100; fi
+echo "- commits: $total, mapped to a spec: $mapped, housekeeping: $housekeeping, UNMAPPED: $((total-mapped-housekeeping))"
+echo "- mechanical on-plan: $pct% (mapped / (commits - housekeeping))"

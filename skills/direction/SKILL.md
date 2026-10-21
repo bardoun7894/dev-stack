@@ -20,11 +20,11 @@ Agents make building cheap, so every idea becomes a feature. Volume of work says
    ```bash
    bash ~/.claude/skills/direction/scripts/drift.sh <repo> [--since <git-ref>]
    ```
-   Default range: merge-base with main/master, else the last 30 commits. Output is markdown: specs with open/done task counts, every commit mapped to a spec (by spec name or number in the subject, files under `specs/<dir>/`, a unique T-number, or the branch name) or `UNMAPPED`, and the non-negotiables with `HAS-CHECK` / `NO-CHECK`.
+   Default range: merge-base with main/master, else the last 30 commits. Output is markdown: specs with open/done task counts, every commit mapped to a spec (by spec name or number in the subject, files under `specs/<dir>/` (most files wins), a backticked file path in that spec's `tasks.md` (`task-path`), a unique T-number, or the branch name) or `UNMAPPED`. Housekeeping commits (only `ai-knowledge-base/`, `specs/_session/`, `specs/_direction/`, `okf/` or `docs/*.md` files, or subjects `docs(kb)` / `docs(specs)` / `chore(kb)`) get their own HOUSEKEEPING count and are not judged. The non-negotiables are `HAS-CHECK` / `NO-CHECK`.
    The check match is a keyword heuristic over tests, lint configs, hooks and CI files. Open the named file before trusting a HAS-CHECK.
 2. ONE judge pass over the `UNMAPPED` commits only (not the mapped ones). Read the commit subject and file list, and the spec titles. Label each: `in plan` (covered by a spec, just not referenced), `out of plan`, or `unclear`. Do not read whole diffs unless a label is truly unclear.
 3. Scorecard:
-   - on-plan % = (mapped + `in plan`) / total commits
+   - on-plan % = (mapped + `in plan`) / (total commits - housekeeping)
    - unmapped work: count of `out of plan` and `unclear`
    - NO-CHECK non-negotiables: list them
 4. Actions, per `out of plan` item: keep and update the spec (name the spec and the line to add), or revert (name the commits). Per NO-CHECK rule: propose the cheapest enforcing check (test, lint rule, hook, CI step).
