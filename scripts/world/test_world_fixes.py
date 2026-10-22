@@ -25,6 +25,7 @@ def load_script(name):
 
 
 world_push = load_script("world-push")
+import world_push_sources as wps  # noqa: E402
 track = load_script("track")
 
 
@@ -140,6 +141,30 @@ class TokenFile(unittest.TestCase):
         plist = (HERE / "dev.mbardouni.world-push.plist").read_text()
         self.assertIn("<key>WORLD_TOKEN_FILE</key>", plist)
         self.assertNotIn("<key>WORLD_TOKEN</key>", plist)
+
+
+class PrIds(unittest.TestCase):
+    def collect(self, state, merged=False):
+        pr = {"repository": {"nameWithOwner": "o/r"}, "number": 7, "state": state,
+              "createdAt": "2026-10-01T00:00:00Z", "url": "u"}
+
+        def fake_json(args, *a, **k):
+            if "--merged" in args:
+                return [pr] if merged else []
+            return [pr]
+        with mock.patch.object(wps, "_PENDING_STATE", {}), \
+                mock.patch.object(wps, "STATE_DIR", Path(tempfile.mkdtemp(prefix="worldpr."))):
+            def fake_run(cmd, *a, **k):
+                return mock.Mock(returncode=0, stdout=__import__("json").dumps(fake_json(cmd)))
+            with mock.patch.object(wps.subprocess, "run", fake_run):
+                return list(wps.collect_prs())
+
+    def test_state_change_gets_a_new_id(self):
+        a = self.collect("open")
+        b = self.collect("closed", merged=True)
+        self.assertEqual((a[0]["kind"], b[0]["kind"]), ("pr", "merge"))
+        self.assertNotEqual(a[0]["id"], b[0]["id"])
+        self.assertEqual(self.collect("open")[0]["id"], a[0]["id"])  # same state, same id
 
 
 if __name__ == "__main__":

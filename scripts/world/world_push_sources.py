@@ -358,7 +358,9 @@ def collect_prs() -> Iterable[dict]:
         else:
             kind, status = "pr", "pending"
         out.append(event(
-            id=make_id(SRC_PR, f"{repo}#{num}"),
+            # State is part of the id: the server dedupes by id, so with just repo#num an
+            # open -> merged/closed change was dropped as a duplicate and never shown.
+            id=make_id(SRC_PR, f"{repo}#{num}:{kind}:{status}"),
             ts=ts, project=proj, kind=kind, status=status,
             title=title, ref=str(num),
             url=pr.get("url") or "", actor="owner",
