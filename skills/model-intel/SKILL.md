@@ -27,7 +27,7 @@ python3 -I scripts/fetch.py                                      # snapshot only
 python3 -I scripts/diff.py                                       # latest vs previous
 python3 -I scripts/recommend.py                                  # reachable.json + recommendations.md
 python3 -I scripts/render_picks.py                               # ~/.claude/reference/model-picks.md (MODEL_PICKS_OUT overrides)
-python3 -I scripts/propose_tiers.py --dry-run                    # what would change; no write
+python3 -I scripts/propose_tiers.py --dry-run                    # what would change; no write, no live probe
 MODEL_INTEL_TIERS=/tmp/tiers.json python3 -I scripts/propose_tiers.py   # test on a copy, never the real file
 ```
 

@@ -65,5 +65,40 @@ class Backups(ProposeCase):
         self.assertNotIn("opencode-go/newmodel", b1.read_text())        # original backup untouched
 
 
+class DryRunAndProbe(ProposeCase):
+    def test_dry_run_never_probes(self):
+        cand = row("newmodel", "New Model", "medium", 45.0, 0.40, 90)
+        auto, props = self.go(cand, probe=None)
+        self.assertEqual(auto, [])
+        self.assertTrue(props and all("dry-run" in p["reason"] for p in props if "would probe" in p["reason"]))
+        self.assertTrue(any("would probe" in p["reason"] for p in props))
+
+    def test_cli_dry_run_does_not_call_the_probe(self):
+        called = []
+        orig = propose_tiers.default_probe
+        propose_tiers.default_probe = lambda m: called.append(m) or True
+        self.addCleanup(setattr, propose_tiers, "default_probe", orig)
+        self.t["kinds"] = {}
+        self.tiers.write_text(json.dumps(self.t, indent=2))
+        rows = [self.inc, row("newmodel", "New Model", "medium", 45.0, 0.40, 90)]
+        reach = {"models": {r["key"]: r["reach"] for r in rows}}
+        from unittest import mock
+        with mock.patch.object(propose_tiers.recommend, "build_reachable", lambda: reach), \
+                mock.patch.object(propose_tiers.recommend, "load_llm", lambda r: rows), \
+                mock.patch.object(propose_tiers.mi, "latest_dir", lambda: self.data):
+            before = self.tiers.read_text()
+            self.assertEqual(propose_tiers.main(["--dry-run"]), 0)
+            self.assertEqual((called, self.tiers.read_text()), ([], before))
+            self.assertEqual(propose_tiers.main([]), 2)
+            self.assertTrue(called)
+
+    def test_probe_exception_is_a_failed_probe(self):
+        def boom(m):
+            raise TimeoutError("90 s")
+        auto, props = self.go(row("newmodel", "New Model", "medium", 45.0, 0.40, 90), probe=boom)
+        self.assertEqual(auto, [])
+        self.assertTrue(any("probe failed" in p["reason"] for p in props))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ Auto-apply only when ALL hold for a candidate:
   - passes a live probe
 Applied = candidate inserted ahead of the incumbent (incumbent stays as fallback), after a .bak-model-intel-DATE
 backup; validated with jq and the jdelegate dry-run, restored on failure. Everything else -> data/proposals/DATE.md.
-Exit: 0 nothing applied, 2 applied, 1 error.   Usage: propose_tiers.py [--dry-run]
+Exit: 0 nothing applied, 2 applied, 1 error.   Usage: propose_tiers.py [--dry-run]  (--dry-run: no probe, no write)
 Env: MODEL_INTEL_TIERS (tiers.json path), MODEL_INTEL_PROBE=ok|fail (test override), MODEL_INTEL_VALIDATE_CMD.
 """
 import importlib.util, json, os, re, shutil, subprocess, sys
@@ -151,7 +151,14 @@ def decide(tiers, rows, reach, probe, today=None):
         elif no_speed:
             reasons.append("speed data missing")
         if not reasons and sub is not None:
-            ok = probe(sub["id"])
+            if probe is None:  # --dry-run: no live provider call; report what a real run would try
+                props.append(dict(info, reason="dry-run: would probe, then auto-apply if it passes"))
+                continue
+            try:
+                ok = probe(sub["id"])
+            except Exception as e:  # pi missing, timeout, ...: a failed probe, not a crashed run
+                print(f"propose: probe {sub['id']} raised {type(e).__name__}: {e}", file=sys.stderr)
+                ok = False
             if ok:
                 auto.append(info)
                 continue
@@ -269,7 +276,7 @@ def main(argv):
     tiers = json.load(open(mi.TIERS))
     reach = recommend.build_reachable()
     rows = recommend.load_llm(reach)
-    auto, props = decide(tiers, rows, reach, default_probe)
+    auto, props = decide(tiers, rows, reach, None if dry else default_probe)
     auto = cap_changes(auto)
     applied, backup = [], None
     if auto and not dry:
