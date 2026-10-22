@@ -10,7 +10,7 @@ Two layers:
   2. Text: every string is scanned for known credential formats (OpenAI/OpenRouter/Anthropic
      `sk-...`, GitHub `ghp_`/`github_pat_`, AWS `AKIA`, Slack `xox*`, Google `AIza`, Stripe,
      Hugging Face, npm, GitLab, JWTs, PEM private keys), bearer/basic auth headers,
-     credentials in URLs, secret-named KEY=VALUE assignments, and long high-entropy tokens.
+     credentials in URLs, curl -u user:pass, secret-named KEY=VALUE assignments, and long high-entropy tokens.
 
 Masks keep the shape a reviewer needs ("OPENROUTER_API_KEY=[REDACTED]", "Bearer [REDACTED]")
 and drop the value. Variable names stay visible; values never do.
@@ -49,6 +49,10 @@ _PATTERNS = [
     (re.compile(r"(?i)([?&](?:access_token|refresh_token|id_token|token|api[_-]?key|apikey|key|secret|"
                 r"client_secret|password|passwd|sig|signature|auth|code)=)([^&\s#\"'<>]+)"),
      lambda m: f"{m.group(1)}{MASK}"),
+    # curl basic auth on the command line: curl ... -u user:pass / --user "user:pass" (gitleaks curl-auth-user).
+    (re.compile(r"""(?i)(\bcurl\b[^\n]{0,4000}?\s(?:-u|--user)(?:=|[ \t]{0,5}))(\\?["']?)"""
+                r"""([^\s"'\\:]{3,}:[^\s"'\\]{3,}|:[^\s"'\\]{3,}|[^\s"'\\:]{3,}:)"""),
+     lambda m: f"{m.group(1)}{m.group(2)}{MASK}"),
     # Known vendor key formats.
     (re.compile(r"\bsk-(?:or-|ant-|proj-|svcacct-|admin-)?[A-Za-z0-9_-]{16,}"), MASK),  # OpenAI/OpenRouter/Anthropic
     (re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}"), MASK),               # Stripe

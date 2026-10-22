@@ -82,6 +82,18 @@ class RedactTest(unittest.TestCase):
         self.assertEqual(red.redact({"criteria": {"token": "a label about tokens"}, "max_tokens": "1000"}),  # secret-scan:allow (test fixture)
                          {"criteria": {"token": "a label about tokens"}, "max_tokens": "1000"})  # secret-scan:allow (test fixture)
 
+    def test_curl_basic_auth_is_masked(self):
+        user, pw = "deploy" + "bot", "Fake" + "Pass" + "w0rd99"
+        for cmd in (f"curl -s -u {user}:{pw} https://example.test/api",  # fake test value, gitleaks:allow secret-scan:allow
+                    f'curl --user "{user}:{pw}" https://example.test',  # fake test value, gitleaks:allow secret-scan:allow
+                    f"curl --user={user}:{pw} https://example.test",  # fake test value, gitleaks:allow secret-scan:allow
+                    json.dumps({"state": f"ran curl -u '{user}:{pw}' x"})):  # fake test value, gitleaks:allow secret-scan:allow
+            out = red.redact_text(cmd)
+            self.assertNotIn(pw, out, cmd)
+            self.assertIn(red.MASK, out)
+        self.assertEqual(red.redact_text("curl -I https://example.test -o out.txt"),
+                         "curl -I https://example.test -o out.txt")
+
     def test_sensitive_paths(self):
         for p in (".env", "app/.env.production", "/home/u/.ssh/id_ed25519", "k.pem", "~/.aws/credentials",
                   "~/.local/share/opencode/auth.json", ".npmrc", "credentials-prod.json"):
