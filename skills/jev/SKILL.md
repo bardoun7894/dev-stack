@@ -17,10 +17,10 @@ Jev (TypeSafe "System One", OpenRouter `typesafe/jev-1.13`) takes **state + name
 | a label, yes/no, probability, score, routing target, model tier | **Jev** |
 | an internal summary/digest of public data | free model (`deepseek/deepseek-v4-flash-0731:free`) |
 | text a client/recruiter/public reads, or image understanding | Claude Sonnet 5 / Haiku 4.5 |
-| computer use, browser/e2e testing, running tests, QA | Claude Haiku 5.5 (`cliproxy/claude-haiku-5-5`, kind `test`) |
-| Arabic text (translate, write, correct) | GPT-6 Luna (`kinds.language`; Arabic only, never code or other work) |
-| code, debugging, multi-file work | Claude Opus 5 |
-| the hardest long-horizon work / GUI control | Fable 5.1 / GPT-6 Astra |
+| computer use, browser/e2e testing, running tests, QA | Claude Haiku 5.5 for running and reading (`cliproxy/claude-haiku-5-5`, kind `test` T0-T2); Sonnet 5.5 for debugging and fixing (T3), then Opus 5.5 -> Gemini 4 Argon -> Grok 4.7 |
+| Arabic text (translate, write, correct) | Claude Sonnet 5.5 (Haiku 5.5 for short text), Gemini 4 Argon fallback (`kinds.language`); no OpenAI (owner 2026-10-22) |
+| code, debugging, multi-file work | Claude Sonnet 5.5 (frontend at xhigh); Opus 5.5 takes the task back when a worker fails |
+| the hardest long-horizon work / GUI control | Claude Opus 5.5; long builds and parallel fan-out: Grok 4.7; >500k-context reads: Gemini 4 Argon |
 
 Not sure? `jev route "<task>"` answers with the tier (`T0`–`T4`) and a model.
 
@@ -62,7 +62,7 @@ Where the loops run in dev-stack:
 |---|---|---|---|
 | Every prompt | `jev-skill-suggest` picks at most one relevant skill | Claude uses it or ignores it | `skill-suggest` |
 | Orchestrator | Step 3b sizes each packet (trivial…hard) | spawns the right model | `orchestrator` |
-| Code review | `jev-review diff` flags risky hunks | reviewer / `/codex` / `/panel` read only those | `review` |
+| Code review | `jev-review diff` flags risky hunks | Opus 5.5 reviewer (xhigh) / Gemini 4 Argon second opinion / `/panel` read only those | `review` |
 | Lint / scan | `jev-review lint`, `jev-review scan` | Haiku 5.5 (tests/QA) or Opus fix the shortlist | `lint`, `scan` |
 | Browser / e2e | checkpoint verdict + cause | `jev-browse` picks each action; Haiku 5.5 runs the browser/e2e steps, Claude fixes failures | `browse` |
 | Driving an agent (`drive-screen`) | `jev_gate.py` reads a herdr pane: prompt / working / idle / dialog / exited + in-project | `autodrive.py --herdr` approves safe prompts; anything else stops for a human | `drive-screen` |
