@@ -1,43 +1,41 @@
-# http.server pid=451071 port=46351 dir=/tmp/webmcp-e2e/demo
-# A (flag on): chrome pid=451117 cdp=33107 flag=true
-# page diagnostics: {"readyState":"complete","status":"active","modelContext":"object","url":"http://127.0.0.1:46351/index.html","exceptions":[],"console":[]}
+# http.server pid=399292 port=33931 dir=/root/pr-fixes/dev-stack/skills/webmcp/references/e2e-2026-10-12/demo
+# A (flag on): chrome pid=399301 cdp=36819 flag=true
+# page diagnostics: {"readyState":"complete","status":"active","modelContext":"object","url":"http://127.0.0.1:33931/index.html","exceptions":[],"console":[]}
 [PASS] page registered its tools (window.__toolsReady)
 [PASS] flag on: typeof document.modelContext === "object"
 # listed tools (CDP WebMCP.toolsAdded):
-  {"name":"add_to_cart","description":"Add a course to the cart by id. Returns the updated cart.","annotations":{"readOnly":false,"untrustedContent":false,"consequential":true,"debugging":false},"inputSchema":{"type":"object","properties":{"courseId":{"type":"string","description":"Course id such as c101"}},"required":["courseId"]},"frameId":"EEB995FA243CEFBBB3226C71A28CB092"}
-  {"name":"contact_form","description":"Send a message to the course advisors. Returns a confirmation with the sender name.","annotations":{"autosubmit":true},"inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Full name of the sender"},"email":{"type":"string","description":"Sender email address"},"message":{"type":"string","description":"Message body for the advisors"}},"required":["name","email"]},"frameId":"EEB995FA243CEFBBB3226C71A28CB092","backendNodeId":1}
-  {"name":"search_courses","description":"Search the course catalog by title text. Returns {count, courses:[{id,title,level}]} and shows them in the results list.","annotations":{"readOnly":true,"untrustedContent":false,"consequential":false,"debugging":false},"inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Text to match in course titles"}},"required":["query"]},"frameId":"EEB995FA243CEFBBB3226C71A28CB092"}
+  {"name":"add_to_cart","description":"Add a course to the cart by id. Returns the updated cart.","annotations":{"readOnly":false,"untrustedContent":false,"consequential":true,"debugging":false},"inputSchema":{"type":"object","properties":{"courseId":{"type":"string","description":"Course id such as c101"}},"required":["courseId"]},"frameId":"BBEEE50926BBEF9CE788F57FEB57E578"}
+  {"name":"contact_form","description":"Send a message to the course advisors. Returns a confirmation with the sender name.","annotations":{"autosubmit":true},"inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Full name of the sender"},"email":{"type":"string","description":"Sender email address"},"message":{"type":"string","description":"Message body for the advisors"}},"required":["name","email"]},"frameId":"BBEEE50926BBEF9CE788F57FEB57E578","backendNodeId":1}
+  {"name":"search_courses","description":"Search the course catalog by title text. Returns {count, courses:[{id,title,level}]} and shows them in the results list.","annotations":{"readOnly":true,"untrustedContent":false,"consequential":false,"debugging":false},"inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Text to match in course titles"}},"required":["query"]},"frameId":"BBEEE50926BBEF9CE788F57FEB57E578"}
 [PASS] WebMCP.enable lists exactly 3 tools :: ["add_to_cart","contact_form","search_courses"]
 [PASS] annotation map: search_courses readOnly=true :: {"readOnly":true,"untrustedContent":false,"consequential":false,"debugging":false}
 [PASS] annotation map: add_to_cart consequential=true :: {"readOnly":false,"untrustedContent":false,"consequential":true,"debugging":false}
 [PASS] contact_form is declarative (has backendNodeId) :: 1
-# invokeTool search_courses {"query":"IELTS"} -> invocationId=92BB6932F077AEB8FC89CE4701C6517A
+# invokeTool search_courses {"query":"IELTS"} -> invocationId=2AC35E6E2AB18A69D4C414EEFE2E7582
   response: {"status":"Completed","output":{"content":[{"type":"text","text":"{\"count\":2,\"courses\":[{\"id\":\"c101\",\"title\":\"IELTS Academic Preparation\",\"level\":\"B2\"},{\"id\":\"c102\",\"title\":\"IELTS General Writing Workshop\",\"level\":\"B1\"}]}"}],"isError":false,"parsed":{"count":2,"courses":[{"id":"c101","title":"IELTS Academic Preparation","level":"B2"},{"id":"c102","title":"IELTS General Writing Workshop","level":"B1"}]}}}
   DOM #results: "c101 - IELTS Academic Preparation (B2)\nc102 - IELTS General Writing Workshop (B1)"
 [PASS] search_courses invoked, status Completed, 2 IELTS courses returned :: status=Completed count=2
 [PASS] page reacted: #results shows both IELTS courses :: "c101 - IELTS Academic Preparation (B2)\nc102 - IELTS General Writing Workshop (B1)"
-# invokeTool add_to_cart {"courseId":"c101"} -> invocationId=67E037503556DCF6CD94144BB74BD185
+# invokeTool add_to_cart {"courseId":"c101"} -> invocationId=CC630C5A484DBB1FB5988C9A9ACD1039
   response: {"status":"Completed","output":{"content":[{"type":"text","text":"{\"cart\":[\"c101\"],\"count\":1}"}],"isError":false,"parsed":{"cart":["c101"],"count":1}}}
   DOM cart-count: 0 -> 1; #cart: "c101 - IELTS Academic Preparation"
 [PASS] add_to_cart invoked, status Completed, cart=[c101] :: status=Completed
 [PASS] page reacted: #cart lists c101, count 0 -> 1 :: 0->1
-# invokeTool contact_form {"name":"Sara Ali","email":"sara@example.com","message":"Which IELTS course fits band 6?"} -> invocationId=DD4631AD8EF19DA805564CDDAB3B6E72
+# invokeTool contact_form {"name":"Sara Ali","email":"sara@example.com","message":"Which IELTS course fits band 6?"} -> invocationId=72A4886CC967A1EC58345D97F0D1F177
   path: autosubmit (toolautosubmit): toolResponded arrived without a user submit
   response: {"status":"Completed","output":{"content":[{"type":"text","text":"{\"sent\":true,\"to\":\"advisors\",\"from\":\"Sara Ali\",\"email\":\"sara@example.com\"}"}],"isError":false,"parsed":{"sent":true,"to":"advisors","from":"Sara Ali","email":"sara@example.com"}}}
   DOM #contact-status: "Message sent by Sara Ali <sara@example.com>"; form fields: {"name":"Sara Ali","email":"sara@example.com","message":"Which IELTS course fits band 6?"}
 [PASS] contact_form invoked via CDP, status Completed :: path=autosubmit (toolautosubmit): toolResponded arrived without a user submit; status=Completed
 [PASS] page reacted: form filled and #contact-status shows sender :: "Message sent by Sara Ali <sara@example.com>"
-# invokeTool add_to_cart {"courseId":"nope"} -> invocationId=DDA3F15399D8722A862D52FA130FF80D
+# invokeTool add_to_cart {"courseId":"nope"} -> invocationId=EDA8A18FBF516D5ACC999EA19D8A1180
   bad input -> {"status":"Completed","out":{"content":[{"type":"text","text":"{\"error\":\"unknown courseId\",\"courseId\":\"nope\"}"}],"isError":true,"parsed":{"error":"unknown courseId","courseId":"nope"}}}
 [PASS] untrusted input: unknown courseId rejected, cart unchanged :: count=1 isError=true
 [PASS] screenshot after.png written :: 39843 bytes
 # page exceptions: 0
-# B (flag off): chrome pid=454062 cdp=34275 flag=false
+# B (flag off): chrome pid=403158 cdp=45367 flag=false
 [PASS] flag off: typeof document.modelContext === "undefined"
-  #webmcp-status: null
-[FAIL] run completed without exception :: Error: eval: {"exceptionId":1,"text":"Uncaught","lineNumber":0,"columnNumber":34,"scriptId":"6","stackTrace":{"callFrames":[{"functionName":"","scriptId":"6","url":"","lineNumber":0,"columnNumber":34}]},"exception":{"type":"object","subtype":"error","className":"TypeError","description":"TypeError: Cannot set properties of null (setting 'value')\n    at <anonymous>:1:35","objectId":"1070967556992948522.1.2"}}
-    at Cdp.evaluate (file:///tmp/webmcp-e2e/e2e.mjs:63:35)
-    at async file:///tmp/webmcp-e2e/e2e.mjs:236:3
+  #webmcp-status: "unavailable (page works without it)"
+[PASS] flag off: page still works through its normal UI :: "c301 - Python for Beginners (A1)"
 [PASS] cleanup: no leftover chrome/http.server processes
 
 | Check | Result | Detail |
@@ -57,7 +55,7 @@
 | untrusted input: unknown courseId rejected, cart unchanged | PASS | count=1 isError=true |
 | screenshot after.png written | PASS | 39843 bytes |
 | flag off: typeof document.modelContext === "undefined" | PASS |  |
-| run completed without exception | FAIL | Error: eval: {"exceptionId":1,"text":"Uncaught","lineNumber":0,"columnNumber":34,"scriptId":"6","stackTrace":{"callFrames":[{"functionName": |
+| flag off: page still works through its normal UI | PASS | "c301 - Python for Beginners (A1)" |
 | cleanup: no leftover chrome/http.server processes | PASS |  |
 
-16/17 passed
+17/17 passed
