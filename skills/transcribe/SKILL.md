@@ -16,7 +16,14 @@ Two tools do the work:
 
 `yt-transcribe` (in `~/.local/bin/`) wires them together and is the **default entry point**. Reach for raw `yt-dlp` only for download-shaped tasks (see [references/yt-dlp.md](references/yt-dlp.md)).
 
-`yt-transcribe` is a separately provisioned helper, not shipped with this repo. If `command -v yt-transcribe` finds nothing, fall back to the manual pipeline: fetch captions with `yt-dlp --skip-download --write-auto-subs --sub-langs <lang> -- <url>`; if none exist, download audio with `yt-dlp -x --audio-format wav -- <url>`, then run `whisper-cli -m <model> -f <audio.wav>`.
+`yt-transcribe` is a separately provisioned helper, not shipped with this repo. If `command -v yt-transcribe` finds nothing, fall back to the manual pipeline: fetch captions with `yt-dlp --skip-download --write-auto-subs --sub-langs <lang> -- <url>`; if none exist, download the audio with `yt-dlp -x --audio-format wav -o audio.wav -- <url>`, convert it to what whisper.cpp expects (16 kHz, mono, 16-bit PCM) and pass the model as a **file path**:
+
+```bash
+ffmpeg -i audio.wav -ar 16000 -ac 1 -c:a pcm_s16le audio-16k.wav
+whisper-cli -m ~/.cache/whisper.cpp/ggml-large-v3-turbo.bin -l auto -f audio-16k.wav -otxt -osrt
+```
+
+`-m` takes a path to a `.bin` file, not a model name.
 
 ## The one rule that matters: captions before ASR
 
