@@ -70,7 +70,7 @@ export function personaData(persona, data) {
   return out;
 }
 
-// Read-only by default: without test data (or --allow-submit) the agent never submits a form, and it never
+// Read-only by default: without test data (or --allow-submit) the agent never presses a button, and it never
 // leaves the site under test (off-site links are reported in the state instead of clicked).
 export function clickable(elements, data, { allowSubmit = false } = {}) {
   const canSubmit = allowSubmit || Object.keys(data || {}).length > 0;

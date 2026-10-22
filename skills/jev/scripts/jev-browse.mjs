@@ -13,7 +13,7 @@
 //            --screenshots D  save D/<flow>/NN.png per step plus final.png and final-full.png (implies --chrome);
 //                             Jev is text-only, so layout/visual checks are a vision model reading these (L3)
 //
-// Read-only by default: without --data or --allow-submit it never presses a button inside a form, and it
+// Read-only by default: without --data or --allow-submit it never presses a button (in a form or not), and it
 // never follows a link off the site under test (they are listed to Jev as external_links instead).
 //
 // Drives the DOM directly (native value setter + input/change events, element.click()) because Lightpanda

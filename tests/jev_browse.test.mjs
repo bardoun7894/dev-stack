@@ -98,7 +98,9 @@ test('read-only by default: no form submits without data, never off-site links',
     { id: 3, kind: 'button', label: 'Menu', inForm: false },
   ];
   const keys = (q) => Object.keys(q.action.criteria).sort();
-  assert.deepEqual(keys(buildStepQuestions(els, {})), ['click_0', 'click_3', 'done', 'stuck']);
+  // Since f808c7b no button at all is offered without data/--allow-submit: a button outside a <form> can
+  // still POST via fetch, so read-only mode only follows on-site links.
+  assert.deepEqual(keys(buildStepQuestions(els, {})), ['click_0', 'done', 'stuck']);
   assert.deepEqual(keys(buildStepQuestions(els, { email: 'a@b.co' })), ['click_0', 'click_2', 'click_3', 'done', 'stuck']);
   assert.deepEqual(keys(buildStepQuestions(els, {}, { allowSubmit: true })), ['click_0', 'click_2', 'click_3', 'done', 'stuck']);
   const s = buildStepState('join', '/en/community', 'snap', [], els, {});

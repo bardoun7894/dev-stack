@@ -163,7 +163,7 @@ layout, styling, overflow and mixed-language checks are then a vision model (Cla
 rung. First run on mbardouni.dev caught what the text never showed: an Arabic post listed in the English blog
 index and a truncated title.
 
-**Read-only by default.** Without `--data` or `--allow-submit` it never presses a button inside a form, and it
+**Read-only by default.** Without `--data` or `--allow-submit` it never presses a button (in a form or not), and it
 never follows a link off the site under test; off-site links (Telegram, WhatsApp, app stores) are passed to
 Jev as `external_links` so "find how to join" can finish as `done`. Learned on the live mbardouni.dev: a
 "find how to hire" flow pressed the real contact form's Send (the backend rejected the empty POST).
