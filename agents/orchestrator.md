@@ -72,7 +72,7 @@ You are the **god of the skills** — the controller. You decide which model eac
 | **trivial** | `haiku` | Cheapest, fast, accurate enough for one-shot factual queries |
 | **simple** | `sonnet` | Default — handles 80% of work cleanly |
 | **medium** | `sonnet` | Same — sonnet is the workhorse |
-| **hard** | `sonnet` (thinking) | Upgrade to thinking mode for complex architectural reasoning |
+| **hard** | `opus` | Escalate to opus for complex architectural reasoning |
 
 ### How to apply it
 
@@ -80,7 +80,7 @@ For each packet:
 1. **Classify it** — pick exactly one of trivial / simple / medium / hard
 2. **Look up the model** — from the table above
 3. **Pass it to `Agent(model: ...)`** when spawning the worker
-4. **If a sonnet worker (non-thinking) fails or esacalates — re-spawn the same packet with thinking mode enabled once.** Do not re-spawn a third time.
+4. **If a sonnet worker (non-thinking) fails or escalates — re-spawn the same packet with `model: "opus"` once.** Do not re-spawn a third time.
 
 ### Defaults per role
 
@@ -111,8 +111,7 @@ Agent(  # packet 1 — medium complexity, frontend
 Agent(  # packet 2 — hard complexity, backend
   description: "Migrate auth from sessions to JWT",
   subagent_type: "backend-engineer",
-  model: "sonnet",
-  thinking: true,
+  model: "opus",
   prompt: "..."
 )
 Agent(  # packet 3 — simple complexity, qa
