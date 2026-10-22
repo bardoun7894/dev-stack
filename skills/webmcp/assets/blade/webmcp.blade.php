@@ -1,7 +1,7 @@
 {{-- WebMCP tools partial. Usage: @push('scripts') @include('partials.webmcp', ['tools' => [...]]) @endpush
      $tools: list of ['name','description','inputSchema','annotations'?,'method'?,'url'] ;
-     execute() calls the existing same-origin route, with {name} placeholders filled from input.
-     Non-GET tools get consequentialHint: true unless their annotations set it. --}}
+     execute() calls the existing same-origin route, with {name} placeholders filled from input (a missing one
+     is an error). Non-GET tools get consequentialHint: true unless their annotations set it. --}}
 <script>
 (function () {
   var mc = document.modelContext;
@@ -22,7 +22,10 @@
       inputSchema: t.inputSchema,
       annotations: annotations,
       execute: async function (input, ctx) {
+        input = input || {};
         var url = t.url.replace(/\{(\w+)\}/g, function (_, k) {
+          // undefined/null would otherwise become the literal path segment "undefined"
+          if (input[k] === undefined || input[k] === null) throw new Error('Missing value for ' + k);
           if (!/^[\w-]+$/.test(String(input[k]))) throw new Error('Invalid value for ' + k);
           return encodeURIComponent(input[k]);
         });

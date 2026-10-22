@@ -37,6 +37,16 @@ test('non-GET tools default to consequentialHint: true, GET tools do not', () =>
   assert.equal(r.byName('noask').annotations.consequentialHint, false); // explicit annotation wins
 });
 
+test('a missing path parameter is an error, not the segment "undefined"', async () => {
+  const r = run([tool('get', 'GET', '/courses/{id}')]);
+  await assert.rejects(r.byName('get').execute({}, {}), /Missing value for id/);
+  await assert.rejects(r.byName('get').execute({ id: null }, {}), /Missing value for id/);
+  await assert.rejects(r.byName('get').execute({ id: '../x' }, {}), /Invalid value for id/);
+  assert.equal(r.fetches.length, 0);
+  await r.byName('get').execute({ id: 'c101' }, {});
+  assert.match(r.fetches[0].url, /^\/courses\/c101\?/);
+});
+
 test('non-GET sends JSON with the CSRF token', async () => {
   const r = run([tool('add', 'POST', '/cart')]);
   await r.byName('add').execute({ courseId: 'c1' }, {});
