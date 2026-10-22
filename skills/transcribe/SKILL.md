@@ -99,10 +99,17 @@ Installed: `ggml-large-v3-turbo` (1.6 GB) at `~/.cache/whisper.cpp/`. It is the 
 Drop to a smaller model only when speed matters more than accuracy on a long, clean recording:
 
 ```bash
-curl -L --create-dirs -o ~/.cache/whisper.cpp/ggml-base.bin \
+curl -fL --create-dirs -o ~/.cache/whisper.cpp/ggml-base.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+# verify before use; delete the file if this does not print OK
+echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe  $HOME/.cache/whisper.cpp/ggml-base.bin" | shasum -a 256 -c
 yt-transcribe <input> --model ggml-base
 ```
+
+SHA-256 of the other models in the same repo (the LFS object id on Hugging Face, checked 2026-10-22):
+`ggml-small.bin` `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`,
+`ggml-large-v3-turbo.bin` `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`.
+For any other model, compare against the `sha256` shown on its Hugging Face file page.
 
 `tiny` < `base` < `small` < `medium` < `large-v3-turbo` < `large-v3`. Append `.en` (e.g. `ggml-small.en`) for English-only variants — slightly better on English, useless for anything else.
 
