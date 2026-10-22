@@ -10,7 +10,7 @@ Follows TypeSafe's skill-suggestion cookbook (wrong skill loads 16.8% -> 7.3% on
 Usage:
   jev-skill-suggest "<prompt>"        prints a <skill_relevance> line, or nothing
   jev-skill-suggest --name "<prompt>" prints only the skill name
-Env: JEV_SKILL_SUGGEST=0 disables; JEV_TIMEOUT per request (default here 3 s). Decisions log under tag
+Env: opt-in, runs only with JEV_SKILL_SUGGEST=1 (every prompt goes to TypeSafe); JEV_TIMEOUT per request (default here 3 s). Decisions log under tag
 `skill-suggest` (see `jev tune skill-suggest`). Any error -> prints nothing, exit 0: never blocks a prompt.
 """
 import glob
@@ -188,8 +188,13 @@ def suggest(prompt, roster, ask_many, timeout=None):
     return b["winner"].get("choice")
 
 
+def enabled(env=None):
+    """Opt-in: the prompt text leaves the machine, so nothing is sent unless JEV_SKILL_SUGGEST=1."""
+    return (os.environ if env is None else env).get("JEV_SKILL_SUGGEST", "0") == "1"
+
+
 def main(argv):
-    if os.environ.get("JEV_SKILL_SUGGEST") == "0":
+    if not enabled():
         return
     name_only = "--name" in argv
     prompt = " ".join(a for a in argv if a != "--name").strip()

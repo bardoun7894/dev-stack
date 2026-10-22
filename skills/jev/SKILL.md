@@ -83,7 +83,7 @@ fallback path for exit ≠ 0. Run `jev --help` for everything.
 
 | Tool | What it screens | Use it when | Measured 2026-09-19 |
 |---|---|---|---|
-| `jev-skill-suggest "<prompt>"` | which one of ~170 installed skills fits (TypeSafe cookbook: 2-stage Choice + gate Nouls) | runs automatically in the UserPromptSubmit hook; `JEV_SKILL_SUGGEST=0` turns it off | 9/10 labelled prompts, no wrong picks, 0.5–1.1 s |
+| `jev-skill-suggest "<prompt>"` | which one of ~170 installed skills fits (TypeSafe cookbook: 2-stage Choice + gate Nouls) | opt-in: runs in the UserPromptSubmit hook only with `JEV_SKILL_SUGGEST=1` (sends the prompt to TypeSafe) | 9/10 labelled prompts, no wrong picks, 0.5–1.1 s |
 | `jev-review diff [BASE]` | every hunk: 5 risk Nouls + severity Score → `route: none/reviewer/codex/panel` | before any review (reviewer Pass 0, kb-dev Phase 9) | planted bugs → `panel`, clean diff → `none`, ~$0.00003/hunk |
 | `jev-review lint [PATH…]` | secrets / PII in logs, names hiding side effects, useless or wrong comments; `.jev-lint.json` overrides | pre-commit / CI; exit 1 on error-level rules | caught the logged password as an error |
 | `jev-review scan [DIR] [--run]` | code smells + garbage comments per 120-line window, cost estimate first | "find code smells", "clean up comments", codebase audits | dev-stack: 33 windows, $0.0015, 9 shortlisted |

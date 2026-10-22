@@ -119,5 +119,20 @@ class PolicyTest(unittest.TestCase):
         self.assertIsNone(sug.suggest("x" * 30, {"a": {"description": "A", "excerpt": ""}}, fake))
 
 
+class OptIn(unittest.TestCase):
+    def test_off_unless_set_to_1(self):
+        self.assertFalse(sug.enabled({}))
+        self.assertFalse(sug.enabled({"JEV_SKILL_SUGGEST": "0"}))
+        self.assertFalse(sug.enabled({"JEV_SKILL_SUGGEST": "yes"}))
+        self.assertTrue(sug.enabled({"JEV_SKILL_SUGGEST": "1"}))
+
+    def test_main_sends_nothing_when_not_enabled(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JEV_SKILL_SUGGEST", None)
+            with mock.patch.object(sug, "load_jev", side_effect=AssertionError("must not load jev")):
+                sug.main(["please refactor the billing module for me"])
+
+
 if __name__ == "__main__":
     unittest.main()

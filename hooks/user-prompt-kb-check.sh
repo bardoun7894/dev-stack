@@ -307,9 +307,10 @@ fi
 
 # --- Jev skill suggestion (System 1 screen, see skills/jev/SKILL.md) ---
 # At most one relevant skill out of everything installed, as a <skill_relevance> line.
-# ~0.5-1.1 s; prints nothing on / commands, short prompts, low fit, JEV_SKILL_SUGGEST=0, or any error.
+# Opt-in (JEV_SKILL_SUGGEST=1): the prompt is sent to TypeSafe. ~0.5-1.1 s; prints nothing on / commands,
+# short prompts, low fit, when not enabled, or on any error.
 suggest_bin="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/jev-skill-suggest"
-if [ -n "$user_prompt" ] && [ "${JEV_SKILL_SUGGEST:-1}" != "0" ] && [ -f "$suggest_bin" ]; then
+if [ -n "$user_prompt" ] && [ "${JEV_SKILL_SUGGEST:-0}" = "1" ] && [ -f "$suggest_bin" ]; then
   jev_timeout=$(command -v timeout || command -v gtimeout)
   printf '%s' "$user_prompt" | ${jev_timeout:+$jev_timeout 4} /usr/bin/env python3 "$suggest_bin" 2>/dev/null || true
 fi
