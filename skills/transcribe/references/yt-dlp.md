@@ -88,7 +88,7 @@ yt-dlp --break-on-existing --download-archive archive.txt "<channel-url>"
 
 ```bash
 yt-dlp --download-sections "*00:10:00-00:20:00" --force-keyframes-at-cuts "<url>"
-yt-dlp --download-sections "*intro"   # by chapter name (regex)
+yt-dlp --download-sections "intro" "<url>"   # chapters whose title matches the regex (no leading *)
 ```
 
 Without `--force-keyframes-at-cuts` the cut lands on the nearest keyframe and drifts by seconds.
