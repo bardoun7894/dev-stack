@@ -174,6 +174,9 @@ async function runFlow(chromium, flow, opt, persona = 'normal', shared = null) {
       const els = await elements(page);
       const state = buildStepState(flow.goal, new URL(page.url()).pathname, await snapshot(page), history, els, data);
       const d = decideStep(await askJev(state, buildStepQuestions(els, data, { allowSubmit: opt.allowSubmit })));
+      if (d.stop === 'jev_unavailable') {
+        return { name: flow.name || flow.goal, persona, status: 'uncertain', cause: 'jev_unavailable', stop: d.stop, steps: history, url: page.url(), screenshots: shots };
+      }
       for (const f of d.fills) await fill(page, f.id, data[f.key]);
       if (d.stop) { stop = d.stop; break; }
       const el = els.find((e) => e.id === d.click);

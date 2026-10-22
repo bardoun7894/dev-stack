@@ -142,6 +142,8 @@ export function buildJudgeState(expected, url, page, { nativeValidation = [], pe
 }
 
 export function decideStep(answers) {
+  // No answer at all (no key, network, bad JSON) is Jev being unavailable, not the page being a dead end.
+  if (answers == null) return { fills: [], click: null, stop: 'jev_unavailable' };
   const fills = [];
   for (const [k, a] of Object.entries(answers || {})) {
     if (k.startsWith('fill_') && a.choice !== 'skip' && (a.confidence ?? 0) >= FILL_MIN) {
@@ -157,7 +159,8 @@ export function decideStep(answers) {
 export function judgeFlow(answers, pageErrors) {
   if (pageErrors && pageErrors.length) return { status: 'fail', cause: 'page_error', detail: pageErrors.slice(0, 3) };
   const v = answers?.verdict;
-  if (!v || (v.confidence ?? 0) < VERDICT_MIN) return { status: 'uncertain', cause: answers?.cause?.choice ?? 'jev_unavailable' };
+  if (answers == null) return { status: 'uncertain', cause: 'jev_unavailable' };
+  if (!v || (v.confidence ?? 0) < VERDICT_MIN) return { status: 'uncertain', cause: answers.cause?.choice ?? 'unknown' };
   if (v.choice === 'pass') return { status: 'pass', cause: 'none' };
   if (v.choice === 'fail') return { status: 'fail', cause: answers.cause?.choice ?? 'unknown' };
   return { status: 'uncertain', cause: answers.cause?.choice ?? 'unknown' };

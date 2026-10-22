@@ -133,3 +133,9 @@ test('sensitive fields: password type, sensitive autocomplete, sensitive names',
   assert.ok(isSensitiveField({ type: 'tel', name: 'cvv' }));
   assert.ok(!isSensitiveField({ type: 'email', name: 'email', autocomplete: 'email' }));
 });
+
+test('Jev unavailable: a null answer is jev_unavailable, never stuck or a page verdict', () => {
+  assert.deepEqual(decideStep(null), { fills: [], click: null, stop: 'jev_unavailable' });
+  assert.deepEqual(judgeFlow(null, []), { status: 'uncertain', cause: 'jev_unavailable' });
+  assert.deepEqual(judgeFlow({ verdict: { choice: 'pass', confidence: 0.4 } }, []), { status: 'uncertain', cause: 'unknown' });
+});
