@@ -136,7 +136,7 @@ If the material is worth keeping, drop the `.md` into `ai-knowledge-base/raw/` a
 | `model not found` | the `curl` line in the error message downloads it |
 | `could not read video info` | private/geo-blocked → `--cookies-browser chrome` |
 | Output is English gibberish | wrong language decode → pass `--lang` explicitly |
-| Names/jargon misspelled | `--prompt "Bardouni, Contabo, Tailscale, whisper.cpp"` |
+| Names/jargon misspelled | `--prompt "<speaker names>, <product names>, <jargon>"`, e.g. `--prompt "Kubernetes, PostgreSQL, whisper.cpp"` |
 | Captions exist but are poor | `--force-asr` |
 | `whisper-cli not found` | `brew install whisper-cpp` |
 | Sped-up / distorted audio | stale download — delete the `.wav` and retry |
