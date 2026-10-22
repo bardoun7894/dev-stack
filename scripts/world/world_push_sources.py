@@ -207,13 +207,13 @@ def _git_out(repo: Path, args: list[str], timeout: int = 20) -> str | None:
     return cp.stdout if cp.returncode == 0 else None
 
 
-def _git_log(repo: Path, since: str, rev: str = "") -> list[tuple[str, str, str]]:
-    """Return [(short_sha, committer_iso, subject)]; rev like 'abc..HEAD' or ''."""
+def _git_log(repo: Path, since: str, rev: str = "") -> list[tuple[str, str, str]] | None:
+    """Return [(short_sha, committer_iso, subject)]; rev like 'abc..HEAD' or ''. None if git failed."""
     args = ["log", "--pretty=format:%h %cI", "-n", "5000"]
     args += [rev] if rev else [f"--since={since}"]
     out_s = _git_out(repo, args)
     if out_s is None:
-        return []
+        return None
     out: list[tuple[str, str, str]] = []
     for ln in out_s.splitlines():
         parts = ln.strip().split(" ", 2)
@@ -279,9 +279,13 @@ def collect_git(roots: list[Path] | None = None) -> Iterable[dict]:
         last = _state_read(sf)
         if last == head:
             continue
-        commits = _git_log(canonical_dir, cutoff, f"{last}..HEAD") if last else []
+        commits = _git_log(canonical_dir, cutoff, f"{last}..HEAD") if last else None
         if not commits:
+            # No cursor yet, the old sha is gone (rebase/gc), or nothing new: scan by date.
             commits = _git_log(canonical_dir, cutoff)
+        if commits is None:
+            # git log failed: keep the old cursor so the next run retries these commits.
+            continue
         _PENDING_STATE[sf] = head
         for sha, ts, subject in commits:
             ts = ts or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

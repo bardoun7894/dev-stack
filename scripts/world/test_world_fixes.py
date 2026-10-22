@@ -167,5 +167,28 @@ class PrIds(unittest.TestCase):
         self.assertEqual(self.collect("open")[0]["id"], a[0]["id"])  # same state, same id
 
 
+class GitCursor(unittest.TestCase):
+    def run_collect(self, log_result):
+        repo = Path(tempfile.mkdtemp(prefix="worldgit."))
+        pending = {}
+        with mock.patch.object(wps, "iter_git_roots", lambda roots: [repo]), \
+                mock.patch.object(wps, "_resolve_canonical_repo", lambda r: (repo, "p")), \
+                mock.patch.object(wps, "_git_out", lambda r, a, t=20: "abc123\n"), \
+                mock.patch.object(wps, "_git_log", lambda *a, **k: log_result), \
+                mock.patch.object(wps, "_state_read", lambda p: "old999"), \
+                mock.patch.object(wps, "_PENDING_STATE", pending):
+            events = list(wps.collect_git(roots=[repo]))
+        return events, pending
+
+    def test_failed_git_log_does_not_advance_the_cursor(self):
+        events, pending = self.run_collect(None)
+        self.assertEqual((events, pending), ([], {}))
+
+    def test_successful_log_advances_it(self):
+        events, pending = self.run_collect([("abc123", "2026-10-01T00:00:00Z", "msg")])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(list(pending.values()), ["abc123"])
+
+
 if __name__ == "__main__":
     unittest.main()
