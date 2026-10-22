@@ -301,6 +301,17 @@ def post_events(events: list[dict], url: str | None = None, timeout: float = 5.0
     except (urllib.error.URLError, socket.timeout, OSError) as e:
         raise RuntimeError(f"transport: {e}")
 
+# 4xx answers that are about the endpoint or the credentials, not about the events: re-sending the
+# same events later can succeed, so they must never move events to rejected.jsonl.
+_NOT_PAYLOAD_4XX = {401, 403, 404, 405, 407, 408, 409, 425, 429}
+_REJECTED_CODE_RE = re.compile(r"server rejected (\d{3})\b")
+
+def payload_rejection(msg: str) -> bool:
+    """True when a post_events() error says the server refused the events themselves (a 4xx such as
+    400/413/422). 5xx, transport errors and auth/URL/rate-limit 4xx are retryable, never a rejection."""
+    m = _REJECTED_CODE_RE.match(msg or "")
+    return bool(m) and 400 <= int(m.group(1)) < 500 and int(m.group(1)) not in _NOT_PAYLOAD_4XX
+
 def send(events: list[dict], url: str | None = None, timeout: float = 5.0,
          token: str | None = None, dry_run: bool = False,
          chunk: int = 500) -> dict:

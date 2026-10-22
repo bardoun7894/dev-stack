@@ -35,28 +35,41 @@ def bucket(events, sources=wps.SOURCES):
 
 
 def send_dropping_rejects(events, url, timeout, token, chunk=500) -> dict:
-    """POST in chunks. A 4xx that names one event (`event N:`) moves just that
-    event to rejected.jsonl and retries the rest; any other failure raises.
-    Rejected events are counted in the result and their ids are still saved as
-    sent by the caller, so they are not re-collected and rejected again.
+    """POST in chunks. When the server refuses the events themselves (lib_world.payload_rejection):
+    if it names one event (`event N:`), that event moves to rejected.jsonl and the rest is retried;
+    if it names none, the batch is split in half until the bad event is alone, and then that one is
+    rejected. So one unidentifiable bad event can no longer stall the whole backlog run after run.
+    5xx, transport and auth/URL/rate-limit errors raise (nothing is rejected; the next run retries).
+    Rejected events are counted in the result and their ids are still saved as sent by the caller,
+    so they are not re-collected and rejected again.
     """
-    remaining = list(events)
+    queue = [list(events[i:i + chunk]) for i in range(0, len(events), chunk)]
     total = {"accepted": 0, "duplicate": 0, "rejected": 0}
-    while remaining:
-        batch = remaining[:chunk]
+    while queue:
+        batch = queue.pop(0)
+        if not batch:
+            continue
         try:
             rep = lib_world.post_events(batch, url=url, timeout=timeout, token=token)
         except RuntimeError as e:
             msg = str(e)
-            m = re.search(r"event (\d+):", msg)
-            if not re.match(r"server rejected 4\d\d", msg) or not m or int(m.group(1)) >= len(batch):
+            if not lib_world.payload_rejection(msg):
                 raise
-            lib_world.rejected_append(remaining.pop(int(m.group(1))), msg)
-            total["rejected"] += 1
+            m = re.search(r"event (\d+):", msg)
+            if m and int(m.group(1)) < len(batch):
+                i = int(m.group(1))
+                lib_world.rejected_append(batch[i], msg)
+                total["rejected"] += 1
+                queue.insert(0, batch[:i] + batch[i + 1:])
+            elif len(batch) == 1:
+                lib_world.rejected_append(batch[0], msg)
+                total["rejected"] += 1
+            else:
+                mid = len(batch) // 2
+                queue[0:0] = [batch[:mid], batch[mid:]]
             continue
         total["accepted"] += int(rep.get("accepted", 0) or 0)
         total["duplicate"] += int(rep.get("duplicate", 0) or 0)
-        remaining = remaining[len(batch):]
     return total
 
 

@@ -1369,6 +1369,9 @@ assert_contains "transcripts: home-level folder -> project=me" \
   '"project": "me"' "$T_PROJ_OUT"
 
 # ---------------------------------------------------------------------------
+echo "## unit tests: test_world_fixes.py" | tee -a "$LOG"
+assert "test_world_fixes.py (python unittest)" python3 "$ROOT/test_world_fixes.py"
+
 echo | tee -a "$LOG"
 echo "RESULT: pass=$pass fail=$fail" | tee -a "$LOG"
 exit $fail
