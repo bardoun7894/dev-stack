@@ -1,6 +1,7 @@
 {{-- WebMCP tools partial. Usage: @push('scripts') @include('partials.webmcp', ['tools' => [...]]) @endpush
      $tools: list of ['name','description','inputSchema','annotations'?,'method'?,'url'] ;
-     execute() calls the existing same-origin route, with {name} placeholders filled from input. --}}
+     execute() calls the existing same-origin route, with {name} placeholders filled from input.
+     Non-GET tools get consequentialHint: true unless their annotations set it. --}}
 <script>
 (function () {
   var mc = document.modelContext;
@@ -11,14 +12,16 @@
   var tools = @json($tools);
 
   tools.forEach(function (t) {
+    var method = (t.method || 'GET').toUpperCase();
+    // Anything but GET changes state, so the agent must ask first unless the tool says otherwise.
+    var annotations = Object.assign(method === 'GET' ? {} : { consequentialHint: true }, t.annotations || {});
     // Chrome 156: the returned promise rejects with AbortError on unregister.
     Promise.resolve(mc.registerTool({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
-      annotations: t.annotations || {},
+      annotations: annotations,
       execute: async function (input, ctx) {
-        var method = (t.method || 'GET').toUpperCase();
         var url = t.url.replace(/\{(\w+)\}/g, function (_, k) {
           if (!/^[\w-]+$/.test(String(input[k]))) throw new Error('Invalid value for ' + k);
           return encodeURIComponent(input[k]);
