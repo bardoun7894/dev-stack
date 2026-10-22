@@ -40,8 +40,10 @@ reachable through a subscription provider (never openrouter/metered), beats the 
 <= its cost per task (or equal index at <= 70% cost, and not under 70% of its speed), the chain is not owner-pinned,
 and a live probe passes. The new entry is inserted ahead of the incumbent (the incumbent, and the last Claude entry,
 stay as fallback). Backup `tiers.json.bak-model-intel-DATE`, jq + jdelegate dry-run validation, restore on failure.
-Everything else goes to `data/proposals/DATE.md` for the owner. Pinned = kinds named in an "owner" line of the
-`_comment` array, or listed in an optional `_pinned` array.
+Everything else goes to `data/proposals/DATE.md` for the owner. Pinned = the chains in
+`config/owner_rules.json` `pinned_entries.chains` (plus the first two Opus/Sonnet entries of T3/T4), or listed in an
+optional structured `_pinned` array in tiers.json. Free text in `_comment` is never parsed: rewording a note cannot
+unpin anything.
 
 ## Owner rules (also in config/owner_rules.json)
 
