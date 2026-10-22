@@ -25,6 +25,7 @@ def load_script(name):
 
 
 world_push = load_script("world-push")
+track = load_script("track")
 
 
 class FakeServer:
@@ -84,6 +85,30 @@ class SendDroppingRejects(unittest.TestCase):
             with self.subTest(code=code):
                 with self.assertRaises(RuntimeError):
                     self.run_send(evs(3, bad={1}), FakeServer(code, name_index=True))
+
+
+class TrackFlush(unittest.TestCase):
+    def flush(self, err):
+        box = [{"id": "a", "title": "t"}, {"id": "b", "title": "t"}]
+        state = {"outbox": list(box), "rejected": []}
+
+        def post(batch, url=None, timeout=5.0, token=None):
+            raise RuntimeError(err)
+        with mock.patch.object(track, "post_events", post), \
+                mock.patch.object(track, "outbox_load", lambda: list(state["outbox"])), \
+                mock.patch.object(track, "outbox_rewrite", lambda evs: state.__setitem__("outbox", list(evs))), \
+                mock.patch.object(track, "rejected_append", lambda ev, msg: state["rejected"].append(ev["id"])), \
+                mock.patch.object(track, "normalise_event_lengths", lambda ev: ev):
+            rc = track.cmd_flush(False)
+        return rc, state
+
+    def test_5xx_naming_an_event_keeps_the_outbox(self):
+        rc, state = self.flush("server rejected 502: event 0: upstream")
+        self.assertEqual((rc, state["rejected"], [e["id"] for e in state["outbox"]]), (2, [], ["a", "b"]))
+
+    def test_auth_4xx_keeps_the_outbox(self):
+        rc, state = self.flush("server rejected 401: event 0: bad token")
+        self.assertEqual((rc, state["rejected"]), (2, []))
 
 
 if __name__ == "__main__":

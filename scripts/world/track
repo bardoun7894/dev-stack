@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(__import__("os").path.dirname(__import__("os").path.realpath(__file__))))
 from lib_world import (
     SRC_TRACK, event, json_dumps, make_id, normalise_event_lengths,
-    outbox_append, outbox_load, outbox_rewrite, post_events,
+    outbox_append, outbox_load, outbox_rewrite, payload_rejection, post_events,
     rejected_append, slug,
 )
 
@@ -114,11 +114,12 @@ def cmd_flush(dry_run: bool) -> int:
             remaining = remaining[len(batch):]
             continue
         except RuntimeError as e:
-            # 4xx → try to identify the bad event by index, move it to
-            # rejected.jsonl, and retry the rest of the batch.
+            # A payload 4xx → try to identify the bad event by index, move it to
+            # rejected.jsonl, and retry the rest of the batch. A 5xx (even one whose
+            # body says "event N:"), transport or auth error keeps everything queued.
             msg = str(e)
             m = _REJECTED_BODY_RE.search(msg)
-            if not m or rejected_count >= REJECT_LIMIT_PER_FLUSH:
+            if not payload_rejection(msg) or not m or rejected_count >= REJECT_LIMIT_PER_FLUSH:
                 _rewrite_keep_new(remaining, pending)
                 print(f"flush failed, kept {len(remaining)}: {msg}", file=sys.stderr)
                 return 2
