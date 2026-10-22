@@ -43,6 +43,36 @@ class LogTest(unittest.TestCase):
         self.assertEqual(recs[0]["value"], "a")
         self.assertEqual(recs[0]["confidence"], 0.9)
 
+    def test_ask_many_logs_the_redacted_state(self):
+        fake = "sk-or-v1-" + "abcdefghij" * 3  # assembled so secret scanners don't flag it
+        sent = {}
+
+        def fake_post(body, timeout=None):
+            sent.update(body)
+            return {"answers": {"q": {"type": "noul", "noul": 0.2}}}
+
+        q = {"type": "noul", "instructions": "x"}
+        old_post, jev.post = jev.post, fake_post
+        os.environ["JEV_LOG_PREVIEW"] = "1"
+        try:
+            jev.ask_many({"excerpt": "OPENROUTER_API_KEY=" + fake}, {"q": q}, tag="t")
+        finally:
+            jev.post = old_post
+            del os.environ["JEV_LOG_PREVIEW"]
+        self.assertNotIn(fake, json.dumps(sent))
+        line = json.dumps(self.read())
+        self.assertNotIn(fake, line)
+        self.assertIn("[REDACTED]", line)
+
+    def test_log_decision_preview_is_redacted_even_if_caller_forgets(self):
+        fake = "ghp" + "_" + "abcdefghij" * 3
+        os.environ["JEV_LOG_PREVIEW"] = "1"
+        try:
+            jev.log_decision("t", "token " + fake, {"type": "noul"}, {"type": "noul", "noul": 0.1})
+        finally:
+            del os.environ["JEV_LOG_PREVIEW"]
+        self.assertNotIn(fake, json.dumps(self.read()))
+
     def test_uncertainty(self):
         self.assertAlmostEqual(jev.uncertainty({"kind": "choice", "confidence": 0.9}), 0.1)
         self.assertAlmostEqual(jev.uncertainty({"kind": "noul", "value": 0.5}), 1.0)
