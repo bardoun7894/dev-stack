@@ -234,9 +234,9 @@ if [ -n "$root" ]; then
           while IFS= read -r entry; do
             [ -z "$entry" ] && continue
             # "./sub/file.md 1234" -> "raw/sub/file.md"
-            rel="${entry% *}"
+            rel="${entry%% *}"
             rel="raw/${rel#./}"
-            grep -qE "(^|[^A-Za-z0-9_./-])$(printf '%s' "$rel" | sed 's/[][\.*^$+?(){}|\/]/\\&/g')($|[^A-Za-z0-9_./-])" "$kb_log" 2>/dev/null || pending_count=$((pending_count + 1))
+            grep -qF "$rel" "$kb_log" 2>/dev/null || pending_count=$((pending_count + 1))
           done <<RAWSTATE
 $current_state
 RAWSTATE
