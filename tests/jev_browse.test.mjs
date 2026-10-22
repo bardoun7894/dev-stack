@@ -1,7 +1,7 @@
 // node --test tests/  — policy of the Jev browser agent (no browser, no network)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, personaData, judgeFlow, PERSONAS } from '../skills/jev/scripts/browse-core.mjs';
+import { elementLabel, isSensitiveField, compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, personaData, judgeFlow, PERSONAS } from '../skills/jev/scripts/browse-core.mjs';
 
 const ELEMENTS = [
   { id: 0, kind: 'link', label: 'Home', href: '/index.html' },
@@ -115,4 +115,21 @@ test('judge: pass, fail with cause, and fail-closed on missing or low confidence
   assert.deepEqual([f.status, f.cause], ['fail', 'backend_error']);
   assert.equal(judgeFlow(null, []).status, 'uncertain');
   assert.equal(judgeFlow({ verdict: { choice: 'pass', confidence: 0.5 } }, []).status, 'uncertain');
+});
+
+test('label: a typed value never becomes the label, least of all a password', () => {
+  assert.equal(elementLabel({ type: 'password', value: 'hunter2', name: 'pw' }), 'pw');
+  assert.equal(elementLabel({ type: 'text', value: 'me@example.com', name: 'email' }), 'email');
+  assert.equal(elementLabel({ type: 'text', autocomplete: 'cc-number', value: '4111111111111111' }), '');
+  assert.equal(elementLabel({ type: 'submit', value: 'Log in' }), 'Log in');
+  assert.equal(elementLabel({ type: 'submit', value: 'x', name: 'otp_submit' }), 'otp_submit');
+  assert.equal(elementLabel({ type: 'text', ariaLabel: '  Search   site ', value: 'q' }), 'Search site');
+});
+
+test('sensitive fields: password type, sensitive autocomplete, sensitive names', () => {
+  assert.ok(isSensitiveField({ type: 'password' }));
+  assert.ok(isSensitiveField({ type: 'text', autocomplete: 'one-time-code' }));
+  assert.ok(isSensitiveField({ type: 'text', autocomplete: 'section-a new-password' }));
+  assert.ok(isSensitiveField({ type: 'tel', name: 'cvv' }));
+  assert.ok(!isSensitiveField({ type: 'email', name: 'email', autocomplete: 'email' }));
 });

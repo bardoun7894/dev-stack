@@ -25,7 +25,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, judgeFlow, personaData, CHECKPOINT, HEALTH, PERSONAS } from './browse-core.mjs';
+import { compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, judgeFlow, personaData, elementLabel, CHECKPOINT, HEALTH, PERSONAS } from './browse-core.mjs';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const JEV = process.env.JEV_BIN || join(HERE, '..', '..', '..', 'bin', 'jev');
@@ -81,12 +81,16 @@ function askJev(state, questions) {
 }
 
 async function elements(page) {
-  return page.evaluate(() => {
+  const raw = await page.evaluate(() => {
+    // Raw label parts; elementLabel() (browse-core) picks one. `value` only leaves the page for button-like
+    // inputs, where it is the caption: a typed value (password, email, card) never does.
     const label = (e) => {
-      const byFor = e.id && document.querySelector(`label[for="${e.id}"]`);
+      const byFor = e.id && document.querySelector(`label[for="${window.CSS?.escape ? CSS.escape(e.id) : e.id}"]`);
       const wrap = e.closest('label');
-      return (e.getAttribute('aria-label') || byFor?.textContent || wrap?.textContent || e.placeholder
-        || e.innerText || e.value || e.name || e.getAttribute('href') || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+      const buttonLike = e.tagName === 'INPUT' && ['submit', 'button', 'reset', 'image'].includes(e.type);
+      return { ariaLabel: e.getAttribute('aria-label'), forText: byFor?.textContent, wrapText: wrap?.textContent,
+        placeholder: e.placeholder, innerText: e.innerText, value: buttonLike ? e.value : '', name: e.name,
+        idAttr: e.id, href: e.getAttribute('href'), type: e.type, autocomplete: e.getAttribute('autocomplete') };
     };
     const out = [];
     [...document.querySelectorAll('a[href],button,input,select,textarea,[role=button]')].forEach((e, i) => {
@@ -107,6 +111,7 @@ async function elements(page) {
     });
     return out;
   });
+  return raw.map((e) => ({ ...e, label: elementLabel(e.label) }));
 }
 
 async function snapshot(page) {

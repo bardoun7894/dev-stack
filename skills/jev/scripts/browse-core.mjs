@@ -40,6 +40,24 @@ export const HEALTH = {
   cause: CHECKPOINT.cause,
 };
 
+// Fields whose typed value must never reach Jev (or a label): passwords, OTPs, card data.
+const SENSITIVE_AUTOCOMPLETE = /\b(current-password|new-password|one-time-code|cc-[a-z-]+|transaction-amount)\b/i;
+const SENSITIVE_NAME = /pass|pwd|secret|token|otp|cvv|cvc|card.?num|ssn|iban|pin\b/i;
+const BUTTON_TYPES = ['submit', 'button', 'reset', 'image'];
+
+export function isSensitiveField(raw) {
+  return raw.type === 'password' || SENSITIVE_AUTOCOMPLETE.test(raw.autocomplete || '')
+    || SENSITIVE_NAME.test(`${raw.name || ''} ${raw.idAttr || ''}`);
+}
+
+// Label shown to Jev for one element. `value` is only a label for button-like inputs (their caption), never
+// for a field the user or a fill typed into, and never for a sensitive field.
+export function elementLabel(raw) {
+  const value = BUTTON_TYPES.includes(raw.type) && !isSensitiveField(raw) ? raw.value : '';
+  return (raw.ariaLabel || raw.forText || raw.wrapText || raw.placeholder || raw.innerText || value || raw.name
+    || raw.href || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+}
+
 export const PERSONAS = ['normal', 'invalid_input', 'hostile_input', 'double_submit', 'back_button'];
 
 export function personaData(persona, data) {
