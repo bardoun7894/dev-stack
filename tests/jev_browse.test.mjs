@@ -1,7 +1,7 @@
 // node --test tests/  — policy of the Jev browser agent (no browser, no network)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { elementLabel, isSensitiveField, compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, personaData, judgeFlow, PERSONAS } from '../skills/jev/scripts/browse-core.mjs';
+import { clickTarget, elementLabel, isSensitiveField, compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, personaData, judgeFlow, PERSONAS } from '../skills/jev/scripts/browse-core.mjs';
 
 const ELEMENTS = [
   { id: 0, kind: 'link', label: 'Home', href: '/index.html' },
@@ -138,4 +138,21 @@ test('Jev unavailable: a null answer is jev_unavailable, never stuck or a page v
   assert.deepEqual(decideStep(null), { fills: [], click: null, stop: 'jev_unavailable' });
   assert.deepEqual(judgeFlow(null, []), { status: 'uncertain', cause: 'jev_unavailable' });
   assert.deepEqual(judgeFlow({ verdict: { choice: 'pass', confidence: 0.4 } }, []), { status: 'uncertain', cause: 'unknown' });
+});
+
+test('click guard: only ids that were offered as click options can be clicked', () => {
+  const els = [
+    { id: 0, kind: 'link', label: 'About', href: '/about', external: false },
+    { id: 1, kind: 'link', label: 'Out', href: 'https://evil.example', external: true },
+    { id: 2, kind: 'button', label: 'Send', inForm: true },
+    { id: 3, kind: 'input', label: 'Email', empty: true },
+  ];
+  assert.equal(clickTarget(els, {}, 0)?.id, 0);
+  assert.equal(clickTarget(els, {}, 1), null);
+  assert.equal(clickTarget(els, {}, 2), null);
+  assert.equal(clickTarget(els, {}, 3), null);
+  assert.equal(clickTarget(els, {}, 99), null);
+  assert.equal(clickTarget(els, {}, NaN), null);
+  assert.equal(clickTarget(els, { email: 'a@b.co' }, 2)?.id, 2);
+  assert.equal(clickTarget(els, {}, 2, { allowSubmit: true })?.id, 2);
 });

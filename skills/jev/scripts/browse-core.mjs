@@ -156,6 +156,13 @@ export function decideStep(answers) {
   return { fills, click: Number(String(a.choice).replace('click_', '')), stop: null };
 }
 
+// Click guard: Jev may only click what it was offered. An id outside the clickable set (an off-site link, a
+// form button in read-only mode, an id that does not exist) is refused, and the flow stops as stuck.
+export function clickTarget(elements, data, click, opts = {}) {
+  if (!Number.isInteger(click)) return null;
+  return clickable(elements, data, opts).find((e) => e.id === click) || null;
+}
+
 export function judgeFlow(answers, pageErrors) {
   if (pageErrors && pageErrors.length) return { status: 'fail', cause: 'page_error', detail: pageErrors.slice(0, 3) };
   const v = answers?.verdict;

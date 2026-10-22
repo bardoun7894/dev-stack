@@ -25,7 +25,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, judgeFlow, personaData, elementLabel, CHECKPOINT, HEALTH, PERSONAS } from './browse-core.mjs';
+import { compactSnapshot, buildStepQuestions, buildStepState, buildJudgeState, decideStep, judgeFlow, personaData, elementLabel, clickTarget, CHECKPOINT, HEALTH, PERSONAS } from './browse-core.mjs';
 
 const HERE = dirname(realpathSync(fileURLToPath(import.meta.url)));
 const JEV = process.env.JEV_BIN || join(HERE, '..', '..', '..', 'bin', 'jev');
@@ -179,7 +179,7 @@ async function runFlow(chromium, flow, opt, persona = 'normal', shared = null) {
       }
       for (const f of d.fills) await fill(page, f.id, data[f.key]);
       if (d.stop) { stop = d.stop; break; }
-      const el = els.find((e) => e.id === d.click);
+      const el = clickTarget(els, data, d.click, { allowSubmit: opt.allowSubmit });
       if (!el) { stop = 'stuck'; break; }
       repeats = d.click === lastClick ? repeats + 1 : 0;
       if (repeats >= 2) { stop = 'loop'; break; }
