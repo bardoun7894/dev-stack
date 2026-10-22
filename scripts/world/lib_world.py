@@ -50,8 +50,27 @@ HOST = "mac"
 def env_url() -> str:
     return os.environ.get("WORLD_URL", DEFAULT_URL)
 
+DEFAULT_TOKEN_FILE = "~/.config/world/token"
+
 def env_token() -> str:
-    return os.environ.get("WORLD_TOKEN", "")
+    """WORLD_TOKEN from the environment, else the first line of WORLD_TOKEN_FILE
+    (default ~/.config/world/token). The file must be private (no group/other bits): a token in a
+    world-readable file is refused, so launchd never needs the token in its plist."""
+    tok = os.environ.get("WORLD_TOKEN", "")
+    if tok:
+        return tok
+    path = Path(os.path.expanduser(os.environ.get("WORLD_TOKEN_FILE", DEFAULT_TOKEN_FILE)))
+    try:
+        st = path.stat()
+    except OSError:
+        return ""
+    if st.st_mode & 0o077:
+        print(f"world: ignoring {path}: mode {oct(st.st_mode & 0o777)}, run chmod 600 on it", file=sys.stderr)
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except (OSError, IndexError, UnicodeDecodeError):
+        return ""
 
 # --- Slug + id ---------------------------------------------------------------
 

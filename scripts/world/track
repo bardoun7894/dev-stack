@@ -98,7 +98,7 @@ def cmd_flush(dry_run: bool) -> int:
         return 0
     import lib_world
     url = os.environ.get("WORLD_URL", lib_world.DEFAULT_URL)
-    token = os.environ.get("WORLD_TOKEN", "")
+    token = lib_world.env_token()
     timeout = float(os.environ.get("WORLD_TIMEOUT", "5"))
     chunk = 500
     accepted = 0

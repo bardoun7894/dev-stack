@@ -76,7 +76,7 @@ def send_dropping_rejects(events, url, timeout, token, chunk=500) -> dict:
 def main(argv: list[str]) -> int:
     dry_run = bool(int(os.environ.get("WORLD_DRY_RUN", "0")))
     url = os.environ.get("WORLD_URL", lib_world.DEFAULT_URL)
-    token = os.environ.get("WORLD_TOKEN", "")
+    token = lib_world.env_token()
     timeout = float(os.environ.get("WORLD_TIMEOUT", "5"))
     state_dir = Path(os.environ.get("WORLD_STATE_DIR", str(Path.home() / ".local/state/world")))
 

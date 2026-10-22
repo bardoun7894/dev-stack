@@ -19,6 +19,17 @@ ln -sfn "$ROOT/track"      "$LOCAL_BIN/track"
 ln -sfn "$ROOT/world-push" "$LOCAL_BIN/world-push"
 chmod +x "$ROOT/track" "$ROOT/world-push"
 
+# Ingest token: launchd gets only the path (WORLD_TOKEN_FILE in the plist); the file must be 0600.
+TOKEN_FILE="$HOME/.config/world/token"
+mkdir -p "$(dirname "$TOKEN_FILE")"
+chmod 700 "$(dirname "$TOKEN_FILE")"
+if [ -f "$TOKEN_FILE" ]; then
+  chmod 600 "$TOKEN_FILE"
+else
+  echo "note: no $TOKEN_FILE yet; create it with:" >&2
+  echo "  (umask 077; read -rs -p 'WORLD token: ' t; printf '%s\n' \"\$t\" > \"$TOKEN_FILE\")" >&2
+fi
+
 # Copy plist.
 cp "$ROOT/${LABEL}.plist" "$LAUNCH_AGENTS/${LABEL}.plist"
 

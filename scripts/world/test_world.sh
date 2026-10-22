@@ -176,6 +176,7 @@ echo "## 3) outbox on unreachable server + flush" | tee -a "$LOG"
 # Unroutable IP (TEST-NET-1 192.0.2.0/24) + port unlikely to be listening.
 export WORLD_URL="http://192.0.2.1:65530/api/godhome/world/event"
 export WORLD_TOKEN=""
+export WORLD_TOKEN_FILE=/nonexistent/world-token  # never pick up a real token file
 WORLD_STATE_DIR="$WORLD_STATE_DIR" "$TRACK" add --kind task --project testproj \
   --status done --title "outbox roundtrip" 2>"$WORLD_STATE_DIR/track.err" \
   > "$WORLD_STATE_DIR/track.out" || true

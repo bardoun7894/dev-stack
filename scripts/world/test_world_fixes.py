@@ -111,5 +111,36 @@ class TrackFlush(unittest.TestCase):
         self.assertEqual((rc, state["rejected"]), (2, []))
 
 
+class TokenFile(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="worldtok.")
+        self.path = Path(self.dir) / "token"
+        self.path.write_text("tok-from-file\n")
+
+    def token(self, mode, **env):
+        os.chmod(self.path, mode)
+        env.setdefault("WORLD_TOKEN_FILE", str(self.path))
+        with mock.patch.dict(os.environ, env, clear=False):
+            if "WORLD_TOKEN" not in env:
+                os.environ.pop("WORLD_TOKEN", None)
+            return lib_world.env_token()
+
+    def test_private_file_is_read(self):
+        self.assertEqual(self.token(0o600), "tok-from-file")
+
+    def test_group_or_world_readable_file_is_refused(self):
+        self.assertEqual(self.token(0o644), "")
+        self.assertEqual(self.token(0o640), "")
+
+    def test_env_wins_and_missing_file_is_empty(self):
+        self.assertEqual(self.token(0o600, WORLD_TOKEN="from-env"), "from-env")
+        self.assertEqual(self.token(0o600, WORLD_TOKEN_FILE=self.dir + "/nope"), "")
+
+    def test_plist_has_the_file_path_and_no_token(self):
+        plist = (HERE / "dev.mbardouni.world-push.plist").read_text()
+        self.assertIn("<key>WORLD_TOKEN_FILE</key>", plist)
+        self.assertNotIn("<key>WORLD_TOKEN</key>", plist)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,9 @@
     <string>/Users/mohamedbardouni</string>
     <key>WORLD_STATE_DIR</key>
     <string>/Users/mohamedbardouni/.local/state/world</string>
+    <!-- The token itself never goes in this plist: world-push reads it from this 0600 file. -->
+    <key>WORLD_TOKEN_FILE</key>
+    <string>/Users/mohamedbardouni/.config/world/token</string>
   </dict>
 </dict>
 </plist>
