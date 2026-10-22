@@ -44,5 +44,26 @@ class StructuredPins(ProposeCase):
         self.assertFalse(any(a["chain"].startswith("kinds.language") for a in auto))
 
 
+class Backups(ProposeCase):
+    def test_every_apply_writes_its_own_backup_and_restores_its_own_start(self):
+        self.t["kinds"] = {}
+        self.tiers.write_text(json.dumps(self.t, indent=2))
+        auto, _ = self.go(row("newmodel", "New Model", "medium", 45.0, 0.40, 90))
+        b1 = propose_tiers.apply_changes(self.tiers, auto, "2026-10-11")
+        after_first = self.tiers.read_text()
+        # second run the same day, different candidate, validation fails
+        os.environ["MODEL_INTEL_VALIDATE_CMD"] = "false"
+        self.addCleanup(os.environ.__setitem__, "MODEL_INTEL_VALIDATE_CMD", "true")
+        self.t = json.loads(after_first)
+        auto2, _ = self.go(row("other", "Other Model", "medium", 46.0, 0.30, 90))
+        self.assertTrue(auto2)
+        with self.assertRaises(RuntimeError):
+            propose_tiers.apply_changes(self.tiers, auto2, "2026-10-11")
+        self.assertEqual(self.tiers.read_text(), after_first)          # the first apply survives
+        self.assertEqual(b1.name, "tiers.json.bak-model-intel-2026-10-11")
+        self.assertTrue((self.tmp / "tiers.json.bak-model-intel-2026-10-11.2").exists())
+        self.assertNotIn("opencode-go/newmodel", b1.read_text())        # original backup untouched
+
+
 if __name__ == "__main__":
     unittest.main()

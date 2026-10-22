@@ -168,12 +168,24 @@ def claude_count(lst):
     return sum(1 for x in lst if x.startswith("cliproxy/claude") or "/claude-" in x)
 
 
+def backup_path(path, today):
+    """A backup name not used yet: .bak-model-intel-DATE, then -DATE.2, -DATE.3 ... (never overwrites one)."""
+    first = path.with_name(path.name + f".bak-model-intel-{today}")
+    if not first.exists():
+        return first
+    n = 2
+    while first.with_name(f"{first.name}.{n}").exists():
+        n += 1
+    return first.with_name(f"{first.name}.{n}")
+
+
 def apply_changes(path, auto, today):
-    """Back up, insert candidates ahead of the incumbent, validate, restore on failure. Returns backup path."""
+    """Back up, insert candidates ahead of the incumbent, validate, restore on failure. Returns backup path.
+    Every apply writes its own fresh backup of the file as it is right now, so a failed second run on the same
+    day restores that run's starting point, not the morning's file (which would undo the earlier apply)."""
     path = Path(path)
-    backup = path.with_name(path.name + f".bak-model-intel-{today}")
-    if not backup.exists():
-        shutil.copy2(path, backup)
+    backup = backup_path(path, today)
+    shutil.copy2(path, backup)
     tiers = json.loads(path.read_text())
     before = {c: claude_count(l) for c, _, _, l in chains(tiers)}
     notes = []
