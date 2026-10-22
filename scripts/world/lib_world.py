@@ -117,7 +117,9 @@ _SCRUB_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{6,}", re.IGNORECASE),
     re.compile(r"ghp_[A-Za-z0-9]{6,}", re.IGNORECASE),
     re.compile(r"gh[ousr]_[A-Za-z0-9]{6,}", re.IGNORECASE),
-    re.compile(r"xox[abprs]- ", re.IGNORECASE),
+    # Server: /xox[abprs]-/i. Eat the whole token, not just the prefix (a stray space here once let
+    # `xoxb-…` through, and the server then 400'd the batch).
+    re.compile(r"xox[abprs]-[A-Za-z0-9-]*", re.IGNORECASE),
     re.compile(r"bearer\s+\S+", re.IGNORECASE),
     re.compile(r"[A-Za-z0-9+/=_-]{33,}"),
 )

@@ -327,7 +327,7 @@ server_res = [
     re.compile(r'sk-[A-Za-z0-9_-]{6,}', re.IGNORECASE),
     re.compile(r'ghp_[A-Za-z0-9]{6,}', re.IGNORECASE),
     re.compile(r'gh[ousr]_[A-Za-z0-9]{6,}', re.IGNORECASE),
-    re.compile(r'xox[abprs]- ', re.IGNORECASE),
+    re.compile(r'xox[abprs]-', re.IGNORECASE),
     re.compile(r'bearer\s+\S+', re.IGNORECASE),
     re.compile(r'[A-Za-z0-9+/=_-]{33,}'),
 ]
@@ -337,6 +337,8 @@ cases = {
     "sk_key":      "deploy with sk-abcdefghijklmnopqrstuv to staging",
     "bearer_hdr":  "auth header: Bearer xoxb-1234567890abcdefghij token here",
     "normal":      "ran tests ok",
+    "slack_bot":   "posted with " + "xox" + "b-1234-5678-abcdefXYZ" + " to #ops",
+    "slack_user":  "XOX" + "P-99-abc in a title",
 }
 out = {}
 for name, raw in cases.items():
