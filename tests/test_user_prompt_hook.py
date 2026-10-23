@@ -1,5 +1,7 @@
 """Tests for hooks/user-prompt-kb-check.sh: once-per-session blocks, skip rules and Jev call count (suggest stubbed)."""
 import json
+import time
+import shutil
 import os
 import subprocess
 import tempfile
@@ -189,6 +191,37 @@ class HookTest(unittest.TestCase):
         ctx = self.context(p)
         self.assertNotIn("KB prior art", ctx)
         self.assertIn("REMINDER", ctx)
+
+
+    # --- the search is always time-limited, and the hook's temp files never leak ---
+    def slow_kb_bin(self):
+        marker = os.path.join(self.home, "kb-ran")
+        stub = os.path.join(self.home, "slow-kb-retrieve")
+        with open(stub, "w") as f:
+            f.write(f"#!/bin/bash\ntouch {marker}\nsleep 8\necho '### [[late]]'\n")
+        os.chmod(stub, 0o755)
+        return stub, marker
+
+    def run_slow(self, session, path=None):
+        stub, marker = self.slow_kb_bin()
+        tmpd = os.path.join(self.home, "tmp-" + session)
+        os.makedirs(tmpd)
+        env = {"DEVSTACK_KB_RETRIEVE_BIN": stub, "TMPDIR": tmpd}
+        if path:
+            env["PATH"] = path
+        t0 = time.monotonic()
+        p = self.run_proc("how did we fix the invoice extraction", session, env)
+        return p, time.monotonic() - t0, marker, tmpd
+
+    def test_slow_kb_retrieve_is_cut_off_and_leaves_no_temp_files(self):
+        p, took, marker, tmpd = self.run_slow("s-slow")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(took, 6)
+        self.assertTrue(os.path.exists(marker))
+        ctx = self.context(p)
+        self.assertIn("REMINDER", ctx)
+        self.assertNotIn("[[late]]", ctx)
+        self.assertEqual(os.listdir(tmpd), [])
 
 
 if __name__ == "__main__":

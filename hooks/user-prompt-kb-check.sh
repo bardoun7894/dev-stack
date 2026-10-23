@@ -44,9 +44,31 @@ find_project_root() {
 }
 
 # Everything below prints into a temp file; the end of the script wraps it as hookSpecificOutput.additionalContext.
+# The emit runs from an EXIT trap, so an early `exit` anywhere below still restores stdout,
+# prints what was captured and removes the temp files.
 hook_capture=""
+kb_out=""
+kb_pid=""
+emit_hook_output() {
+  [ -n "$kb_pid" ] && kill "$kb_pid" 2>/dev/null
+  [ -n "${kb_tmp:-}" ] && rm -f "$kb_tmp"
+  [ -n "$hook_capture" ] || return 0
+  exec 1>&3 3>&-
+  local hook_text
+  hook_text=$(cat "$hook_capture" 2>/dev/null)
+  rm -f "$hook_capture"
+  hook_capture=""
+  if [ -n "$hook_text" ]; then
+    printf '%s' "$hook_text" | /usr/bin/python3 -c '
+import json, sys
+text = sys.stdin.buffer.read().decode("utf-8", "replace")
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}, ensure_ascii=False))
+' 2>/dev/null || printf '%s\n' "$hook_text"
+  fi
+}
 if hook_capture=$(mktemp "${TMPDIR:-/tmp}/kb-hook.XXXXXX" 2>/dev/null); then
   exec 3>&1 1>"$hook_capture"
+  trap emit_hook_output EXIT
 else
   hook_capture=""
 fi
@@ -327,8 +349,6 @@ fi
 # Started now so it overlaps the reminder checks below and joined at the end. Hard timeout 2 s; any error or timeout -> no block. DEVSTACK_KB_RETRIEVE_BIN
 # overrides the binary; KB_PRIOR_ART=0 turns the block off.
 kb_bin="${DEVSTACK_KB_RETRIEVE_BIN:-$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/../bin/kb-retrieve}"
-kb_out=""
-kb_pid=""
 # Skipped for system-generated prompts (task / background notifications), which are not user questions.
 kb_system_prompt=0
 case "$user_prompt" in
@@ -338,9 +358,10 @@ if [ -n "$user_prompt" ] && [ "${KB_PRIOR_ART:-1}" != "0" ] && [ $kb_system_prom
   set -f; set -- $user_prompt; set +f
   if [ $# -ge 3 ]; then
     kb_out=$(mktemp "${TMPDIR:-/tmp}/kb-prior-art.XXXXXX" 2>/dev/null) || kb_out=""
+    kb_tmp="$kb_out"
     if [ -n "$kb_out" ]; then
       kb_timeout=$(command -v timeout || command -v gtimeout)
-      ${kb_timeout:+$kb_timeout 2} "$kb_bin" --root "${root:-$PWD}" -- "${user_prompt:0:2000}" >"$kb_out" 2>/dev/null &
+      ${kb_timeout:+$kb_timeout 2} "$kb_bin" --root "${root:-$PWD}" -- "${user_prompt:0:2000}" >"$kb_out" 2>/dev/null 3>&- &
       kb_pid=$!
     fi
   fi
@@ -426,22 +447,12 @@ if [ -n "$kb_pid" ]; then
   if wait "$kb_pid" 2>/dev/null; then
     kb_text=$(cat "$kb_out" 2>/dev/null)
   fi
+  kb_pid=""
 fi
-[ -n "$kb_out" ] && rm -f "$kb_out"
+[ -n "${kb_tmp:-}" ] && rm -f "$kb_tmp"
+kb_out=""
 if [ -n "$kb_text" ]; then
   printf '%s\n%s\n' 'KB prior art (auto-retrieved; cite [[links]] when relevant):' "$kb_text"
 fi
 
-# --- Emit: the captured text becomes hookSpecificOutput.additionalContext (JSON). Falls back to plain text. ---
-if [ -n "$hook_capture" ]; then
-  exec 1>&3 3>&-
-  hook_text=$(cat "$hook_capture" 2>/dev/null)
-  rm -f "$hook_capture"
-  if [ -n "$hook_text" ]; then
-    printf '%s' "$hook_text" | /usr/bin/python3 -c '
-import json, sys
-text = sys.stdin.buffer.read().decode("utf-8", "replace")
-print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}, ensure_ascii=False))
-' 2>/dev/null || printf '%s\n' "$hook_text"
-  fi
-fi
+# --- Emit: emit_hook_output (EXIT trap) turns the captured text into hookSpecificOutput.additionalContext. ---
