@@ -202,6 +202,19 @@ class HookTest(unittest.TestCase):
         os.chmod(stub, 0o755)
         return stub, marker
 
+    def path_without(self, *names):
+        # A PATH that has everything in /usr/bin and /bin except the given binaries.
+        d = os.path.join(self.home, "path-without-" + "-".join(names))
+        os.makedirs(d, exist_ok=True)
+        for src in ("/usr/local/bin", "/usr/bin", "/bin"):
+            if not os.path.isdir(src):
+                continue
+            for n in os.listdir(src):
+                if n in names or os.path.lexists(os.path.join(d, n)):
+                    continue
+                os.symlink(os.path.join(src, n), os.path.join(d, n))
+        return d
+
     def run_slow(self, session, path=None):
         stub, marker = self.slow_kb_bin()
         tmpd = os.path.join(self.home, "tmp-" + session)
@@ -221,6 +234,23 @@ class HookTest(unittest.TestCase):
         ctx = self.context(p)
         self.assertIn("REMINDER", ctx)
         self.assertNotIn("[[late]]", ctx)
+        self.assertEqual(os.listdir(tmpd), [])
+
+    def test_without_timeout_binary_perl_alarm_limits_the_search(self):
+        if shutil.which("perl") is None:
+            self.skipTest("no perl")
+        p, took, marker, _ = self.run_slow("s-perl", self.path_without("timeout", "gtimeout"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(took, 6)
+        self.assertTrue(os.path.exists(marker))
+        self.assertNotIn("[[late]]", self.context(p))
+
+    def test_without_any_time_limit_the_search_is_skipped(self):
+        p, took, marker, tmpd = self.run_slow("s-none", self.path_without("timeout", "gtimeout", "perl"))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(took, 6)
+        self.assertFalse(os.path.exists(marker))
+        self.assertIn("REMINDER", self.context(p))
         self.assertEqual(os.listdir(tmpd), [])
 
 

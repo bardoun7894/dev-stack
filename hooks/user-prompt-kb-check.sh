@@ -359,9 +359,19 @@ if [ -n "$user_prompt" ] && [ "${KB_PRIOR_ART:-1}" != "0" ] && [ $kb_system_prom
   if [ $# -ge 3 ]; then
     kb_out=$(mktemp "${TMPDIR:-/tmp}/kb-prior-art.XXXXXX" 2>/dev/null) || kb_out=""
     kb_tmp="$kb_out"
+    # Never run unbounded: timeout/gtimeout, else perl's alarm (macOS without coreutils), else skip the block.
+    kb_timeout=$(command -v timeout || command -v gtimeout)
+    if [ -n "$kb_timeout" ]; then
+      kb_limit=("$kb_timeout" 2)
+    elif command -v perl >/dev/null 2>&1; then
+      kb_limit=(perl -e 'alarm shift; exec @ARGV or exit 127' 2)
+    else
+      kb_limit=()
+      kb_out=""
+    fi
     if [ -n "$kb_out" ]; then
-      kb_timeout=$(command -v timeout || command -v gtimeout)
-      ${kb_timeout:+$kb_timeout 2} "$kb_bin" --root "${root:-$PWD}" -- "${user_prompt:0:2000}" >"$kb_out" 2>/dev/null 3>&- &
+      # 3>&- : the search must not hold the hook's real stdout open after it is killed.
+      "${kb_limit[@]}" "$kb_bin" --root "${root:-$PWD}" -- "${user_prompt:0:2000}" >"$kb_out" 2>/dev/null 3>&- &
       kb_pid=$!
     fi
   fi
