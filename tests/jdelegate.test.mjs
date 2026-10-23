@@ -1016,6 +1016,26 @@ test('F16 routing: an explicit --harness agy ignores the exhausted file', () => 
   assert.match(agyRoute(exFile('explicit', new Date(Date.now() + 36e5).toISOString()), ['--harness', 'agy']), /→ agy · agy\//);
 });
 
+test('F16 run: a transient RESOURCE_EXHAUSTED 429 (no "quota reached", no reset) does not mark agy exhausted', () => {
+  jevStub();
+  const relay = join(tmp, 'agy-ratelimit-relay.mjs');
+  const err = 'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Too many requests, retry shortly.","status":"RESOURCE_EXHAUSTED","error_code":429,"retryable":true}';
+  write(relay, `import { mkdirSync, writeFileSync } from 'node:fs';
+const o = process.argv[process.argv.indexOf('--out-dir') + 1];
+mkdirSync(o, { recursive: true });
+writeFileSync(o + '/stderr.txt', ${JSON.stringify('ERR\n')}.replace('ERR', ${JSON.stringify(err)}));
+writeFileSync(o + '/result.json', JSON.stringify({ status: 'failed', exitCode: 1 }));
+process.exit(1);
+`);
+  stub('claude', 'echo RETRIED-ON-CLAUDE');
+  const f = exFile('ratelimit');
+  spawnSync(process.execPath, [JD, '--no-tab', '--cwd', repo, 'restyle the settings page layout'], { encoding: 'utf8', timeout: 60000,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: join(tmp, 'agyrl-cache'),
+      JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AGY_RELAY: relay,
+      JDELEGATE_AGY_EXHAUSTED_FILE: f, UI_ANSWER: '0.9', JEV_LOG: jevLog } });
+  assert.ok(!existsSync(f), 'a rate limit must not lock agy out');
+});
+
 test('F16 run: an agy RESOURCE_EXHAUSTED failure records the reset and retries once on claude at the same tier', () => {
   jevStub();
   const relay = join(tmp, 'agy-quota-relay.mjs');

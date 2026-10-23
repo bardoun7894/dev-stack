@@ -373,11 +373,14 @@ function agyExhaustedUntil() {
   return t > Date.now() ? t : 0;
 }
 /** Ms until agy works again from an agy quota error text ("Individual quota reached ... Resets in 56h40m51s."); undefined when the text is not a quota error. */
+// A bare RESOURCE_EXHAUSTED is also what a transient 429 rate limit says; only "quota reached"
+// or a printed reset marks the quota as spent. Otherwise one burst would lock agy out for 6 h.
 function agyQuotaResetMs(text) {
-  if (!/RESOURCE_EXHAUSTED|quota reached/i.test(text)) return undefined;
   const m = text.match(/Resets? in\s+(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?!s))?\s*(?:(\d+)\s*s)?/i);
   const ms = m ? ((+m[1] || 0) * 864e5 + (+m[2] || 0) * 36e5 + (+m[3] || 0) * 6e4 + (+m[4] || 0) * 1e3) : 0;
-  return ms > 0 ? ms : AGY_QUOTA_DEFAULT_MS;
+  if (/quota reached/i.test(text)) return ms > 0 ? ms : AGY_QUOTA_DEFAULT_MS;
+  if (/RESOURCE_EXHAUSTED/i.test(text) && ms > 0) return ms;
+  return undefined;
 }
 /** An agy worker that hit its quota: record agy as exhausted until the printed reset so every later run routes UI work to claude. Returns true when it did. */
 function markAgyExhausted(attemptP, run) {
