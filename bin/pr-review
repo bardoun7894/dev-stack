@@ -71,7 +71,6 @@ const CLAUDE_ARGS = [
   "--settings", '{"disableAllHooks":true,"autoMemoryEnabled":false,"disableBundledSkills":true}',
   "--strict-mcp-config", "--tools", "",
 ];
-const CLAUDE_ARGS_FALLBACK = [...CLAUDE_ARGS.slice(0, -2), "--disallowedTools", "Bash", "Edit", "Write"];
 
 // The single place gh, claude, pi, opencode and jev are invoked.
 function exec(cmd, args, { input, cwd, timeout = 60000, env: envOverride } = {}) {
@@ -91,13 +90,11 @@ const isBot = (x) => x?.author?.login === (botLogin ??= gh(["api", "user", "--jq
 const isDocs = (p) => /\.(md|mdx|txt|rst)$/.test(p) || p.startsWith("docs/");
 const isUiPath = (p) => UI_PATH_RE.test(p);
 
+// No fallback without `--tools ""`: the reviewed diff is untrusted input, and a deny-list
+// (Bash/Edit/Write) would still leave Read, WebFetch and friends to a prompt-injected model.
+// A CLI that rejects --tools fails the review closed, like any other claude error.
 function askClaude(input) {
-  try {
-    return exec("claude", CLAUDE_ARGS, { input, cwd: tmpdir(), timeout: TIMEOUT_MS });
-  } catch (e) {
-    if (!/tools/i.test(e.message)) throw e;
-    return exec("claude", CLAUDE_ARGS_FALLBACK, { input, cwd: tmpdir(), timeout: TIMEOUT_MS });
-  }
+  return exec("claude", CLAUDE_ARGS, { input, cwd: tmpdir(), timeout: TIMEOUT_MS });
 }
 
 // Parses `claude -p --output-format json`. Throws on anything but a JSON object with a string `result` (fail closed).

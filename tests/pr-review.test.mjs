@@ -52,7 +52,7 @@ else if (cmd === "jev") {
   }
 }
 else if (cmd === "claude") {
-  if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); }
+  if (sc.claudeFail) { process.stderr.write(sc.claudeFail === "tools" ? "error: unknown option '--tools'" : "boom"); process.exit(1); }
   if (sc.claudeRaw !== undefined) out(sc.claudeRaw);
   else out(JSON.stringify({ type: "result", result: sc.claudeOut ?? "No blocking issues", total_cost_usd: sc.claudeCost ?? 0.0123, usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 50 } }));
 }
@@ -151,6 +151,16 @@ test("claude failure -> nothing posted, non-zero exit, error logged", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /error/);
   assert.equal(r.posts.length, 0);
+});
+
+test("claude rejecting --tools -> fails closed, no retry with a weaker tool list", () => {
+  const r = run(["o/r", "1"], { pr: pr(), claudeFail: "tools" });
+  assert.notEqual(r.status, 0);
+  assert.equal(r.posts.length, 0);
+  assert.equal(r.claudes.length, 1);
+  const a = r.claudes[0].args;
+  assert.equal(a[a.indexOf("--tools") + 1], "");
+  assert.ok(!a.includes("--disallowedTools"));
 });
 
 test("empty claude output -> error, nothing posted", () => {
