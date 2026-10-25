@@ -87,8 +87,8 @@ const THINK = ["off", "minimal", "low", "medium", "high"];
 
 // ── args ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
-const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor (--advisor opus; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
-const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", dryRun: false, gc: false, older: 60, brief: "" };
+const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--model REF] [--retry] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor only on a retry (--retry or FACTORY_RETRY=1; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  --model REF (provider/model) pins the model and skips routing; a provider outside the owner rule D0 exits 2.\n  XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY are unset for the worker (OPENROUTER_API_KEY stays: Jev reads it).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
+const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", model: undefined, retry: process.env.FACTORY_RETRY === "1", dryRun: false, gc: false, older: 60, brief: "" };
 // JDELEGATE_TIMEOUT_MS overrides --timeout for tests (and fine-grained timeouts in general). opt.timeout stays in minutes for the help text.
 const TIMEOUT_OVERRIDE_MS = process.env.JDELEGATE_TIMEOUT_MS ? Number(process.env.JDELEGATE_TIMEOUT_MS) : undefined;
 const timeoutMs = () => TIMEOUT_OVERRIDE_MS ?? Math.max(1, opt.timeout) * 60_000;
@@ -108,6 +108,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--role") opt.role = argv[++i] ?? "";
   else if (a === "--no-auto-role") opt.autoRole = false;
   else if (a === "--no-auto-mcp") opt.autoMcp = false;
+  else if (a === "--model") opt.model = argv[++i] ?? "";
+  else if (a === "--retry") opt.retry = true;
   else if (a === "--dry-run") opt.dryRun = true;
   else if (a === "--no-escalate") opt.noEscalate = true;
   else if (a === "--gc") opt.gc = true;
@@ -115,6 +117,12 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--print") opt.print = true;
   else if (a === "--brief-file") opt.brief = readFileSync(argv[++i], "utf8");
   else opt.brief = opt.brief ? `${opt.brief} ${a}` : a;
+}
+// Owner rule D0 (2026-10-24): only providers with a quota subscription. No openrouter, no openai/openai-codex.
+const D0_PROVIDERS = new Set(["cliproxy", "xai", "opencode-go", "agy", "gemini", "commandcode"]);
+if (opt.model !== undefined && !(/^[\w-]+\/\S+$/.test(opt.model) && D0_PROVIDERS.has(opt.model.slice(0, opt.model.indexOf("/"))))) {
+  console.error(`jdelegate: --model "${opt.model}" refused: pick provider/model with a provider from D0 (${[...D0_PROVIDERS].join(", ")}); no openrouter, no openai/openai-codex`);
+  process.exit(2);
 }
 if (argv[0] === "wait") {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -323,6 +331,19 @@ const alive = (ref) => {
 /** Provider -> worker CLI. Small OpenCode Go models run in opencode itself; agy refs run through the agy relay; pi takes the rest. */
 const harnessFor = (ref) =>
   ({ cliproxy: "claude", "openai-codex": "codex", "opencode-go": "opencode", agy: "agy" })[provider(ref)] ?? "pi";
+// --model pins run on the harness their provider implies. A different --harness would change which login the worker uses (D0);
+// providers jdelegate cannot launch (they would fall to pi) belong to server-agent.sh.
+if (opt.model !== undefined) {
+  const pinned = harnessFor(opt.model);
+  if (pinned === "pi") {
+    console.error(`jdelegate: --model "${opt.model}" refused: jdelegate has no harness for provider ${provider(opt.model)}; launch it with server-agent.sh`);
+    process.exit(2);
+  }
+  if (opt.harness && opt.harness !== pinned) {
+    console.error(`jdelegate: --model "${opt.model}" refused: --harness ${opt.harness} differs from the ${pinned} harness its provider runs on; drop --harness`);
+    process.exit(2);
+  }
+}
 
 // Quota-aware ranking (tiers.json quota_policy + bin/quota-snapshot). No quota_policy -> the static ranking above.
 const POLICY = CONFIG.quota_policy;
@@ -350,13 +371,15 @@ function windowsOf(quota, prov) {
   const w = Object.keys(WINDOW_LABEL).filter((k) => typeof e[k] === "number").map((k) => [k, e[k]]);
   return w.length ? w : undefined;
 }
-function bucketOf(ref, quota) {
+function bucketOf(ref, quota, kind) {
   const prov = provider(ref);
   if (METERED.has(prov)) return { bucket: 9 };
   const w = windowsOf(quota, prov);
   if (!w) return { bucket: PRIORITY[prov] ?? 2 };
   const top = Math.max(...w.map(([, f]) => f));
-  const bucket = top >= (POLICY.hot ?? 0.9) ? 3 : top >= (POLICY.warm ?? 0.7) ? 2 : 0;
+  // quota_policy.exempt.<kind>: providers never demoted for that kind (language stays on Claude at any usage).
+  const exempt = POLICY.exempt?.[kind]?.includes(prov);
+  const bucket = exempt ? 0 : top >= (POLICY.hot ?? 0.9) ? 3 : top >= (POLICY.warm ?? 0.7) ? 2 : 0;
   const driven = w.filter(([, f]) => f >= (POLICY.warm ?? 0.7)).map(([k, f]) => `${WINDOW_LABEL[k]} ${Math.round(f * 100)}%`);
   return { bucket, note: bucket ? `${prov} ${driven.join(", ")} → demoted` : undefined };
 }
@@ -392,21 +415,35 @@ function markAgyExhausted(attemptP, run) {
   return true;
 }
 
+const SKIPPED = new Set();
+
 /** noAgy: the agy lane is unusable (quota) for this pick, whatever --harness said. */
 function pick(d, { noAgy = false } = {}) {
   const thinkIdx = Math.max(0, THINK.indexOf(CONFIG.thinking?.[d.tier] ?? "medium"));
   const thinking = THINK[Math.min(THINK.length - 1, d.role === "thinker" ? Math.max(thinkIdx + 1, 2) : thinkIdx)];
   const uiWork = !opt.harness && d.ui >= 0.7 && (d.kind === "code" || d.kind === "general");
-  const agyUntil = uiWork && !noAgy ? agyExhaustedUntil() : 0;
-  if (!noAgy && !agyUntil && (opt.harness === "agy" || uiWork)) {
-    return { harness: "agy", ref: `agy/${CONFIG.agy_model ?? "gemini-3.8-flash-high"}`, thinking, why: `UI work (ui ${d.ui.toFixed(2)}) → agy` };
+  // Owner 2026-10-22: UI work runs on kinds.frontend (Sonnet 5.5 xhigh -> Opus -> Argon -> Grok); agy is a chain entry there, not the first stop.
+  const frontend = uiWork && !!CONFIG.kinds?.frontend;
+  const agyUntil = uiWork && !noAgy && !frontend ? agyExhaustedUntil() : 0;
+  if (!noAgy && !agyUntil && (opt.harness === "agy" || (uiWork && !frontend))) {
+    return { harness: "agy", ref: `agy/${CONFIG.agy_model ?? "gemini-3.8-flash-high"}`, thinking, kind: d.kind, why: `UI work (ui ${d.ui.toFixed(2)}) → agy` };
   }
-  const chain = [...new Set([...(CONFIG.kinds?.[d.kind]?.[d.tier] ?? []), ...(CONFIG.tiers?.[d.tier] ?? [])])];
+  const kind = frontend ? "frontend" : d.kind;
+  // Owner 2026-10-24: kind language is Claude only, so its chain never falls through to tiers.* (Arabic stays on Claude).
+  const kindOnly = kind === "language" && !!CONFIG.kinds?.language;
+  const full = [...new Set([...(CONFIG.kinds?.[kind]?.[d.tier] ?? []), ...(kindOnly ? [] : CONFIG.tiers?.[d.tier] ?? [])])].filter(alive);
+  // Providers without a jdelegate harness would fall to pi and fail (or bill); server-agent.sh launches them (same refusal as the --model pin).
+  const noHarness = full.filter((ref) => harnessFor(ref) === "pi");
+  const fresh = noHarness.filter((ref) => !SKIPPED.has(ref));
+  if (fresh.length) {
+    fresh.forEach((ref) => SKIPPED.add(ref));
+    console.error(`jdelegate: auto-route skips ${fresh.join(", ")}: no jdelegate harness for the provider; launch it with server-agent.sh`);
+  }
+  const chain = full.filter((ref) => !noHarness.includes(ref));
   const quota = loadQuota();
   const scored = chain
-    .filter(alive)
     .map((ref, i) => quota
-      ? { ref, i, ...bucketOf(ref, quota) }
+      ? { ref, i, ...bucketOf(ref, quota, kind) }
       : { ref, i, bucket: METERED.has(provider(ref)) ? 3 : (PRIORITY[provider(ref)] ?? 2) })
     .sort((x, y) => x.bucket - y.bucket || x.i - y.i)
     .filter((x) => noAgy || !opt.harness || harnessFor(x.ref) === opt.harness)
@@ -416,7 +453,7 @@ function pick(d, { noAgy = false } = {}) {
   const ref = ranked[0];
   if (!ref) return undefined;
   const agyNote = agyUntil ? `agy quota exhausted until ${new Date(agyUntil).toISOString()} → claude; ` : "";
-  return { harness: harnessFor(ref), ref, thinking, why: `${agyNote}${d.kind}·${d.tier} chain, first live${demoted.length ? `; quota: ${demoted.join("; ")}` : ""}` };
+  return { harness: harnessFor(ref), ref, thinking, kind, why: `${agyNote}${kind}·${d.tier} chain, first live${demoted.length ? `; quota: ${demoted.join("; ")}` : ""}` };
 }
 
 // ── 3. worker command ───────────────────────────────────────────────────
@@ -484,16 +521,17 @@ function leanMcpConfig() {
 const isLean = () => !(opt.full && !opt.mcp.length);
 let workerSkills = [];
 let workerRole;
-// Owner decision 2026-10-08: Sonnet/Haiku claude workers get the Opus advisor (claude --advisor, docs: code.claude.com/docs/en/advisor).
-// JDELEGATE_ADVISOR=0 turns it off; JDELEGATE_ADVISOR=<model> picks another advisor.
+// Owner decision 2026-10-08, narrowed by D7 (2026-10-24): Sonnet/Haiku claude workers get the Opus advisor (claude --advisor, docs: code.claude.com/docs/en/advisor)
+// only on a retry (--retry or FACTORY_RETRY=1). JDELEGATE_ADVISOR=0 turns it off; JDELEGATE_ADVISOR=<model> picks another advisor.
 function advisorFlag(id) {
   const env = (process.env.JDELEGATE_ADVISOR ?? "").trim();
-  if (env === "0" || !/sonnet|haiku/i.test(id)) return "";
+  if (!opt.retry || env === "0" || !/sonnet|haiku/i.test(id)) return "";
   return ` --advisor ${env.replace(/[^\w./-]/g, "") || "opus"}`;
 }
 function workerScript(p, run, briefFile) {
   const id = p.ref.slice(p.ref.indexOf("/") + 1);
-  const effortClaude = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
+  // Owner 2026-10-22: tiers.json kind_effort pins the claude effort per kind (review / frontend -> xhigh).
+  const effortClaude = (typeof CONFIG.kind_effort?.[p.kind] === "string" ? CONFIG.kind_effort[p.kind].replace(/[^a-z]/g, "") : "") || { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   const effortCodex = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   switch (p.harness) {
     case "claude":
@@ -646,14 +684,19 @@ async function selectWorker(harness) {
 // ── 4. run ──────────────────────────────────────────────────────────────
 // With an explicit --harness the selections do not depend on the route: start them now, alongside it.
 const earlySelection = opt.harness && !opt.print ? selectWorker(opt.harness) : undefined;
-const d = await routeDecision();
-// Owner rule 2026-10-03: a reviewer worker runs on the review chain (GPT first, Opus fallback), whatever kind the brief routed to.
+// --model REF: no routing question to Jev, no chain walk; the pin runs as given on the harness its provider implies (or --harness).
+const d = opt.model
+  ? { tier: "T3", kind: "code", role: "doer", conf: 1, ui: 0, ms: 0, failed: false, id: undefined }
+  : await routeDecision();
+// Owner rule 2026-10-03, revised 2026-10-22: a reviewer worker runs on the review chain (Opus 5.5 xhigh first, Argon then Grok; no OpenAI), whatever kind the brief routed to.
 if (opt.role === "reviewer" && CONFIG.kinds?.review) d.kind = "review";
 if (CONFIG.kinds?.test && d.kind !== "review" && isTestWork(opt.brief, opt.role)) d.kind = "test";
-const p = pick(d);
+const p = opt.model
+  ? { harness: opt.harness || harnessFor(opt.model), ref: opt.model, thinking: CONFIG.thinking?.[d.tier] ?? "medium", kind: d.kind, why: "pinned by --model" }
+  : pick(d);
 let head =
-  `[jdelegate] ${d.tier} ${d.kind}·${d.role} (jev @${(d.conf ?? 0).toFixed(2)}, ui ${d.ui.toFixed(2)}, ${d.ms}ms` +
-  `${d.failed ? `, jev failed: ${d.error} → safe default` : ""}) → ${p ? `${p.harness} · ${p.ref} · thinking ${p.thinking} (${p.why})` : "no live model"}`;
+  (opt.model ? `[jdelegate] pinned ${opt.model}` : `[jdelegate] ${d.tier} ${d.kind}·${d.role} (jev @${(d.conf ?? 0).toFixed(2)}, ui ${d.ui.toFixed(2)}, ${d.ms}ms` +
+  `${d.failed ? `, jev failed: ${d.error} → safe default` : ""})`) + ` → ${p ? `${p.harness} · ${p.ref} · thinking ${p.thinking} (${p.why})` : "no live model"}`;
 if (opt.print || !p) {
   console.log(head);
   process.exit(p ? 0 : 1);
@@ -690,6 +733,25 @@ function worldTrack(args) {
   } catch { /* the world feed never affects a worker */ }
 }
 
+/** Register the job with `factory submit` once per process (retries reuse the id). Returns the job id or "". Exit 97 = project halted: exit 97, nothing launched. Any other failure only warns. */
+let factoryJobId;
+function submitJob(briefFile) {
+  if (factoryJobId !== undefined) return factoryJobId;
+  const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+  const top = spawnSync("git", ["-C", opt.cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 5000 }).stdout?.trim();
+  const project = slug(basename(top || opt.cwd));
+  const owner = slug(workerRole?.name || opt.role || "jdelegate");
+  const r = spawnSync(process.env.FACTORY_BIN || "factory", ["submit", project, "--brief", briefFile, "--owner", owner], { encoding: "utf8", timeout: 4000 });
+  if (r.status === 97) {
+    console.error(`jdelegate: project ${project} is halted (factoryctl): ${(r.stderr || "").split("\n")[0].trim()}`);
+    process.exit(97);
+  }
+  factoryJobId = r.status === 0 ? (r.stdout || "").trim().split("\n").pop().replace(/[^A-Za-z0-9._:-]/g, "") : "";
+  if (factoryJobId) process.env.FACTORY_JOB_ID = factoryJobId;
+  else console.error(`jdelegate: warning: factory submit did not register the job (${r.error?.code || r.signal || `exit ${r.status}`}); launching unregistered`);
+  return factoryJobId;
+}
+
 function makeRun(attemptBrief, attemptP, attemptTier) {
   const run = join(CACHE, `${new Date().toISOString().replace(/[:.]/g, "-")}-${nameSlug}-${attemptTier}-${Math.random().toString(36).slice(2, 7)}`);
   mkdirSync(run, { recursive: true, mode: 0o700 });
@@ -704,6 +766,7 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     // No system-prompt file on these harnesses: the worker prompt rides in front of the brief.
     writeFileSync(briefFile, `${workerPrompt(workerSkills, workerRole)}\n--- TASK ---\n${attemptBrief}`);
   }
+  const jobId = submitJob(briefFile);
   const label = `${nameLabel} · ${attemptP.ref.split("/").pop()}`;
   writeFileSync(join(run, "run.sh"),
     `#!/bin/bash\n# jdelegate worker: ${label.replace(/[\r\n]+/g, " ")}\nset -o pipefail\n` +
@@ -711,7 +774,7 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     `echo $$ > ${q(join(run, "pid"))}\n` +
     `# the worker records its own exit (also when killed), so a dead jdelegate wrapper loses nothing: see \`jdelegate wait\`\n` +
     `trap 'rc=$?; [ -e ${q(join(run, "exit"))} ] || { echo $rc > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}; }' EXIT\n` +
-    `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n` +
+    `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n# D0: harness logins only; pay-per-token keys never reach the worker (OPENROUTER_API_KEY stays, Jev reads it)\nunset XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY\n${jobId ? `export FACTORY_JOB_ID=${q(jobId)}\n` : ""}` +
     `printf '\\e]2;%s\\a' ${q(label)}\necho ${q(`▶ ${label}  (${attemptTier} ${d.kind}·${d.role})`)}\n` +
     `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}\n` +
     `echo; echo "■ done (exit $RC) — result: "${q(run)}\n`, { mode: 0o755 });
@@ -865,12 +928,12 @@ async function killWorkerTree({ run, inlinePid, where, tab }) {
 const initialTier = d.tier;
 let tier = initialTier, currentP = p, brief = opt.brief;
 let result = await execute(brief, currentP, tier);
-if (markCodexExhausted(currentP, result.run)) {
+if (!opt.model && markCodexExhausted(currentP, result.run)) {
   const next = pick({ ...d, tier });
   if (next) { currentP = next; result = await execute(brief, currentP, tier); }
 }
 // agy out of quota: record it and retry once on the claude chain at the same tier (never escalate to agy T4 for this).
-if (markAgyExhausted(currentP, result.run)) {
+if (!opt.model && markAgyExhausted(currentP, result.run)) {
   const next = pick({ ...d, tier }, { noAgy: true });
   if (next) { currentP = next; result = await execute(brief, currentP, tier); }
 }
@@ -886,7 +949,7 @@ else {
     verdict = JSON.parse(judged.stdout).answers.outcome;
   } catch { verdict = undefined; }
 }
-if (!opt.noEscalate && TIERS.indexOf(tier) < 4 && verdict?.choice === "failed_needs_stronger" && Number(verdict.confidence) >= 0.6) {
+if (!opt.noEscalate && !opt.model && TIERS.indexOf(tier) < 4 && verdict?.choice === "failed_needs_stronger" && Number(verdict.confidence) >= 0.6) {
   const previousAnswer = result.answer.slice(0, 2000);
   const oldTier = tier;
   tier = TIERS[TIERS.indexOf(tier) + 1];
