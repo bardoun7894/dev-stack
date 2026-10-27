@@ -226,6 +226,62 @@ class ServerAuthTest(unittest.TestCase):
         self.assertEqual(r["source"], "api")
         self.assertEqual(seen["auth"], "Bearer srv")
 
+    def _fetch_by_token(self, table):
+        def fetch(url, headers, timeout):
+            v = table[headers["Authorization"].split(" ", 1)[1]]
+            if isinstance(v, Exception):
+                raise v
+            return {"five_hour": {"utilization": v * 100}, "seven_day": {"utilization": v * 100}}
+        return fetch
+
+    def test_best_of_two_accounts(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-full.json", "2099-01-01T00:00:00Z", "t-full")
+            self._write(d, "claude-free.json", "2099-01-01T00:00:00Z", "t-free")
+            r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d,
+                                fetch=self._fetch_by_token({"t-full": 1.0, "t-free": 0.2}))
+        self.assertAlmostEqual(r["weekly"], 0.2)
+        self.assertEqual(r["accounts"], 2)
+        self.assertEqual(r["accounts_ok"], 2)
+        self.assertIn("1 of 2", r["note"])
+        self.assertNotIn("claude-", r["note"])
+
+    def test_one_account_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-bad.json", "2099-01-01T00:00:00Z", "t-bad")
+            self._write(d, "claude-ok.json", "2099-01-01T00:00:00Z", "t-ok")
+            r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d,
+                                fetch=self._fetch_by_token({"t-bad": OSError("boom"), "t-ok": 0.5}))
+        self.assertAlmostEqual(r["weekly"], 0.5)
+        self.assertEqual(r["accounts"], 2)
+        self.assertEqual(r["accounts_ok"], 1)
+
+    def test_expired_account_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-old.json", "2020-01-01T00:00:00Z", "t-old")
+            self._write(d, "claude-ok.json", "2099-01-01T00:00:00Z", "t-ok")
+            r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d,
+                                fetch=self._fetch_by_token({"t-ok": 0.3}))
+        self.assertEqual(r["accounts"], 1)
+        self.assertAlmostEqual(r["weekly"], 0.3)
+
+    def test_all_fail_no_token_leak(self):
+        import contextlib, io
+        secret = "sk-ant-FAKESECRET123"
+        def fetch(url, headers, timeout):
+            raise RuntimeError("failed with " + headers["Authorization"])
+        out, err = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-a.json", "2099-01-01T00:00:00Z", secret)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d, fetch=fetch)
+                snap = qs.build_snapshot({"cliproxy": lambda: r})
+                print(qs.table(snap))
+        self.assertEqual(r["source"], "error")
+        blob = out.getvalue() + err.getvalue() + json.dumps(snap)
+        self.assertTrue(secret not in blob and "Bearer" not in blob, "secret leaked (redacted)")
+
+
     def test_claude_quota_falls_back_to_creds(self):
         with tempfile.TemporaryDirectory() as d:
             cred = os.path.join(d, "c.json")

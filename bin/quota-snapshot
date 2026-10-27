@@ -100,14 +100,14 @@ def http_get(url, headers, timeout):
         return json.loads(resp.read().decode())
 
 
-def cliproxy_auth_token(auth_dir=AUTH_DIR, now=None):
-    """Access token of the live (non-expired, enabled) cliproxy claude auth with the newest expiry, else None."""
+def cliproxy_auth_tokens(auth_dir=AUTH_DIR, now=None):
+    """Access tokens of every live (non-expired, enabled) cliproxy claude auth, newest expiry first."""
     now = now or datetime.now(timezone.utc)
-    best = None
+    found = []
     try:
-        names = [n for n in os.listdir(auth_dir) if n.startswith("claude-") and n.endswith(".json")]
+        names = sorted(n for n in os.listdir(auth_dir) if n.startswith("claude-") and n.endswith(".json"))
     except OSError:
-        return None
+        return []
     for n in names:
         try:
             with open(os.path.join(auth_dir, n)) as f:
@@ -120,20 +120,56 @@ def cliproxy_auth_token(auth_dir=AUTH_DIR, now=None):
             continue
         if d.get("disabled") or not tok or exp <= now:
             continue
-        if best is None or exp > best[0]:
-            best = (exp, tok)
-    return best[1] if best else None
+        found.append((exp, tok))
+    found.sort(key=lambda x: x[0], reverse=True)
+    return [t for _, t in found]
 
 
-def claude_quota(creds_path=CREDS, use_keychain=True, fetch=http_get, timeout=6, auth_dir=AUTH_DIR):
-    token = cliproxy_auth_token(auth_dir) or claude_token(creds_path, use_keychain)
-    if not token:
-        return blank("error", "no Claude Code credentials")
+def cliproxy_auth_token(auth_dir=AUTH_DIR, now=None):
+    """Access token of the live cliproxy claude auth with the newest expiry, else None."""
+    toks = cliproxy_auth_tokens(auth_dir, now)
+    return toks[0] if toks else None
+
+
+def fetch_claude(token, fetch, timeout):
     try:
         body = fetch(USAGE_URL, {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"}, timeout)
     except Exception as e:
         return blank("error", ("usage request failed: " + type(e).__name__)[:120])
     return parse_claude(body)
+
+
+def used_max(r):
+    return max(v for v in (r["five_hour"], r["weekly"]) if v is not None)
+
+
+def claude_quota(creds_path=CREDS, use_keychain=True, fetch=http_get, timeout=6, auth_dir=AUTH_DIR):
+    tokens = cliproxy_auth_tokens(auth_dir)
+    if not tokens:
+        token = claude_token(creds_path, use_keychain)
+        if not token:
+            return blank("error", "no Claude Code credentials")
+        return fetch_claude(token, fetch, timeout)
+    pool = ThreadPoolExecutor(max_workers=len(tokens))
+    futures = [pool.submit(fetch_claude, t, fetch, timeout) for t in tokens]
+    wait(futures, timeout=timeout + 1)
+    results = []
+    for fut in futures:
+        try:
+            if fut.done():
+                results.append(fut.result())
+        except Exception:
+            pass
+    pool.shutdown(wait=False, cancel_futures=True)
+    ok = [r for r in results if r["source"] != "error"]
+    if not ok:
+        return blank("error", "usage request failed on all accounts", accounts=len(tokens), accounts_ok=0)
+    best = min(ok, key=used_max)
+    full = sum(1 for r in ok if used_max(r) >= 0.995)
+    best["accounts"] = len(tokens)
+    best["accounts_ok"] = len(ok)
+    best["note"] = f"{full} of {len(tokens)} accounts full; monthly window not exposed"
+    return best
 
 
 # ── openrouter (metered) / xai ──────────────────────────────────────────
