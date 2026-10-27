@@ -14,6 +14,7 @@
  *            --no-auto-skill (do not let Jev pick a skill; also JDELEGATE_AUTO_SKILL=0)  --dry-run (write the run dir, print run.sh, launch nothing)
  *            --role NAME (inline that agent definition from ~/.claude/agents or agents-parked under "## Role: NAME", capped 8000 chars)
  *            --no-auto-role (do not let Jev pick a role from config/worker-roles.json; also JDELEGATE_AUTO_ROLE=0)
+ *            --resume NAME "<message>" (relaunch that claude worker's session in a new tab; records live in $CACHE/.names/<name>.json)
  *            --no-auto-mcp (do not let Jev pick MCP servers when no --mcp is given; also JDELEGATE_AUTO_MCP=0)
  *
  * Lean claude workers (default; --full restores the plain `claude -p`): ~10k first-turn tokens instead of ~29k.
@@ -41,7 +42,7 @@
  * Decisions are logged under jev tag `router-delegate`.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -87,8 +88,8 @@ const THINK = ["off", "minimal", "low", "medium", "high"];
 
 // ── args ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
-const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--model REF] [--retry] [--dry-run] [--print] "<brief>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor only on a retry (--retry or FACTORY_RETRY=1; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  --model REF (provider/model) pins the model and skips routing; a provider outside the owner rule D0 exits 2.\n  XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY are unset for the worker (OPENROUTER_API_KEY stays: Jev reads it).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --dry-run writes the run dir and prints run.sh without launching.';
-const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", model: undefined, retry: process.env.FACTORY_RETRY === "1", dryRun: false, gc: false, older: 60, brief: "" };
+const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--model REF] [--retry] [--dry-run] [--print] "<brief>"\n       jdelegate --resume NAME "<message>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor only on a retry (--retry or FACTORY_RETRY=1; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  --model REF (provider/model) pins the model and skips routing; a provider outside the owner rule D0 exits 2.\n  XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY are unset for the worker (OPENROUTER_API_KEY stays: Jev reads it).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --resume NAME relaunches that named claude worker\'s session (same model, cwd, role) in a new tab with the message and prints the result. A non-claude worker or an unknown name exits 2. A new run whose --name is a live worker in the same cwd is refused (use --resume NAME); so is a second worker on a specs/NNN-dir another live worker already has (reviewer/verify exempt).\n  --dry-run writes the run dir and prints run.sh without launching.';
+const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", model: undefined, retry: process.env.FACTORY_RETRY === "1", dryRun: false, gc: false, older: 60, brief: "", resume: "" };
 // JDELEGATE_TIMEOUT_MS overrides --timeout for tests (and fine-grained timeouts in general). opt.timeout stays in minutes for the help text.
 const TIMEOUT_OVERRIDE_MS = process.env.JDELEGATE_TIMEOUT_MS ? Number(process.env.JDELEGATE_TIMEOUT_MS) : undefined;
 const timeoutMs = () => TIMEOUT_OVERRIDE_MS ?? Math.max(1, opt.timeout) * 60_000;
@@ -115,6 +116,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--gc") opt.gc = true;
   else if (a === "--older") opt.older = Number(argv[++i]);
   else if (a === "--print") opt.print = true;
+  else if (a === "--resume") opt.resume = argv[++i] ?? "";
   else if (a === "--brief-file") opt.brief = readFileSync(argv[++i], "utf8");
   else opt.brief = opt.brief ? `${opt.brief} ${a}` : a;
 }
@@ -183,6 +185,45 @@ if (opt.gc) {
 if (!opt.brief.trim()) {
   console.error(USAGE);
   process.exit(2);
+}
+
+// The human label (herdr tab title, echo lines) may be anything; the slug is what lands in a directory name.
+const slugOf = (s) => String(s).replace(/[^\w.-]/g, "").slice(0, 24) || "job";
+
+// ── named worker records (A10): $CACHE/.names/<slug>.json, written for every launched run ───────────
+const NAMES_DIR = join(CACHE, ".names");
+const recordPath = (name) => join(NAMES_DIR, `${slugOf(name)}.json`);
+const readRecord = (name) => readJson(recordPath(name));
+const pidAlive = (pid) => {
+  try { process.kill(pid, 0); } catch (e) { if (e.code !== "EPERM") return false; }
+  // EPERM (or a recycled pid) must not count as alive forever: the pid has to still be a bash/claude process.
+  const cmd = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 5000 }).stdout?.trim() ?? "";
+  return /^(\S*\/)?-?(bash|claude)(\s|$)/.test(cmd);
+};
+/** A record is live while its run has no exit file and its bash pid answers (a record younger than 30 s with no pid yet counts as live). */
+function recordLive(rec) {
+  if (!rec?.run || existsSync(join(rec.run, "exit"))) return false;
+  if (Date.now() - (Date.parse(rec.at) || 0) > 12 * 3600_000) return false;
+  let pid = Number(rec.pid) || 0;
+  if (!pid) { try { pid = Number(readFileSync(join(rec.run, "pid"), "utf8").trim()) || 0; } catch { /* not started yet */ } }
+  return pid ? pidAlive(pid) : Date.now() - (Date.parse(rec.at) || 0) < 30_000;
+}
+const repoOf = (cwd) => {
+  const top = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 5000 }).stdout?.trim();
+  try { return realpathSync(top || cwd); } catch { return top || cwd; }
+};
+/** Only the FIRST specs/NNN-x mention in the brief is the spec this worker implements; later ones are references. */
+const specsIn = (text) => { const m = String(text).match(/\bspecs\/(\d{3}-[\w.-]*\w)/); return m ? [m[1]] : []; };
+
+if (opt.resume) {
+  const rec = readRecord(opt.resume);
+  if (!rec) { console.error(`jdelegate: --resume "${opt.resume}": no worker record under ${NAMES_DIR}; start it with a normal run first`); process.exit(2); }
+  if (rec.harness !== "claude" || !rec.sessionId) { console.error(`jdelegate: --resume "${opt.resume}": that worker ran on the ${rec.harness} harness; only claude workers can be resumed`); process.exit(2); }
+  if (recordLive(rec)) { console.error(`jdelegate: --resume "${opt.resume}": the worker is still running (pid ${rec.pid || "?"}); wait for it first (jdelegate wait ${opt.resume})`); process.exit(2); }
+  opt.cwd = rec.cwd; opt.name = rec.name; opt.harness = "claude"; opt.model = rec.ref; opt.full = !!rec.full;
+  opt.role = rec.role || ""; opt.skills = rec.skills ?? []; opt.mcp = rec.mcp ?? [];
+  opt.autoSkill = false; opt.autoRole = false; opt.autoMcp = false;
+  opt.resumeRec = rec;
 }
 
 // ── skills and repo instructions for the lean claude worker ─────────────
@@ -267,7 +308,7 @@ const CONTRACT = `You are a worker. An orchestrator already did the KB research,
 Plain direct prose, no emoji.`;
 // KB prior art: Jev-screened, Haiku-condensed matches from the project KB in --cwd (bin/kb-retrieve --condense; falls back to the keyword matches). Empty when none match, on error, or with JDELEGATE_KB=0.
 const KB_RETRIEVE = process.env.DEVSTACK_KB_RETRIEVE_BIN || join(dirname(realpathSync(process.argv[1])), "kb-retrieve");
-let kbPriorArtText;
+let kbPriorArtText = opt.resume ? "" : undefined;
 function kbPriorArt() {
   if (process.env.JDELEGATE_KB === "0") return "";
   if (kbPriorArtText === undefined) {
@@ -282,11 +323,31 @@ function workerPrompt(skills, role) {
   return [CONTRACT, repo && `## Repo instructions\n${repo}`, role && roleSection(role), ...skills.map((s) => `## Skill: ${s.name}\n${cap(s.body, `skill ${s.name}`)}`), kb && `## KB prior art\n${cap(kb, "KB prior art")}`].filter(Boolean).join("\n\n") + "\n";
 }
 
-// The human label (herdr tab title, echo lines) may be anything; the slug is what lands in a directory name.
-const slugOf = (s) => String(s).replace(/[^\w.-]/g, "").slice(0, 24) || "job";
 opt.name ||= opt.brief.replace(/\s+/g, " ").trim().split(" ").slice(0, 4).join("-");
 const nameLabel = opt.name.replace(/[\x00-\x1f\x7f]+/g, " ").trim() || "job";
 const nameSlug = slugOf(opt.name);
+
+// A10 / G14 / G15: one name = one worker session; one spec dir = one implementer. Reviewer and verify workers are exempt from the spec rule.
+const EXEMPT_SPEC = opt.role === "reviewer" || opt.role === "researcher" || /^(review|verify|research)/i.test(nameLabel);
+if (!opt.resume && !opt.print) {
+  const same = readRecord(opt.name);
+  if (same && recordLive(same) && same.cwd === opt.cwd) {
+    console.error(`jdelegate: worker "${nameLabel}" is still running in ${opt.cwd}; use --resume ${nameLabel}`);
+    process.exit(2);
+  }
+  const mine = EXEMPT_SPEC ? [] : specsIn(opt.brief);
+  if (mine.length) {
+    const repo = repoOf(opt.cwd);
+    for (const f of existsSync(NAMES_DIR) ? readdirSync(NAMES_DIR).filter((n) => n.endsWith(".json")) : []) {
+      const other = readJson(join(NAMES_DIR, f));
+      const clash = other?.specs?.find((sp) => mine.includes(sp));
+      if (other && other.repo === repo && clash && recordLive(other)) {
+        console.error(`jdelegate: worker "${other.name}" is already running specs/${clash} in this repo; one spec = one implementer: use --resume ${other.name}`);
+        process.exit(2);
+      }
+    }
+  }
+}
 
 // ── 1. jev decides ──────────────────────────────────────────────────────
 async function decide(brief) {
@@ -528,20 +589,23 @@ function advisorFlag(id) {
   if (!opt.retry || env === "0" || !/sonnet|haiku/i.test(id)) return "";
   return ` --advisor ${env.replace(/[^\w./-]/g, "") || "opus"}`;
 }
+let currentSession = "";
+const resumeSession = opt.resumeRec?.sessionId ?? "";
 function workerScript(p, run, briefFile) {
   const id = p.ref.slice(p.ref.indexOf("/") + 1);
   // Owner 2026-10-22: tiers.json kind_effort pins the claude effort per kind (review / frontend -> xhigh).
   const effortClaude = (typeof CONFIG.kind_effort?.[p.kind] === "string" ? CONFIG.kind_effort[p.kind].replace(/[^a-z]/g, "") : "") || { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
+  const sessionFlag = resumeSession ? `--resume ${q(resumeSession)}` : `--session-id ${q(currentSession)}`;
   const effortCodex = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   switch (p.harness) {
     case "claude":
       if (!isLean())
-        return `claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+        return `claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} ${sessionFlag} --dangerously-skip-permissions "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
       // lean: brief on stdin (variadic --tools would swallow a trailing prompt argument). No CLAUDE.md files, no user
       // settings, no hooks, no auto-memory; the worker's context is <run>/worker-prompt.md. (--bare would break OAuth login.)
       // Skill tool on: the repo's own .claude/skills (project settings) stay reachable; slash commands stay off.
       // disableBundledSkills: with the Skill tool on, ~19 bundled Claude Code skills added ~3k first-turn tokens.
-      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"disableBundledSkills":true}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
+      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} ${sessionFlag} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"disableBundledSkills":true}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "codex":
       return `codex exec -m ${q(id)} -C ${q(opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "agy":
@@ -766,6 +830,7 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     // No system-prompt file on these harnesses: the worker prompt rides in front of the brief.
     writeFileSync(briefFile, `${workerPrompt(workerSkills, workerRole)}\n--- TASK ---\n${attemptBrief}`);
   }
+  currentSession = attemptP.harness === "claude" ? resumeSession || randomUUID() : "";
   const jobId = submitJob(briefFile);
   const label = `${nameLabel} · ${attemptP.ref.split("/").pop()}`;
   writeFileSync(join(run, "run.sh"),
@@ -778,7 +843,20 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     `printf '\\e]2;%s\\a' ${q(label)}\necho ${q(`▶ ${label}  (${attemptTier} ${d.kind}·${d.role})`)}\n` +
     `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}\n` +
     `echo; echo "■ done (exit $RC) — result: "${q(run)}\n`, { mode: 0o755 });
-  return { run, label };
+  const rec = {
+    name: nameLabel, slug: nameSlug, sessionId: currentSession, cwd: opt.cwd, repo: repoOf(opt.cwd), model: attemptP.ref.split("/").pop(), ref: attemptP.ref,
+    harness: attemptP.harness, full: !isLean(), role: workerRole?.name || opt.role || "", skills: workerSkills.filter((x) => !x.auto).map((x) => x.name),
+    mcp: attemptP.harness === "claude" && isLean() ? mcpNames : [], specs: EXEMPT_SPEC ? [] : opt.resumeRec ? (opt.resumeRec.specs ?? []) : specsIn(opt.brief), run, pid: 0, at: new Date().toISOString(),
+  };
+  saveRecord(rec);
+  return { run, label, rec };
+}
+/** <run>/session.json always; $CACHE/.names/<slug>.json only for a real launch (a dry run must not clobber a live record). */
+function saveRecord(rec) {
+  const put = (file) => { writeFileSync(`${file}.tmp`, JSON.stringify(rec, null, 2)); renameSync(`${file}.tmp`, file); };
+  put(join(rec.run, "session.json"));
+  if (opt.dryRun) return;
+  try { mkdirSync(NAMES_DIR, { recursive: true }); put(recordPath(rec.name)); } catch { /* the record is for resume and refusal checks only */ }
 }
 
 if (opt.dryRun) {
@@ -826,7 +904,7 @@ function markCodexExhausted(attemptP, run) {
 }
 
 async function execute(attemptBrief, attemptP, attemptTier) {
-  const { run, label } = makeRun(attemptBrief, attemptP, attemptTier);
+  const { run, label, rec } = makeRun(attemptBrief, attemptP, attemptTier);
   const started = Date.now();
   const ref = basename(run), model = attemptP.ref.split("/").pop(), project = basename(opt.cwd).toLowerCase();
   const worldEvent = (status, extra = []) => worldTrack(["--kind", "worker", "--project", project, "--status", status, "--title", label, "--ref", ref, "--model", model, ...extra, "--key", `run:${ref}:${status}`]);
@@ -853,6 +931,10 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     const child = spawn("bash", [join(run, "run.sh")], { stdio: "ignore", detached: true });
     inlinePid = child.pid;
   }
+  for (let i = 0; i < 30 && !rec.pid; i++) {
+    try { rec.pid = Number(readFileSync(join(run, "pid"), "utf8").trim()) || 0; } catch { await new Promise((r) => setTimeout(r, 100)); }
+  }
+  if (rec.pid) saveRecord(rec);
   // The timeout we enforce here, in ms. JDELEGATE_TIMEOUT_MS overrides --timeout for tests.
   const limitMs = timeoutMs();
   while (!existsSync(join(run, "exit"))) {
@@ -920,6 +1002,8 @@ async function killWorkerTree({ run, inlinePid, where, tab }) {
       for (const p of tree) { try { process.kill(p, "SIGKILL"); } catch {} }
     }
   }
+  // SIGKILL skips the EXIT trap: record the kill (137) so the run does not look alive.
+  if (!existsSync(join(run, "exit"))) { try { writeFileSync(join(run, "exit.tmp"), "137\n"); renameSync(join(run, "exit.tmp"), join(run, "exit")); } catch { /* run dir gone */ } }
   if (tab) {
     try { spawnSync("herdr", ["tab", "close", tab], { encoding: "utf8", timeout: 8000 }); } catch { /* the tab may be already gone */ }
   }

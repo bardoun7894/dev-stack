@@ -71,6 +71,8 @@ git remote get-url origin >/dev/null 2>&1 \
   || echo "BLOCKED: no git remote — no PR is possible until one exists"
 ```
 
+Before opening the PR also run `scripts/gate/spec-done.sh <repo> specs/<NNN-dir>` and paste its output: it fails on any unchecked `- [ ]` in tasks.md or a missing "Done when" user-flow table. It applies to specs created from 2026-10-27 onward (older specs have no Done-when matrix).
+
 Check 5 is not hypothetical: several local projects (`tokyo`, `up`, `vrcd`, `xavork-saas`, `law`, `software-factory`) have **no remote**, so every PR step silently cannot run there. Report that as blocked rather than claiming success.
 
 For a large change, split it with `gh stack` instead of one giant PR — the `gh-stack` skill is installed.

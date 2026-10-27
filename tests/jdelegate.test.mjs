@@ -1,7 +1,7 @@
 // node --test tests/jdelegate.test.mjs  — worker command and preamble of bin/jdelegate (--dry-run: no worker, no network)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -96,7 +96,7 @@ test('KB prior art: no match means no section', () => {
 test('--full command is the plain one', () => {
   const r = dry(['--full']);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.script, /claude -p --model 'claude-test' --effort \w+ --dangerously-skip-permissions "\$\(cat '[^']+brief\.md'\)" <\/dev\/null 2>&1 \| tee /);
+  assert.match(r.script, /claude -p --model 'claude-test' --effort \w+ --session-id '[0-9a-f-]{36}' --dangerously-skip-permissions "\$\(cat '[^']+brief\.md'\)" <\/dev\/null 2>&1 \| tee /);
   assert.doesNotMatch(r.script, /CLAUDE_CODE_DISABLE_CLAUDE_MDS|--settings|--setting-sources|--append-system-prompt-file/);
   assert.equal(r.prompt, undefined);
 });
@@ -1053,4 +1053,130 @@ test('F17 routing: an exhausted agy ref in a chain is skipped for the next candi
   jevStub();
   const out = agyRoute(exFile('chain-future', new Date(Date.now() + 36e5).toISOString()), [], { JEV_ROUTER_CONFIG: agyChain, UI_ANSWER: '0' });
   assert.match(out, /→ claude · cliproxy\/claude-test/);
+});
+
+// ── A10 / G14 / G15: session records, --resume, same-name and same-spec refusals (all --dry-run: no worker launched) ──
+const cacheA10 = join(tmp, 'cache-a10');
+const a10 = (args, { brief = 'do the thing', cwd = repo } = {}) => {
+  const r = dry(args, { env: { JDELEGATE_CACHE: cacheA10 }, brief, cwd });
+  return r;
+};
+const liveRecord = (name, extra = {}) => {
+  const run = join(tmp, `run-${name}`);
+  mkdirSync(run, { recursive: true });
+  const child = spawn('bash', ['-c', 'sleep 120; :'], { detached: true, stdio: 'ignore' });   // a live pid that outlives this call
+  child.unref();
+  process.on('exit', () => { try { process.kill(child.pid); } catch {} });
+  const rec = { name, cwd: repo, repo: realRepo, harness: 'claude', sessionId: '11111111-2222-4333-8444-555555555555', ref: 'cliproxy/claude-test', model: 'claude-test', run, pid: child.pid, specs: [], at: new Date().toISOString(), ...extra };
+  write(join(cacheA10, '.names', `${name}.json`), JSON.stringify(rec));
+  return rec;
+};
+const realRepo = (await import('node:fs')).realpathSync(repo);
+
+test('claude run: explicit --session-id and a per-run session record', () => {
+  const r = a10(['--name', 'rec-a']);
+  assert.equal(r.status, 0, r.stderr);
+  const sid = r.script.match(/--session-id '([0-9a-f-]{36})'/)?.[1];
+  assert.ok(sid, r.script);
+  const rec = JSON.parse(readFileSync(join(r.run, 'session.json'), 'utf8'));
+  assert.equal(rec.sessionId, sid);
+  assert.equal(rec.name, 'rec-a');
+  assert.equal(rec.cwd, repo);
+  assert.equal(rec.harness, 'claude');
+  assert.equal(rec.model, 'claude-test');
+  assert.ok('pid' in rec);
+  assert.equal(existsSync(join(cacheA10, '.names', 'rec-a.json')), false, 'a dry run must not write the named record');
+});
+
+test('--resume builds claude --resume <id> with the recorded model and cwd, message as brief', () => {
+  liveRecord('res-a'); // live first, then mark finished
+  const rec = JSON.parse(readFileSync(join(cacheA10, '.names', 'res-a.json'), 'utf8'));
+  writeFileSync(join(rec.run, 'exit'), '0\n');
+  const r = a10(['--resume', 'res-a'], { brief: 'fix the review findings' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.script, /claude -p --model 'claude-test' .*--resume '11111111-2222-4333-8444-555555555555'/);
+  assert.doesNotMatch(r.script, /--session-id/);
+  assert.match(r.script, new RegExp(`cd '${repo}'`));
+  assert.equal(readFileSync(join(r.run, 'brief.md'), 'utf8'), 'fix the review findings');
+});
+
+test('--resume refuses an unknown name and a non-claude worker (exit 2)', () => {
+  const none = a10(['--resume', 'nobody']);
+  assert.equal(none.status, 2);
+  assert.match(none.stderr, /no worker record/);
+  const rec = liveRecord('res-codex', { harness: 'codex', sessionId: '' });
+  writeFileSync(join(rec.run, 'exit'), '0\n');
+  const cx = a10(['--resume', 'res-codex']);
+  assert.equal(cx.status, 2);
+  assert.match(cx.stderr, /only claude workers can be resumed/);
+});
+
+test('--resume refuses while that worker is still running', () => {
+  liveRecord('res-live');
+  const r = a10(['--resume', 'res-live']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /still running/);
+});
+
+test('same --name as a live worker in the same cwd: refused with "use --resume <name>"', () => {
+  liveRecord('dup-a');
+  const r = a10(['--name', 'dup-a']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /use --resume dup-a/);
+});
+
+test('same --name is fine once the worker finished', () => {
+  const rec = liveRecord('dup-done');
+  writeFileSync(join(rec.run, 'exit'), '0\n');
+  assert.equal(a10(['--name', 'dup-done']).status, 0);
+});
+
+test('G15: a second worker on the same specs/NNN dir is refused and pointed at --resume', () => {
+  liveRecord('impl-a', { specs: ['007-widget'] });
+  const r = a10(['--name', 'impl-b'], { brief: 'implement specs/007-widget/tasks.md' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /specs\/007-widget/);
+  assert.match(r.stderr, /--resume impl-a/);
+  assert.equal(a10(['--name', 'impl-c'], { brief: 'implement specs/008-other/tasks.md' }).status, 0, 'another spec dir is fine');
+});
+
+test('G15: --role reviewer and review*/verify* names are exempt', () => {
+  const brief = 'check specs/007-widget against the diff';
+  assert.equal(a10(['--name', 'x-rev', '--role', 'reviewer', '--no-auto-role'], { brief }).status, 0);
+  assert.equal(a10(['--name', 'review-007'], { brief }).status, 0);
+  assert.equal(a10(['--name', 'verify-007'], { brief }).status, 0);
+});
+
+test('F1: --resume keeps the specs of the resumed record, not those of the new message', () => {
+  const rec = liveRecord('res-specs', { specs: ['007-widget'] });
+  writeFileSync(join(rec.run, 'exit'), '0\n');
+  const r = a10(['--resume', 'res-specs'], { brief: 'also look at specs/009-other' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(r.run, 'session.json'), 'utf8')).specs, ['007-widget']);
+});
+
+test('F2: only the first specs/NNN mention counts; researcher role and research* names are exempt', () => {
+  const brief = 'implement specs/011-first, compare with specs/012-second';
+  const r = a10(['--name', 'impl-first'], { brief });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(r.run, 'session.json'), 'utf8')).specs, ['011-first']);
+  const e = a10(['--name', 'research-x'], { brief });
+  assert.deepEqual(JSON.parse(readFileSync(join(e.run, 'session.json'), 'utf8')).specs, []);
+  const e2 = a10(['--name', 'whatever', '--role', 'researcher', '--no-auto-role'], { brief });
+  assert.deepEqual(JSON.parse(readFileSync(join(e2.run, 'session.json'), 'utf8')).specs, []);
+});
+
+test('F3: a record whose pid is not bash/claude, or older than 12 h, is dead (resume allowed)', () => {
+  const child = spawn('sleep', ['120'], { detached: true, stdio: 'ignore' });
+  child.unref();
+  process.on('exit', () => { try { process.kill(child.pid); } catch {} });
+  const run = join(tmp, 'run-f3a');
+  mkdirSync(run, { recursive: true });
+  const base = { name: 'f3-a', cwd: repo, repo: realRepo, harness: 'claude', sessionId: '11111111-2222-4333-8444-555555555555', ref: 'cliproxy/claude-test', model: 'claude-test', specs: [], run };
+  write(join(cacheA10, '.names', 'f3-a.json'), JSON.stringify({ ...base, pid: child.pid, at: new Date().toISOString() }));
+  assert.equal(a10(['--resume', 'f3-a']).status, 0, 'sleep pid is not a worker');
+  liveRecord('f3-b', { at: new Date(Date.now() - 13 * 3600_000).toISOString() });
+  assert.equal(a10(['--resume', 'f3-b']).status, 0, 'a 13 h old record is dead');
+  liveRecord('f3-c');
+  assert.equal(a10(['--resume', 'f3-c']).status, 2, 'a fresh bash pid is still live');
 });
