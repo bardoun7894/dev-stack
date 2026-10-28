@@ -233,7 +233,7 @@ test('--role: override line only when the body tells the worker to spawn; parked
   jevStub();
   assert.doesNotMatch(rdry(['--role', 'reviewer']).prompt, /single worker/);
   assert.match(rdry(['--role', 'designer']).prompt, /DESIGNER-BODY/);
-  assert.ok(rdry(['--role', 'big']).prompt.split('z').length - 1 <= 8000);
+  assert.ok(Math.max(...(rdry(['--role', 'big']).prompt.match(/z+/g) ?? [''] ).map((m) => m.length)) <= 8000);   // longest run: a stray z in a path must not count
 });
 
 test('unknown --role exits 2', () => {
@@ -1249,4 +1249,119 @@ test('G23: a 4th non-exempt worker is refused; review*/verify*/research* names a
   assert.equal(go(['--name', 'research-x', '--no-auto-role']).status, 0);
   assert.equal(go(['--name', 'anyname', '--role', 'reviewer', '--no-auto-role']).status, 0);
   assert.equal(go(['--name', 'w4', '--no-auto-role'], { JDELEGATE_MAX_LIVE: '4' }).status, 0);
+});
+
+// ── D4: WAITING-GATE <id>: the worker waits for a server gate as a file plus a bash process, not as a live model session ──
+const d4Cache = join(tmp, 'cache-d4');
+const d4Env = (extra = {}) => ({ ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: d4Cache,
+  JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_MAX_LIVE: '99', JDELEGATE_GATE_RETRY_MS: '50', ...extra });
+const d4Run = (name, extra = {}) => spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', name, 'do the thing'],
+  { encoding: 'utf8', timeout: 60_000, env: d4Env(extra) });
+
+test('D4 worker-prompt.md tells a claude worker to gate-submit, write handover.md and end with WAITING-GATE <id>', () => {
+  const r = dry([]);
+  assert.match(r.prompt, /gate-submit/);
+  assert.match(r.prompt, /instead of `gate-run`/);
+  assert.ok(r.prompt.includes(`${r.run}/handover.md`), r.prompt);
+  assert.match(r.prompt, /end your answer with the single line `WAITING-GATE <id>`/);
+  assert.match(r.prompt, /resumed with the result/);
+  assert.match(r.prompt, /gate-run.{0,40}under about 2 minutes/);
+  assert.ok(r.prompt.slice(0, r.prompt.indexOf('USE-TABS-MARKER')).split('\n').length <= 25);
+  // the other harnesses cannot be resumed: no gate contract for them
+  jevStub();
+  const cx = dry(['--harness', 'codex'], { env: mixedEnv });
+  assert.equal(cx.status, 0, cx.stderr);
+  assert.doesNotMatch(briefOf(cx), /WAITING-GATE|gate-submit/);
+});
+
+test('D4 a waiting-gate record does not count toward JDELEGATE_MAX_LIVE and does not block its name', () => {
+  const c = join(tmp, 'cache-d4-live');
+  const live = (name, extra = {}) => {
+    const run = join(tmp, `run-d4-${name}`);
+    mkdirSync(run, { recursive: true });
+    const child = spawn('bash', ['-c', 'sleep 120; :'], { detached: true, stdio: 'ignore' });
+    child.unref();
+    process.on('exit', () => { try { process.kill(child.pid); } catch {} });
+    write(join(c, '.names', `${name}.json`), JSON.stringify({ name, cwd: repo, repo: realRepo, harness: 'claude', sessionId: '11111111-2222-4333-8444-555555555555', ref: 'cliproxy/claude-test', run, pid: child.pid, specs: [], at: new Date().toISOString(), ...extra }));
+  };
+  live('g1'); live('g2'); live('g3', { state: 'waiting-gate', gate: 'tk-1' });
+  const go = (args, env = {}) => dry(args, { env: { JDELEGATE_CACHE: c, JDELEGATE_REVIEW_FORCE: '1', ...env } });
+  assert.equal(go(['--name', 'g4', '--no-auto-role']).status, 0, '2 live + 1 waiting-gate: a 3rd live worker fits');
+  live('g5');
+  const r = go(['--name', 'g6', '--no-auto-role']);
+  assert.equal(r.status, 2, '3 live (the waiting one not counted): refused');
+  assert.match(r.stderr, /3 live workers/);
+  assert.doesNotMatch(r.stderr, /g3/);
+  assert.equal(go(['--name', 'g3', '--no-auto-role'], { JDELEGATE_MAX_LIVE: '99' }).status, 0, 'the waiting name is not "still running"');
+});
+
+function d4Stubs(tag, { claudeFirst, claudeResume, sshBody }) {
+  const log = join(tmp, `d4-${tag}.log`);
+  const mark = (s) => `echo "${s} $(date +%s)" >> ${log}`;
+  stub('claude', `case " $* " in *" --resume "*) IN=$(cat); echo "RESUME-STDIN: $IN" >> ${log}; ${claudeResume};; *) cat >/dev/null; echo FIRST >> ${log}; ${claudeFirst};; esac`);
+  stub('ssh', `echo "SSH $*" >> ${log}; ${sshBody}`);
+  return log;
+}
+
+test('D4 final answer WAITING-GATE <id>: record goes waiting-gate, ssh gate-wait runs with no claude alive, then the session is resumed with the result', () => {
+  const cache = join(tmp, 'cache-d4-a');
+  const probe = join(tmp, 'd4-a.probe');
+  const log = d4Stubs('a', {
+    claudeFirst: 'echo "handover written"; echo "WAITING-GATE tk-A"; echo $$ > ' + join(tmp, 'd4-a.claudepid'),
+    claudeResume: 'echo "gate result seen, all green"',
+    sshBody: `cp ${cache}/.names/d4a.json ${probe}.rec; ps -p $(cat ${join(tmp, 'd4-a.claudepid')}) >/dev/null 2>&1 && echo CLAUDE-ALIVE > ${probe} || echo NO-CLAUDE > ${probe}; echo "gate tk-A finished rc=0"; echo "suite 10 passed"; exit 0`,
+  });
+  const r = d4Run('d4a', { JDELEGATE_CACHE: cache });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = readFileSync(log, 'utf8');
+  assert.match(lines, /SSH .*MyContabo gate-wait tk-A \d+/);
+  assert.equal(readFileSync(probe, 'utf8').trim(), 'NO-CLAUDE', 'no claude process while the gate is awaited');
+  assert.equal(JSON.parse(readFileSync(`${probe}.rec`, 'utf8')).state, 'waiting-gate');
+  assert.equal(JSON.parse(readFileSync(`${probe}.rec`, 'utf8')).gate, 'tk-A');
+  assert.match(lines, /RESUME-STDIN: gate tk-A finished rc=0; output tail:\s+suite 10 passed\s*; continue from your handover/);
+  assert.match(r.stdout, /gate result seen, all green/);
+  assert.doesNotMatch(r.stdout, /--- result ---\n[^]*WAITING-GATE tk-A\n[^]*--- result ---/);
+  const rec = JSON.parse(readFileSync(join(cache, '.names', 'd4a.json'), 'utf8'));
+  assert.notEqual(rec.state, 'waiting-gate', 'the resumed run is a normal live/finished record again');
+  assert.equal(rec.sessionId, JSON.parse(readFileSync(`${probe}.rec`, 'utf8')).sessionId, 'same claude session');
+});
+
+test('D4 a failing gate rc and an ssh drop are handed to the resumed worker; a plain answer never waits', () => {
+  const log = d4Stubs('b', {
+    claudeFirst: 'echo "WAITING-GATE tk-B"',
+    claudeResume: 'echo done-b',
+    sshBody: `n=$(grep -c '^SSH' ${join(tmp, 'd4-b.log')}); if [ "$n" = 1 ]; then exit 255; fi; echo "gate tk-B finished rc=1"; echo "FAILED test_x"; exit 1`,
+  });
+  const r = d4Run('d4b', { JDELEGATE_CACHE: join(tmp, 'cache-d4-b') });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = readFileSync(log, 'utf8');
+  assert.equal((lines.match(/^SSH/gm) ?? []).length, 2, 'one retry after ssh rc 255');
+  assert.match(lines, /RESUME-STDIN: gate tk-B finished rc=1; output tail:\s+FAILED test_x/);
+  // a gate that itself exits 4 (gate-wait's "runner died" code) is still "finished rc=4"; only a missing first line means "did not finish"
+  const log3 = d4Stubs('b3', { claudeFirst: 'echo "WAITING-GATE tk-D"', claudeResume: 'echo done', sshBody: 'echo "gate tk-D finished rc=4"; echo boom; exit 4' });
+  assert.equal(d4Run('d4b3', { JDELEGATE_CACHE: join(tmp, 'cache-d4-b3') }).status, 0);
+  assert.match(readFileSync(log3, 'utf8'), /RESUME-STDIN: gate tk-D finished rc=4; output tail:\s+boom/);
+  const log4 = d4Stubs('b4', { claudeFirst: 'echo "WAITING-GATE tk-E"', claudeResume: 'echo done', sshBody: 'echo "gate tk-E: timed out after 5s, still not finished"; exit 3' });
+  assert.equal(d4Run('d4b4', { JDELEGATE_CACHE: join(tmp, 'cache-d4-b4') }).status, 0);
+  assert.match(readFileSync(log4, 'utf8'), /RESUME-STDIN: gate tk-E did not finish \(gate-wait rc=3: gate tk-E: timed out/);
+  // a marker in the middle of the answer, or no marker, is a normal finish
+  const log2 = d4Stubs('b2', { claudeFirst: 'echo "WAITING-GATE tk-old"; echo "I carried on and finished"', claudeResume: 'echo no', sshBody: 'exit 0' });
+  const r2 = d4Run('d4b2', { JDELEGATE_CACHE: join(tmp, 'cache-d4-b2') });
+  assert.equal(r2.status, 0);
+  assert.doesNotMatch(readFileSync(log2, 'utf8'), /SSH|RESUME/);
+});
+
+test('D4 at most 3 gate cycles, then the last answer is reported with exit 4', () => {
+  const log = d4Stubs('c', {
+    claudeFirst: 'echo "WAITING-GATE tk-C"',
+    claudeResume: 'echo "still need a gate"; echo "WAITING-GATE tk-C"',
+    sshBody: 'echo "gate tk-C finished rc=0"; echo ok; exit 0',
+  });
+  const r = d4Run('d4c', { JDELEGATE_CACHE: join(tmp, 'cache-d4-c') });
+  const lines = readFileSync(log, 'utf8');
+  assert.equal((lines.match(/^SSH/gm) ?? []).length, 3, lines);
+  assert.equal((lines.match(/^RESUME-STDIN/gm) ?? []).length, 3, lines);
+  assert.equal(r.status, 4, r.stdout + r.stderr);
+  assert.match(r.stdout + r.stderr, /gate wait limit/i);
+  assert.match(r.stdout, /WAITING-GATE tk-C/);
 });
