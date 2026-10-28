@@ -1058,7 +1058,7 @@ test('F17 routing: an exhausted agy ref in a chain is skipped for the next candi
 // ── A10 / G14 / G15: session records, --resume, same-name and same-spec refusals (all --dry-run: no worker launched) ──
 const cacheA10 = join(tmp, 'cache-a10');
 const a10 = (args, { brief = 'do the thing', cwd = repo } = {}) => {
-  const r = dry(args, { env: { JDELEGATE_CACHE: cacheA10 }, brief, cwd });
+  const r = dry(args, { env: { JDELEGATE_CACHE: cacheA10, JDELEGATE_MAX_LIVE: '99', JDELEGATE_REVIEW_FORCE: '1' }, brief, cwd });
   return r;
 };
 const liveRecord = (name, extra = {}) => {
@@ -1179,4 +1179,74 @@ test('F3: a record whose pid is not bash/claude, or older than 12 h, is dead (re
   assert.equal(a10(['--resume', 'f3-b']).status, 0, 'a 13 h old record is dead');
   liveRecord('f3-c');
   assert.equal(a10(['--resume', 'f3-c']).status, 2, 'a fresh bash pid is still live');
+});
+
+// ── F3 leftover: SIGKILL skips the bash trap, so killWorkerTree must write the exit file (137) ──
+test('timeout: when the bash trap never ran (run.sh SIGKILLed), killWorkerTree writes exit 137', () => {
+  const wcache = join(tmp, 'wcache-137');
+  // the fake worker SIGKILLs the outermost run.sh bash (so no EXIT trap can write the exit file), then ignores SIGTERM
+  stub('claude', `p=$$; while [ "$p" -gt 1 ]; do c=$(ps -o command= -p $p); case "$c" in *run.sh*) top=$p;; esac; p=$(ps -o ppid= -p $p | tr -d ' '); done; kill -9 $top; trap '' TERM; while :; do sleep 1; done`);
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'k137', '--timeout', '0.05', 'do the thing'], {
+    encoding: 'utf8', timeout: 40_000,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers,
+      JDELEGATE_CACHE: wcache, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0',
+      JDELEGATE_TIMEOUT_MS: '1500', JDELEGATE_MAX_LIVE: '99' } });
+  assert.notEqual(r.status, 0, r.stdout + r.stderr);
+  const run = r.stdout.match(/result will be in (\S+)/)?.[1];
+  assert.ok(run, r.stdout);
+  assert.equal(readFileSync(join(run, 'exit'), 'utf8').trim(), '137');
+});
+
+// ── G13: max 1 review + 1 fix round per repo+branch ──
+const g13Cache = join(tmp, 'cache-g13');
+const g13 = (extraEnv = {}, name = 'rv') => dry(['--name', name, '--role', 'reviewer', '--no-auto-role'], { env: { JDELEGATE_CACHE: g13Cache, JDELEGATE_MAX_LIVE: '99', ...extraEnv } });
+const g13Branch = spawnSync('git', ['-C', repo, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+test('G13: the 3rd reviewer run on the same repo+branch is refused (exit 2) and cites the rule; FORCE bypasses', () => {
+  mkdirSync(g13Cache, { recursive: true });
+  write(join(g13Cache, 'review-count.json'), JSON.stringify({ [`${realRepo}\t${g13Branch}`]: 1 }));
+  assert.equal(g13().status, 0, 'second review is allowed');
+  write(join(g13Cache, 'review-count.json'), JSON.stringify({ [`${realRepo}\t${g13Branch}`]: 2 }));
+  const r = g13();
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /max 1 review \+ 1 fix round/);
+  assert.equal(g13({ JDELEGATE_REVIEW_FORCE: '1' }).status, 0);
+  const other = dry(['--name', 'impl-g13', '--no-auto-role'], { env: { JDELEGATE_CACHE: g13Cache, JDELEGATE_MAX_LIVE: '99' } });
+  assert.equal(other.status, 0, 'non-reviewer runs are not counted');
+});
+test('G13: a real reviewer launch increments the per-branch counter; a dry run does not', () => {
+  const c = join(tmp, 'cache-g13b');
+  stub('claude', 'echo hi');
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers,
+    JDELEGATE_CACHE: c, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_MAX_LIVE: '99' };
+  dry(['--name', 'rv-dry', '--role', 'reviewer', '--no-auto-role'], { env: { JDELEGATE_CACHE: c, JDELEGATE_MAX_LIVE: '99' } });
+  assert.equal(existsSync(join(c, 'review-count.json')), false, 'dry run does not count');
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'rv-real', '--role', 'reviewer', '--no-auto-role', 'review it'], { encoding: 'utf8', timeout: 30_000, env });
+  const counts = JSON.parse(readFileSync(join(c, 'review-count.json'), 'utf8'));
+  assert.equal(counts[`${realRepo}\t${g13Branch}`], 1, r.stdout + r.stderr);
+});
+
+// ── G23: max 3 live workers ──
+const g23Cache = join(tmp, 'cache-g23');
+const g23Live = (name, extra = {}) => {
+  const run = join(tmp, `run-g23-${name}`);
+  mkdirSync(run, { recursive: true });
+  const child = spawn('bash', ['-c', 'sleep 120; :'], { detached: true, stdio: 'ignore' });
+  child.unref();
+  process.on('exit', () => { try { process.kill(child.pid); } catch {} });
+  write(join(g23Cache, '.names', `${name}.json`), JSON.stringify({ name, cwd: repo, repo: realRepo, harness: 'claude', sessionId: '11111111-2222-4333-8444-555555555555', ref: 'cliproxy/claude-test', run, pid: child.pid, specs: [], at: new Date().toISOString(), ...extra }));
+};
+test('G23: a 4th non-exempt worker is refused; review*/verify*/research* names and reviewer runs are neither counted nor refused; MAX_LIVE overrides', () => {
+  for (const n of ['w1', 'w2', 'w3']) g23Live(n);
+  g23Live('review-live', { role: 'reviewer' });
+  g23Live('verify-live');
+  g23Live('research-live');
+  const go = (args, env = {}) => dry(args, { env: { JDELEGATE_CACHE: g23Cache, JDELEGATE_REVIEW_FORCE: '1', ...env } });
+  const r = go(['--name', 'w4', '--no-auto-role']);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /3 live workers/);
+  assert.equal(go(['--name', 'review-x', '--no-auto-role']).status, 0);
+  assert.equal(go(['--name', 'verify-x', '--no-auto-role']).status, 0);
+  assert.equal(go(['--name', 'research-x', '--no-auto-role']).status, 0);
+  assert.equal(go(['--name', 'anyname', '--role', 'reviewer', '--no-auto-role']).status, 0);
+  assert.equal(go(['--name', 'w4', '--no-auto-role'], { JDELEGATE_MAX_LIVE: '4' }).status, 0);
 });

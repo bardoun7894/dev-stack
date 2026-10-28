@@ -335,6 +335,31 @@ if (!opt.resume && !opt.print) {
     console.error(`jdelegate: worker "${nameLabel}" is still running in ${opt.cwd}; use --resume ${nameLabel}`);
     process.exit(2);
   }
+  // G13: max 1 review + 1 fix round per repo+branch; counted per real launch of an explicit --role reviewer
+  if (opt.role === "reviewer") {
+    const branch = spawnSync("git", ["-C", opt.cwd, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8", timeout: 5000 }).stdout?.trim() || "?";
+    const key = `${repoOf(opt.cwd)}\t${branch}`, file = join(CACHE, "review-count.json");
+    const counts = readJson(file) ?? {};
+    if (process.env.JDELEGATE_REVIEW_FORCE !== "1" && (counts[key] ?? 0) >= 2) {
+      console.error(`jdelegate: ${counts[key]} reviews already ran on ${key.replace("\t", " @ ")}; rule: max 1 review + 1 fix round per branch. Fix and merge, or set JDELEGATE_REVIEW_FORCE=1`);
+      process.exit(2);
+    }
+    if (!opt.dryRun) {
+      counts[key] = (counts[key] ?? 0) + 1;
+      try { mkdirSync(CACHE, { recursive: true }); writeFileSync(`${file}.tmp`, JSON.stringify(counts)); renameSync(`${file}.tmp`, file); } catch { /* the counter is advisory */ }
+    }
+  }
+  // G23: max 3 live workers (reviewer, verify* and research* runs neither count nor get refused)
+  if (!EXEMPT_SPEC) {
+    const max = Number(process.env.JDELEGATE_MAX_LIVE) || 3;
+    const live = (existsSync(NAMES_DIR) ? readdirSync(NAMES_DIR).filter((n) => n.endsWith(".json")) : [])
+      .map((f) => readJson(join(NAMES_DIR, f)))
+      .filter((r) => r && r.role !== "reviewer" && r.role !== "researcher" && !/^(review|verify|research)/i.test(r.name || "") && recordLive(r));
+    if (live.length >= max) {
+      console.error(`jdelegate: ${live.length} live workers already (${live.map((r) => r.name).join(", ")}); max ${max} in parallel. Wait for one (jdelegate wait <name>) or set JDELEGATE_MAX_LIVE`);
+      process.exit(2);
+    }
+  }
   const mine = EXEMPT_SPEC ? [] : specsIn(opt.brief);
   if (mine.length) {
     const repo = repoOf(opt.cwd);
