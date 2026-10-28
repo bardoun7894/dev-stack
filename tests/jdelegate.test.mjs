@@ -1184,8 +1184,8 @@ test('F3: a record whose pid is not bash/claude, or older than 12 h, is dead (re
 // ── F3 leftover: SIGKILL skips the bash trap, so killWorkerTree must write the exit file (137) ──
 test('timeout: when the bash trap never ran (run.sh SIGKILLed), killWorkerTree writes exit 137', () => {
   const wcache = join(tmp, 'wcache-137');
-  // the fake worker SIGKILLs the outermost run.sh bash (so no EXIT trap can write the exit file), then ignores SIGTERM
-  stub('claude', `p=$$; while [ "$p" -gt 1 ]; do c=$(ps -o command= -p $p); case "$c" in *run.sh*) top=$p;; esac; p=$(ps -o ppid= -p $p | tr -d ' '); done; kill -9 $top; trap '' TERM; while :; do sleep 1; done`);
+  // the fake worker SIGKILLs the run.sh bash (pid from <run>/pid, found via its --append-system-prompt-file arg) so no EXIT trap can write the exit file, then ignores SIGTERM
+  stub('claude', `for a in "$@"; do case "$a" in */worker-prompt.md) kill -9 $(cat "\${a%/*}/pid");; esac; done; trap '' TERM; while :; do sleep 1; done`);
   const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'k137', '--timeout', '0.05', 'do the thing'], {
     encoding: 'utf8', timeout: 40_000,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers,
