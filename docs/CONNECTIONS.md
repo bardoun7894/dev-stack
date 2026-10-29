@@ -10,6 +10,7 @@ individual `SKILL.md` descriptions.
 | ID                              | Tier         | Role                                 |
 |---------------------------------|--------------|--------------------------------------|
 | `kb-dev`                        | first-party  | Pipeline hub (12-phase orchestrator) |
+| `market-swot`                   | first-party  | SWOT + competitor + UI/UX research   |
 | `grill-me`                      | first-party  | Adversarial planner (standalone)     |
 | `system-design`                 | first-party  | Architecture doc + owner approval stop |
 | `design-check`                  | first-party  | Design conformance scanner           |
@@ -90,6 +91,12 @@ kb-spec plan                 → /speckit.plan                     [phase 3 — 
 /speckit.plan                → writing-plans                     [phase 3 — plan elaboration]
 writing-plans                → kb-spec tasks                     [phase 3 → 4]
 kb-spec tasks                → /speckit.tasks                    [phase 4 — task breakdown]
+kb-dev                       → market-swot                       [phase 2b — market & UX research]
+market-swot                  → web-search                        [competitor + fresh-practice search]
+market-swot                  → dribbble-design                   [UI/UX reference shots]
+market-swot                  → jev                               [score/choice ranking]
+market-swot                  → kb-spec                           [accepted F/R codes -> pre / research.md]
+market-swot                  → agy-delegate                      [accepted UI items]
 /speckit.tasks               → kb-dev (decision: solo vs fan-out)[phase 4 → 5]
 
 kb-dev                       → executing-plans                   [phase 5a — solo, ≤3 tasks]

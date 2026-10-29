@@ -6,6 +6,7 @@
 |------------------------------------|----------------------------------------------|-------------------------------------------------------------------|
 | "new feature X"                    | "ميزة جديدة X" / "خاصية جديدة X"             | Run phases 0 → 2a → 4, pause for solo/fan-out decision            |
 | "system design" / "design the system"| "تصميم النظام" / "معمارية النظام" / "صمم النظام قبل البناء" | Run `system-design` (phase 2c), then hard stop for D/Q approval |
+| "swot" / "compare with competitors" / "make the UI like X" / "personal brand" | "تحليل سوات" / "منافسين" / "براند شخصي" | Run `market-swot` (project or me), hard stop for owner approval |
 | "build X" / "implement X"          | "ابني X" / "اعمل X" / "نفّذ X" / "صنع X"     | Run phases 0 → 12 (full pipeline)                                 |
 | "implement the spec at specs/NNN"  | "نفّذ المواصفات في specs/NNN"                | Run phase 0, then jump to phase 5, then 6–12                      |
 | "fix bug Y" (< 30 LOC)             | "أصلح خطأ Y" / "صلح Y" / "إصلاح Y"           | Run phase 0, then solo-mode phase 5a straight through to 12       |
