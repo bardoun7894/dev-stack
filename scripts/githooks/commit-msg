@@ -1,0 +1,15 @@
+#!/bin/sh
+# commit-msg (G10): reject AI attribution lines. Install: cp scripts/githooks/commit-msg ~/.githooks/commit-msg
+# Bypass for a genuine human co-author: ALLOW_COAUTHOR=1 git commit ...
+[ "${ALLOW_COAUTHOR:-}" = 1 ] && exit 0
+msg="$1"
+[ -f "$msg" ] || exit 0
+# ignore git comment lines and everything below the `git commit -v` scissors line
+body=$(sed -e '/^# ------------------------ >8 ------------------------$/,$d' -e '/^#/d' "$msg")
+bad=$(printf '%s\n' "$body" | grep -inE '^[[:space:]]*co-authored-by:|^[^[:alnum:]]*generated with \[?claude code' | head -3)
+if [ -n "$bad" ]; then
+  echo "commit-msg: rejected. Remove the attribution line(s) (rule: no Co-Authored-By, no 'Generated with Claude Code'):" >&2
+  echo "$bad" >&2
+  exit 1
+fi
+exit 0

@@ -98,13 +98,17 @@ build_section() {
 
   # --- Agents table ---
   local agent_count
-  agent_count=$(ls "$HOME/.claude/agents/" 2>/dev/null | grep -c '\.md$' || echo 0)
+  agent_count=0
+  if [ -d "$HOME/.claude/agents/" ]; then
+    agent_count=$(find "$HOME/.claude/agents/" -maxdepth 1 \( -type f -o -type l \) -name '*.md' | wc -l | tr -d ' ')
+  fi
+  agent_count=${agent_count:-0}
   if [ "$agent_count" -gt 0 ]; then
     printf '\n**Registered subagents (%s total):**\n\n' "$agent_count"
     printf '| Agent | Source | Default model |\n'
     printf '|---|---|---|\n'
     for f in "$HOME/.claude/agents/"*.md; do
-      [ -f "$f" ] || continue
+      [ -f "$f" ] || [ -L "$f" ] || continue
       local agent_name tier model
       agent_name=$(basename "$f" .md)
       tier=$(classify_agent "$agent_name")
@@ -112,6 +116,15 @@ build_section() {
       [ -z "$model" ] && model="?"
       printf '| `%s` | %s | %s |\n' "$agent_name" "$tier" "$model"
     done
+  else
+    local parked_agent_count
+    parked_agent_count=0
+    if [ -d "$HOME/.claude/agents-parked/" ]; then
+      parked_agent_count=$(find "$HOME/.claude/agents-parked/" -maxdepth 1 \( -type f -o -type l \) -name '*.md' | wc -l | tr -d ' ')
+    fi
+    if [ "$parked_agent_count" -gt 0 ]; then
+      printf '\n**Subagents:** none loaded; %s parked in ~/.claude/agents-parked (use jdelegate --role <name>).\n' "$parked_agent_count"
+    fi
   fi
 
   printf '\n**Helpers in `~/.local/bin/` (from dev-stack):**\n'
@@ -150,7 +163,7 @@ if [ ! -f "$CLAUDE_MD" ]; then
   exit 1
 fi
 
-if ! grep -q "$BEGIN_MARKER" "$CLAUDE_MD"; then
+if ! grep -Fq "$BEGIN_MARKER" "$CLAUDE_MD"; then
   echo "refresh-rule: auto-gen markers not found in $CLAUDE_MD" >&2
   echo "refresh-rule: add these two lines somewhere in CLAUDE.md to bootstrap:" >&2
   echo "  $BEGIN_MARKER" >&2

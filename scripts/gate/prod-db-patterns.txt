@@ -1,0 +1,13 @@
+# Production database host / URL / DB name patterns (G18, case-insensitive).
+# Comment lines (#) and blank lines are ignored. Leading '*.' matches any host prefix.
+
+# Supabase pooler and direct hosts
+*.pooler.supabase.com
+*.pooler.supabase.co
+*.supabase.co
+
+# AWS RDS hosts
+*.rds.amazonaws.com
+
+# 'prod' or 'production' as a word/segment in host or database name
+(^|[^[:alnum:]])(prod|production)($|[^[:alnum:]])

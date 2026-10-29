@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# lock-checks: approve tests, move them into a locked dir the builder cannot edit.
+set -euo pipefail
+
+LOCKED_DIR="${LOCKED_DIR:-tests/locked}"
+LOCKED_DIR="${LOCKED_DIR%/}"
+
+usage() {
+  cat <<USAGE
+Usage: lock-checks <command> [paths...]   (run inside a git repo)
+
+  list [paths...]     print each test file and its test names, one line per check
+  approve <paths...>  move tests into \$LOCKED_DIR (default tests/locked), add
+                      an Edit deny rule to .claude/settings.json, commit
+                      (with LOCK_CHECKS_UNLOCK=1), then install the pre-commit hook
+  install-hook        write/append a git pre-commit hook (in the git common dir, so linked
+                      worktrees run it too) that rejects commits touching any locked dir in
+                      the manifest (idempotent). HUMAN ONLY: LOCK_CHECKS_UNLOCK=1 bypasses it.
+  verify             exit 1 and list files if a locked dir differs from the tree recorded at
+                      approve time (committed or uncommitted edits, new or deleted files).
+                      A tracked dir with no record (approved by an older version) is compared
+                      against HEAD instead, with a warning.
+  rebaseline [dir]    HUMAN ONLY: record HEAD:<dir> (default \$LOCKED_DIR) in the manifest so
+                      verify is strict for it; refuses if the dir has uncommitted changes
+  unlock <paths...>   HUMAN ONLY: move locked files back to tests/<subpath>
+  -h, --help          this help
+
+Path mapping: tests/a/test_x.py <-> \$LOCKED_DIR/a/test_x.py
+USAGE
+}
+
+die() { echo "lock-checks: $*" >&2; exit 2; }
+
+enter_repo() {
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo"
+  PREFIX="$(git rev-parse --show-prefix)"
+  cd "$ROOT"
+}
+
+# Resolve a user path (relative to the original cwd) to a repo-relative path.
+repo_rel() {
+  case "$1" in
+    /*) echo "${1#"$ROOT"/}" ;;
+    *) echo "$PREFIX$1" ;;
+  esac
+}
+
+SETTINGS=".claude/settings.json"
+DENY_EDIT="Edit($LOCKED_DIR/**)"
+DENY_WRITE="Write($LOCKED_DIR/**)"
+EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+
+# Manifest lives in the git common dir (out of every worktree): "<dir><TAB><tree hash>" per locked dir.
+manifest_path() { echo "$(git rev-parse --path-format=absolute --git-common-dir)/lock-checks/manifest"; }
+
+# Tree hash of the CURRENT working-tree content of $1 (tracked + untracked, not ignored); empty if none.
+dir_tree() {
+  local d t; d="$(mktemp -d)"
+  t="$(export GIT_INDEX_FILE="$d/index"; git add -A -- "$1" 2>/dev/null || true; git write-tree 2>/dev/null || true)"
+  rm -rf "$d"
+  [ -z "$t" ] || git rev-parse --verify -q "$t:$1" 2>/dev/null || true
+}
+
+# manifest_set <dir> <tree>: replace the line for <dir>; an empty tree drops it.
+manifest_set() {
+  local man tmp; man="$(manifest_path)"; mkdir -p "$(dirname "$man")"
+  tmp="$(mktemp)"
+  if [ -f "$man" ]; then awk -F'\t' -v d="$1" '$1 != d' "$man" > "$tmp"; fi
+  if [ -n "${2:-}" ]; then printf '%s\t%s\n' "$1" "$2" >> "$tmp"; fi
+  cat "$tmp" > "$man"; rm -f "$tmp"
+}
+
+cmd_list() {
+  local pat=$'def test_[A-Za-z0-9_]+|\\b(it|test|describe)\\([[:space:]]*[\'"`][^\'"`]*'
+  local targets=()
+  if [ "$#" -eq 0 ]; then
+    while IFS= read -r f; do targets+=("$f"); done < <(
+      git ls-files | grep -E '(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*\.(test|spec)\.[cm]?[jt]sx?)$' || true)
+  else
+    for p in "$@"; do targets+=("$(repo_rel "$p")"); done
+  fi
+  [ "${#targets[@]}" -gt 0 ] || return 0
+  grep -rnHoE "$pat" -- "${targets[@]}" || true
+}
+
+cmd_approve() {
+  [ "$#" -gt 0 ] || die "approve needs at least one path"
+  local srcs=() dsts=() rel sub
+  for p in "$@"; do
+    rel="$(repo_rel "$p")"
+    [ -f "$rel" ] || die "no such file: $p"
+    sub="${rel#tests/}"
+    srcs+=("$rel"); dsts+=("$LOCKED_DIR/$sub")
+  done
+  local i tracked=()
+  for i in "${!srcs[@]}"; do
+    [ ! -e "${dsts[$i]}" ] || die "already exists: ${dsts[$i]}"
+    ! git ls-files --error-unmatch -- "${srcs[$i]}" >/dev/null 2>&1 || tracked+=("${srcs[$i]}")
+  done
+
+  local sbak="" had_claude=0
+  [ ! -d "$(dirname "$SETTINGS")" ] || had_claude=1
+  if [ -f "$SETTINGS" ]; then sbak="$(mktemp)"; cp "$SETTINGS" "$sbak"; fi
+
+  apply() {
+    for i in "${!srcs[@]}"; do
+      mkdir -p "$(dirname "${dsts[$i]}")" || return 1
+      mv "${srcs[$i]}" "${dsts[$i]}" || return 1
+    done
+    mkdir -p "$(dirname "$SETTINGS")" || return 1
+    [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+    local tmp; tmp="$(mktemp)"
+    # Edit(...) covers all file-editing tools; a Write(...) rule is reported as dead config, so migrate it away.
+    jq --arg e "$DENY_EDIT" --arg w "$DENY_WRITE" \
+      '.permissions.deny = ((.permissions.deny // []) | map(select(. != $w)) | if any(.[]; . == $e) then . else . + [$e] end)' \
+      "$SETTINGS" > "$tmp" || return 1
+    mv "$tmp" "$SETTINGS" || return 1
+    git add -A -- "$LOCKED_DIR" ${tracked[@]+"${tracked[@]}"} || return 1
+    git add -f -- "$SETTINGS" || return 1   # -f: .claude/ is often gitignored, the deny rule must still be committed
+    LOCK_CHECKS_UNLOCK=1 git commit -q -m "test: lock approved checks" -- "$LOCKED_DIR" "$SETTINGS" ${tracked[@]+"${tracked[@]}"}
+  }
+  rollback() {
+    git reset -q -- "$LOCKED_DIR" "$SETTINGS" ${tracked[@]+"${tracked[@]}"} >/dev/null 2>&1 || true
+    for i in "${!srcs[@]}"; do
+      if [ -f "${dsts[$i]}" ]; then mkdir -p "$(dirname "${srcs[$i]}")"; mv "${dsts[$i]}" "${srcs[$i]}"; fi
+    done
+    find "$LOCKED_DIR" -type d -empty -delete 2>/dev/null || true
+    if [ -n "$sbak" ]; then cp "$sbak" "$SETTINGS"; else rm -f "$SETTINGS"; fi
+    [ "$had_claude" = 1 ] || rmdir "$(dirname "$SETTINGS")" 2>/dev/null || true
+  }
+  if ! apply; then
+    rollback
+    die "approve failed (commit rejected or error); rolled back, nothing is locked"
+  fi
+  [ -z "$sbak" ] || rm -f "$sbak"
+  manifest_set "$LOCKED_DIR" "$(git rev-parse "HEAD:$LOCKED_DIR")"
+  echo "locked ${#srcs[@]} file(s) under $LOCKED_DIR"
+  cmd_install_hook
+}
+
+HOOK_MARKER="# lock-checks pre-commit hook"
+
+cmd_install_hook() {
+  # Never write into a user-wide core.hooksPath (it is shared by every repo): use the common git dir's hooks
+  # (so linked worktrees run it too), or the repo-local core.hooksPath (husky etc.) when one is set.
+  local hl hdir hook husky=0
+  hl="$(git config --local --get core.hooksPath || true)"
+  if [ -z "$hl" ]; then
+    hdir="$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
+  else
+    case "$hl" in /*) hdir="$hl" ;; *) hdir="$ROOT/$hl" ;; esac
+  fi
+  hook="$hdir/pre-commit"
+  case "${hl%/}" in .husky/_|*/.husky/_) husky=1; hook="$ROOT/.husky/pre-commit" ;; esac
+  if [ -n "$(git config --global --get core.hooksPath || true)" ] && [ -z "$hl" ]; then
+    echo "note: a global core.hooksPath is set; $hook only runs if that global hook chains to repo-local hooks" >&2
+  fi
+  if [ -f "$hook" ] && grep -qF "$HOOK_MARKER" "$hook"; then
+    echo "pre-commit hook already installed: $hook"
+    return 0
+  fi
+  # The locked dirs are read from the manifest at commit time, never from the environment.
+  local block; block="$(cat <<'HOOK'
+# lock-checks pre-commit hook (managed by lock-checks install-hook)
+_lc_man="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/lock-checks/manifest"
+if [ "${LOCK_CHECKS_UNLOCK:-}" != "1" ] && [ -f "$_lc_man" ]; then
+  _lc_hit=""
+  while IFS="$(printf '\t')" read -r _lc_dir _lc_tree; do
+    [ -n "$_lc_dir" ] || continue
+    _lc_hit="$_lc_hit
+$(git diff --cached --name-only -- "$_lc_dir")"
+  done < "$_lc_man"
+  _lc_hit="$(printf '%s\n' "$_lc_hit" | sed '/^$/d')"
+  if [ -n "$_lc_hit" ]; then
+    echo "lock-checks: commit rejected, staged changes touch locked checks:" >&2
+    echo "$_lc_hit" | sed 's/^/  /' >&2
+    echo "Locked checks are human-approved; ask the human to change them." >&2
+    exit 1
+  fi
+fi
+# end of lock-checks block
+HOOK
+)"
+  mkdir -p "$(dirname "$hook")"
+  if [ ! -s "$hook" ]; then
+    if [ "$husky" = 1 ]; then printf '%s\n' "$block" > "$hook"; else printf '#!/bin/sh\n%s\n' "$block" > "$hook"; fi
+  else
+    local first; first="$(head -n 1 "$hook")"
+    case "$first" in
+      "#!/bin/sh"*|"#!/bin/bash"*|"#!/usr/bin/env sh"*|"#!/usr/bin/env bash"*)
+        # after the shebang, so an early `exit` in the existing hook cannot skip the check
+        { echo "$first"; printf '%s\n' "$block"; tail -n +2 "$hook"; } > "$hook.lc-tmp" ;;
+      *)
+        [ "$husky" = 1 ] || die "existing $hook is not a sh/bash script; add the check by hand"
+        { printf '%s\n' "$block"; cat "$hook"; } > "$hook.lc-tmp" ;;
+    esac
+    cat "$hook.lc-tmp" > "$hook"; rm -f "$hook.lc-tmp"
+  fi
+  chmod +x "$hook"
+  echo "installed pre-commit hook: $hook"
+}
+
+cmd_verify() {
+  local man dirs=() trees=() d t cur i bad=""
+  man="$(manifest_path)"
+  if [ -f "$man" ]; then
+    while IFS=$'\t' read -r d t; do
+      [ -n "$d" ] || continue
+      dirs+=("$d"); trees+=("$t")
+    done < "$man"
+  fi
+  case " ${dirs[*]-} " in
+    *" $LOCKED_DIR "*) ;;
+    *)
+      dirs+=("$LOCKED_DIR")
+      if [ -n "$(git ls-files -- "$LOCKED_DIR" | head -n 1)" ]; then
+        # legacy: approved before the manifest existed; the best baseline is HEAD
+        echo "lock-checks: no approval record for $LOCKED_DIR; comparing against HEAD. Run \`lock-checks rebaseline\` to record it." >&2
+        trees+=("$(git rev-parse --verify -q "HEAD:$LOCKED_DIR" || true)")
+      else
+        trees+=("")   # nothing tracked and no record: the dir must be empty
+      fi ;;
+  esac
+  for i in "${!dirs[@]}"; do
+    d="${dirs[$i]}"; t="${trees[$i]}"; cur="$(dir_tree "$d")"
+    [ "$cur" != "$t" ] || continue
+    bad="$bad
+$(git diff-tree -r --name-only "${t:-$EMPTY_TREE}" "${cur:-$EMPTY_TREE}" | sed "s|^|$d/|")"
+  done
+  bad="$(printf '%s\n' "$bad" | sed '/^$/d' | sort -u)"
+  if [ -n "$bad" ]; then
+    echo "locked checks were modified:"
+    echo "$bad"
+    exit 1
+  fi
+}
+
+cmd_rebaseline() {
+  echo "WARNING: rebaseline is a human-only action. An agent must never run it." >&2
+  local d head cur; d="$(repo_rel "${1:-$LOCKED_DIR}")"; d="${d%/}"
+  head="$(git rev-parse --verify -q "HEAD:$d" || true)"
+  [ -n "$head" ] || die "$d is not committed at HEAD; nothing to record"
+  cur="$(dir_tree "$d")"
+  [ "$cur" = "$head" ] || die "$d has uncommitted changes; commit or discard them first"
+  manifest_set "$d" "$head"
+  echo "recorded $d at $head"
+}
+
+cmd_unlock() {
+  [ "$#" -gt 0 ] || die "unlock needs at least one path"
+  echo "WARNING: unlock is a human-only action. An agent must never run it." >&2
+  local rel sub
+  for p in "$@"; do
+    rel="$(repo_rel "$p")"
+    [ -f "$rel" ] || die "no such file: $p"
+    case "$rel" in "$LOCKED_DIR"/*) ;; *) die "not under $LOCKED_DIR: $p" ;; esac
+    sub="${rel#"$LOCKED_DIR"/}"
+    [ ! -e "tests/$sub" ] || die "refusing to overwrite existing tests/$sub"
+  done
+  for p in "$@"; do
+    rel="$(repo_rel "$p")"; sub="${rel#"$LOCKED_DIR"/}"
+    mkdir -p "$(dirname "tests/$sub")"
+    mv "$rel" "tests/$sub"
+  done
+  find "$LOCKED_DIR" -type d -empty -delete 2>/dev/null || true
+  if [ -f "$SETTINGS" ] && ! { [ -d "$LOCKED_DIR" ] && [ -n "$(find "$LOCKED_DIR" -type f -print -quit)" ]; }; then
+    local tmp; tmp="$(mktemp)"
+    jq --arg e "$DENY_EDIT" --arg w "$DENY_WRITE" \
+      'if .permissions.deny then .permissions.deny |= map(select(. != $e and . != $w)) else . end' \
+      "$SETTINGS" > "$tmp"
+    mv "$tmp" "$SETTINGS"
+  fi
+  manifest_set "$LOCKED_DIR" "$(dir_tree "$LOCKED_DIR")"
+  echo "unlocked; review and commit the change yourself with LOCK_CHECKS_UNLOCK=1 (the pre-commit hook rejects locked-dir changes otherwise)"
+}
+
+cmd="${1:-}"
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+  -h|--help|help|"") usage ;;
+  install-hook) enter_repo; cmd_install_hook ;;
+  list|approve|verify|rebaseline|unlock) enter_repo; "cmd_$cmd" "$@" ;;
+  *) usage >&2; exit 2 ;;
+esac

@@ -1,0 +1,25 @@
+{
+  "worker": [
+    "adapt",
+    "animate",
+    "audit",
+    "clarify",
+    "frontend-design",
+    "gamification-motion",
+    "hallmark",
+    "harden",
+    "impeccable",
+    "karpathy-guidelines",
+    "normalize",
+    "optimize",
+    "polish",
+    "quieter",
+    "systematic-debugging",
+    "test-driven-development",
+    "vercel-react-best-practices",
+    "vercel-ui",
+    "verification-before-completion"
+  ],
+  "generated": "2026-10-02",
+  "method": "jev choice"
+}

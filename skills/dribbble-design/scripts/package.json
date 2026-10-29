@@ -1,0 +1,9 @@
+{
+  "name": "dribbble-design-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Headless Dribbble search + reference image download for the dribbble-design skill",
+  "dependencies": {
+    "playwright-core": "^1.62.1"
+  }
+}

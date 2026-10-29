@@ -34,6 +34,7 @@ Read `~/.claude/skills/kb-dev/SKILL.md` for the full phase table and the solo-vs
 - **Before running any `/speckit.*` phase manually** → also run the matching `/kb-spec` phase first.
 - **After finishing `/speckit.tasks`** → run `/kb-spec post` to mirror the finalized feature back into the KB via `/kb-docs-sync`.
 - **After a long coding session or at end of day** → run `/kb-compile && /kb-lint` to roll daily logs into concept articles and catch drift.
+- **`karpathy-guidelines` — silent self-check at code boundaries.** Before the first `Edit`/`Write` of any task, and again before claiming done, silently re-read `~/.claude/skills/karpathy-guidelines/SKILL.md` and run its pre-edit / pre-done checklists against your own work. The four principles: think before coding, simplicity first, surgical changes, goal-driven execution. Auto-fires inside `kb-dev` Phase 5 and inside `requesting-code-review` / `receiving-code-review`. Skip only for trivial single-line typo fixes and read-only Q&A. Source: [forrestchang/andrej-karpathy-skills](https://github.com/forrestchang/andrej-karpathy-skills) (MIT).
 
 ### When `/kb-spec` fires standalone vs. inside `/kb-dev`
 

@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""jev-review — Jev as System 1 for code: screen every hunk / log line / function / comment, hand only
+the flagged ones to an LLM (System 2). Modeled on devagrawal09/jev-review (Noul risk matrix -> Score
+severity -> route).
+
+Usage:
+  jev-review diff [BASE] [--repo DIR] [--json]
+      Every hunk of `git diff BASE` (default: working tree + index vs HEAD), 20 lines of context,
+      one Jev request per hunk: 5 risk Nouls (correctness, security, reliability, compatibility,
+      tests) + a severity Score. Prints flagged hunks only, worst first, and a route line:
+        route: none | reviewer | codex | panel
+  jev-review lint [PATH ...] [--rules FILE] [--json]
+      Qualitative linters over log calls, function definitions and comments in PATHs (default: files
+      changed vs HEAD). Rules from .jev-lint.json in the repo root, else built-in defaults (secrets in
+      logs = error; PII in logs, names hiding side effects, useless or wrong comments = warn).
+      Exit 1 if any error-level rule fires, so it works as a CI step.
+  jev-review scan [DIR] [--run] [--max-files N] [--json]
+      Code smells + garbage comments over tracked source files in 120-line windows. Prints the token
+      and cost estimate and stops unless --run is given. Output: shortlist for Haiku/Opus to fix.
+
+Decisions are logged under tags review / lint / scan; retrain with `jev tune <tag>` (see jev --help).
+Exit 3 on Jev errors (no key / network) — callers fall back to a normal LLM review.
+"""
+import concurrent.futures as cf
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+# No local Laya fallback: its noul answers bunch below RISK_THRESHOLD, so a down Jev would route every
+# diff to "none". Exit 3 instead, and callers run a normal LLM review.
+os.environ["JEV_NO_LAYA"] = "1"
+WORKERS = 8
+MAX_STATE_CHARS = 24000
+RISK_THRESHOLD = 0.6
+SMELL_THRESHOLD = 0.7
+WINDOW = 120
+SKIP = re.compile(r"(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Cargo\.lock|poetry\.lock|"
+                  r"\.lock$|(^|/)(dist|build|vendor|node_modules)/|\.min\.(js|css)$|\.map$|\.snap$)")
+SOURCE_EXT = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".php", ".go", ".rb", ".rs", ".java",
+              ".kt", ".swift", ".dart", ".sh", ".vue", ".svelte", ".cs", ".c", ".cc", ".cpp", ".h"}
+
+DIMENSIONS = {
+    "correctness": "The change introduces a logic bug: a wrong or inverted condition, off-by-one, a removed or "
+                   "missing null/empty/permission check, the wrong variable, or broken error handling.",
+    "security": "The change creates a security problem: a secret or credential in code or logs, injection "
+                "(SQL, shell, HTML), an auth or permission bypass, disabled verification, or unsafe "
+                "deserialization or file access.",
+    "reliability": "The change can crash, hang, leak resources, race, or fail on network/IO errors or bad "
+                   "input without handling it.",
+    "compatibility": "The change alters a public API, CLI flag, config key, database schema, event or file "
+                     "format that existing callers or stored data rely on, without a migration or fallback.",
+    # Retrained 2026-09-19 (jev tune review): the old "alters behaviour that no test in the diff covers" fired
+    # on 8/8 hunks of shell scripts and docs (A/B: old 1/9 right, scoped wording 9/9). Hunks are judged alone,
+    # so the question names `other_files_in_diff`: tested hunks 0.64-0.85 -> ~0.27, untested planted bug 0.95.
+    "tests": "The change alters the runtime logic of application or library code (not shell setup scripts, "
+             "configuration, docs or prompts) in a way a test should cover, and no test file for it appears in "
+             "`other_files_in_diff` (a changed test file named after this file, e.g. tests/test_<name>, counts "
+             "as covering it); or the change weakens, skips or deletes an existing test or assertion.",
+}
+SEVERITY = [
+    "cosmetic: naming, formatting or style only",
+    "minor: an edge case or maintainability issue, no user-visible harm",
+    "major: user-visible bug, broken feature, or failure under realistic conditions",
+    "critical: security hole, data loss or corruption, or an outage",
+]
+SMELLS = {
+    "dead_code": "This code contains dead code: unreachable branches, unused functions or variables, or "
+                 "commented-out code.",
+    "magic_values": "This code uses unexplained magic numbers or strings that should be named constants.",
+    "long_params": "A function here takes so many parameters (5 or more) that callers are likely to confuse them.",
+    "does_too_much": "A function here does several unrelated jobs and should be split.",
+    "garbage_comments": "A comment here only restates what the code obviously does, or no longer matches the code.",
+}
+DEFAULT_RULES = [
+    {"id": "log-secret", "level": "error", "applies_to": "log", "threshold": 0.7,
+     "question": "The value being logged includes a secret or credential (password, token, API key, cookie, "
+                 "private key, session id) or a full payment card or bank account number."},
+    # Retrained 2026-09-19 on 11 labelled Tokyo log lines: Jev sees variable names, not values, so the old
+    # wording scored a contactName + WhatsApp JID leak at 0.51 (6/11 right); naming the fields -> 11/11.
+    {"id": "log-pii", "level": "warn", "applies_to": "log", "threshold": 0.7,
+     "question": "The value being logged includes personal data about a real person. Judge by the variable and "
+                 "field names as well as literal text: a person's name (e.g. senderName, contactName, userName), "
+                 "a phone number or WhatsApp JID (jid, phone), an email, a street address, a national ID, or the "
+                 "content of their private messages or transcripts all count. Static text, error objects, model "
+                 "names, status codes and event types do not."},
+    {"id": "name-hides-side-effect", "level": "warn", "applies_to": "function", "threshold": 0.75,
+     "question": "The function's name hides a significant side effect it performs (writes files or a database, "
+                 "sends network requests or messages, mutates global state) that a caller would not expect "
+                 "from the name alone."},
+    {"id": "comment-useless", "level": "warn", "applies_to": "comment", "threshold": 0.8,
+     "question": "The comment only restates what the next line of code obviously does, adding no reason, "
+                 "context, or warning."},
+    # Retrained 2026-09-19 on 8 labelled Tokyo comments: the old wording flagged 22 of 538 candidates, mostly
+    # comments whose proof was outside the snippet (1/8 right). Requiring a visible contradiction: 7/8, and it
+    # still catches "max 1 reply per 2 minutes" above COOLDOWN_MS = 15 s.
+    {"id": "comment-wrong", "level": "warn", "applies_to": "comment", "threshold": 0.7,
+     "question": "The comment makes a concrete claim (a number, a limit, a name, an order of steps, a behaviour) "
+                 "that the code shown in this snippet visibly contradicts. If the code needed to check the claim "
+                 "is not in the snippet, or the comment is history or rationale, answer no."},
+]
+LOG_RE = re.compile(r"\b(console\.(log|info|warn|error|debug)|logging\.(info|debug|warning|error|exception|critical)"
+                    r"|log\.(info|debug|warn|warning|error)|logger\.\w+|Log::\w+|error_log\s*\(|print\s*\("
+                    r"|println!?\s*\(|fmt\.Print\w*\(|NSLog\s*\()")
+FUNC_RE = re.compile(r"^\s*(async\s+)?(def|function|func|fn)\s+\w+\s*\(|^\s*(export\s+)?(const|let)\s+\w+\s*="
+                     r"\s*(async\s*)?\(|^\s*(public|private|protected|static|\s)*function\s+\w+\s*\(")
+COMMENT_RE = re.compile(r"^\s*(#(?![!\[])|//|/\*)")
+
+
+def load_jev():
+    loader = importlib.machinery.SourceFileLoader("jev", os.path.join(HERE, "jev"))
+    spec = importlib.util.spec_from_loader("jev", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+# --- pure parts (unit tested) ---------------------------------------------------------------
+
+def parse_diff(text):
+    hunks, file, cur, skip = [], None, None, False
+    for line in text.split("\n"):
+        if line.startswith("diff --git "):
+            if cur:
+                hunks.append(cur)
+            cur, file = None, None
+            skip = False
+        elif line.startswith("Binary files "):
+            skip = True
+        elif line.startswith("+++ "):
+            file = line[4:][2:] if line[4:].startswith("b/") else line[4:]
+            skip = skip or file == "/dev/null" or bool(SKIP.search(file))
+        elif line.startswith("@@") and file and not skip:
+            if cur:
+                hunks.append(cur)
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
+            cur = {"file": file, "new_start": int(m.group(1)) if m else 0, "text": line + "\n"}
+        elif cur is not None and not skip and line[:1] in (" ", "+", "-", "\\"):
+            cur["text"] += line + "\n"
+    if cur:
+        hunks.append(cur)
+    for h in hunks:
+        h["text"] = h["text"][:MAX_STATE_CHARS]
+    return hunks
+
+
+def hunk_state(hunk, hunks):
+    """Each hunk is judged alone, so say which other files the diff touches (e.g. its tests)."""
+    others = sorted({h["file"] for h in hunks} - {hunk["file"]})
+    return {"file": hunk["file"], "hunk": hunk["text"], "other_files_in_diff": others[:50]}
+
+
+def finding(hunk, answers):
+    flagged = [d for d in DIMENSIONS if (answers.get(d) or {}).get("noul", 0) >= RISK_THRESHOLD]
+    return {"file": hunk["file"], "line": hunk["new_start"], "flagged": flagged,
+            "risks": {d: round((answers.get(d) or {}).get("noul", 0), 2) for d in DIMENSIONS},
+            "severity": round((answers.get("severity") or {}).get("score", 0), 2), "text": hunk["text"]}
+
+
+def route(findings):
+    flagged = [f for f in findings if f["flagged"]]
+    if not flagged:
+        return "none"
+    if any("security" in f["flagged"] and f["severity"] >= 2.5 for f in flagged):
+        return "panel"
+    # Missing coverage alone is a reviewer ask ("add a test"), never a reason for a second-opinion bug hunt.
+    if any(f["severity"] >= 1.5 and set(f["flagged"]) - {"tests"} for f in flagged):
+        return "codex"
+    return "reviewer"
+
+
+def candidates(path, lines, context=6):
+    out = []
+    for i, line in enumerate(lines):
+        kind = ("log" if LOG_RE.search(line) else "function" if FUNC_RE.search(line)
+                else "comment" if COMMENT_RE.search(line) else None)
+        if not kind:
+            continue
+        lo, hi = max(0, i - (1 if kind == "comment" else 2)), min(len(lines), i + context + 1)
+        code = "\n".join(f"{n + 1}: {lines[n]}" for n in range(lo, hi))
+        out.append({"file": path, "line": i + 1, "kind": kind, "code": code})
+    return out
+
+
+def estimate(texts, question_tokens):
+    tokens = sum(len(t) // 4 for t in texts) + question_tokens * len(texts)
+    return {"requests": len(texts), "input_tokens": tokens, "cost_usd": tokens * 0.042 / 1_000_000}
+
+
+TRANSIENT = ("request failed", "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")
+
+
+def ask_retry(jev, state, questions, tag, timeout=None, pause=1.0):
+    """One retry on a transient network/5xx/429 error; auth and other errors raise immediately (fail closed)."""
+    try:
+        return jev.ask_many(state, questions, tag, timeout)
+    except jev.JevError as e:
+        if not str(e).startswith(TRANSIENT):
+            raise
+        time.sleep(pause)
+        return jev.ask_many(state, questions, tag, timeout)
+
+
+def lint(cands, rules, ask_many, timeout=None):
+    def one(c):
+        qs = {r["id"]: {"type": "noul", "instructions": r["question"]} for r in rules
+              if r.get("applies_to", "any") in (c["kind"], "any")}
+        if not qs:
+            return []
+        a, _, _ = ask_many({"file": c["file"], "line": c["line"], "kind": c["kind"], "code": c["code"]},
+                           qs, "lint", timeout)
+        return [{"rule": r["id"], "level": r["level"], "file": c["file"], "line": c["line"],
+                 "p": round(a[r["id"]]["noul"], 2), "code": c["code"]}
+                for r in rules if r["id"] in qs and a[r["id"]]["noul"] >= r.get("threshold", 0.7)]
+
+    with cf.ThreadPoolExecutor(WORKERS) as ex:
+        hits = [h for hs in ex.map(one, cands) for h in hs]
+    hits.sort(key=lambda h: (h["level"] != "error", -h["p"]))
+    return hits, 1 if any(h["level"] == "error" for h in hits) else 0
+
+
+# --- I/O ------------------------------------------------------------------------------------
+
+class GitError(Exception):
+    """git failed. Never treat it as an empty diff: that would report 'route: none' for unreviewed code."""
+
+
+def git(repo, *args):
+    try:
+        p = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    except OSError as e:
+        raise GitError(str(e)) from e
+    if p.returncode != 0:
+        raise GitError(f"git {' '.join(args)} in {repo}: {p.stderr.strip()[:300]}")
+    return p.stdout
+
+
+def repo_root(start):
+    try:
+        return git(start, "rev-parse", "--show-toplevel").strip() or start
+    except GitError:
+        return start
+
+
+def read_lines(path):
+    try:
+        if os.path.getsize(path) > 200_000:
+            return None
+        with open(path, encoding="utf-8") as f:
+            return f.read().split("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def source_files(repo, paths):
+    out = []
+    for p in paths:
+        full = os.path.join(repo, p) if not os.path.isabs(p) else p
+        if os.path.isdir(full):
+            try:
+                listed = [os.path.join(full, f) for f in git(full, "ls-files").split("\n") if f]
+            except GitError:  # not a git checkout: walk it instead
+                listed = [os.path.join(d, f) for d, _, fs in os.walk(full) if "/." not in d for f in fs]
+            out += listed
+        elif os.path.isfile(full):
+            out.append(full)
+    return [f for f in out if os.path.splitext(f)[1] in SOURCE_EXT and not SKIP.search(f)]
+
+
+def cmd_diff(args, jev):
+    repo = repo_root(args.get("repo") or os.getcwd())
+    base = args["pos"][0] if args["pos"] else None
+    text = git(repo, "diff", "-U20", f"{base}...HEAD") if base else git(repo, "diff", "-U20", "HEAD")
+    hunks = parse_diff(text)
+    qs = {d: {"type": "noul", "instructions": q} for d, q in DIMENSIONS.items()}
+    qs["severity"] = {"type": "score", "instructions": "If this change has a problem, how bad is the worst one?",
+                      "criteria": SEVERITY}
+    cost = [0.0]
+
+    def one(h):
+        a, _, c = ask_retry(jev, hunk_state(h, hunks), qs, "review")
+        cost[0] += c or 0
+        return finding(h, a)
+
+    t = time.time()
+    with cf.ThreadPoolExecutor(WORKERS) as ex:
+        found = list(ex.map(one, hunks))
+    flagged = sorted((f for f in found if f["flagged"]), key=lambda f: -f["severity"])
+    summary = {"hunks": len(hunks), "flagged": len(flagged), "route": route(found),
+               "seconds": round(time.time() - t, 1), "cost_usd": round(cost[0], 6)}
+    if args["json"]:
+        print(json.dumps({**summary, "findings": flagged}, ensure_ascii=False, indent=1))
+        return 0
+    for f in flagged:
+        print(f"### {f['file']}:{f['line']}  severity {f['severity']}  [{', '.join(f['flagged'])}]")
+        print("```diff\n" + "\n".join(f["text"].split("\n")[:60]) + "\n```\n")
+    print(f"hunks: {summary['hunks']}  flagged: {summary['flagged']}  "
+          f"{summary['seconds']}s  ${summary['cost_usd']:.5f}")
+    print(f"route: {summary['route']}")
+    return 0
+
+
+def cmd_lint(args, jev):
+    repo = repo_root(os.getcwd())
+    paths = args["pos"] or [p for p in git(repo, "diff", "--name-only", "HEAD").split("\n") if p]
+    rules = DEFAULT_RULES
+    rules_file = args.get("rules") or os.path.join(repo, ".jev-lint.json")
+    if os.path.isfile(rules_file):
+        with open(rules_file) as f:
+            rules = json.load(f)
+    cands = []
+    for path in source_files(repo, paths):
+        lines = read_lines(path)
+        if lines:
+            cands += candidates(os.path.relpath(path, repo), lines)
+    t = time.time()
+    hits, code = lint(cands, rules, lambda s, q, t=None, to=None: ask_retry(jev, s, q, t, to))
+    if args["json"]:
+        print(json.dumps({"candidates": len(cands), "hits": hits}, ensure_ascii=False, indent=1))
+        return code
+    for h in hits:
+        print(f"{h['level'].upper():5} {h['rule']:24} {h['file']}:{h['line']}  p={h['p']}")
+    print(f"candidates: {len(cands)}  hits: {len(hits)}  {time.time() - t:.1f}s")
+    return code
+
+
+def cmd_scan(args, jev):
+    root = args["pos"][0] if args["pos"] else repo_root(os.getcwd())
+    files = source_files(root, ["."])[: int(args.get("max_files") or 100000)]
+    windows = []
+    for path in files:
+        lines = read_lines(path)
+        if not lines:
+            continue
+        for s in range(0, len(lines), WINDOW):
+            chunk = lines[s:s + WINDOW]
+            if any(x.strip() for x in chunk):
+                windows.append({"file": os.path.relpath(path, root), "line": s + 1,
+                                "code": "\n".join(f"{s + n + 1}: {x}" for n, x in enumerate(chunk))})
+    est = estimate([w["code"] for w in windows], question_tokens=260)
+    print(f"files: {len(files)}  windows: {est['requests']}  input tokens: {est['input_tokens']:,}  "
+          f"estimated cost: ${est['cost_usd']:.4f}", file=sys.stderr)
+    if not args["run"]:
+        print("estimate only; add --run to scan", file=sys.stderr)
+        return 0
+    qs = {k: {"type": "noul", "instructions": v} for k, v in SMELLS.items()}
+
+    def one(w):
+        a, _, _ = ask_retry(jev, {"file": w["file"], "code": w["code"]}, qs, "scan")
+        smells = {k: round(a[k]["noul"], 2) for k in SMELLS if a[k]["noul"] >= SMELL_THRESHOLD}
+        return {"file": w["file"], "line": w["line"], "smells": smells} if smells else None
+
+    with cf.ThreadPoolExecutor(WORKERS) as ex:
+        short = [r for r in ex.map(one, windows) if r]
+    short.sort(key=lambda r: -max(r["smells"].values()))
+    if args["json"]:
+        print(json.dumps(short, indent=1))
+    else:
+        for r in short:
+            print(f"{r['file']}:{r['line']}  " + "  ".join(f"{k}={v}" for k, v in r["smells"].items()))
+        print(f"shortlist: {len(short)} of {len(windows)} windows")
+    return 0
+
+
+def parse_args(argv):
+    args, pos, i = {"json": False, "run": False}, [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--json", "--run"):
+            args[a[2:]] = True
+        elif a in ("--repo", "--rules", "--max-files"):
+            args[a[2:].replace("-", "_")] = argv[i + 1]
+            i += 1
+        else:
+            pos.append(a)
+        i += 1
+    args["pos"] = pos
+    return args
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help") or argv[0] not in ("diff", "lint", "scan"):
+        print(__doc__.strip())
+        return 0 if argv and argv[0] in ("-h", "--help", "help") else 64
+    jev = load_jev()
+    args = parse_args(argv[1:])
+    try:
+        return {"diff": cmd_diff, "lint": cmd_lint, "scan": cmd_scan}[argv[0]](args, jev)
+    except (jev.JevError, GitError) as e:
+        print(f"jev-review: {e}", file=sys.stderr)
+        return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

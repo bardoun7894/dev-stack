@@ -1,3 +1,5 @@
 .DS_Store
 *.swp
 *~
+__pycache__/
+tools/file-drop/extension/bridge-secret.js
