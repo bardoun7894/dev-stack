@@ -1,0 +1,19 @@
+{
+  "name": "reel-publish",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Publish one finished reel to YouTube, TikTok, Facebook (Page + profile), LinkedIn and Drive",
+  "bin": {
+    "reel-publish": "publish.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

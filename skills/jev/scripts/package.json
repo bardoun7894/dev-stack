@@ -1,0 +1,9 @@
+{
+  "name": "jev-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Jev browser agent (jev-browse) for the jev skill",
+  "dependencies": {
+    "playwright-core": "^1.62.1"
+  }
+}

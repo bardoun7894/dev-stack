@@ -1,0 +1,1 @@
+PASS (--full): /private/tmp/claude-501/-Users-mohamedbardouni-projects/aaf9576e-b7fd-42f3-892f-e73e66f5617c/scratchpad/trial-system-design.md

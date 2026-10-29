@@ -1,6 +1,6 @@
 # dev-stack — skill relations map
 
-This is the reference document for how all 39 skills in dev-stack connect to each other.
+This is the reference document for how all 40 skills in dev-stack connect to each other.
 The canonical version lives inside `skills/kb-dev/SKILL.md`, and the per-edge list lives in
 `docs/CONNECTIONS.md`. This file is the human-readable extract for humans who want the map
 without scrolling through a SKILL.
@@ -46,6 +46,7 @@ an explicit standalone branch. Nothing is orphaned. Nothing duplicates.
 | 1   | Brainstorm                  | `brainstorming`                                                       | yes → 2                               |
 | 2   | Pre-spec KB research        | `/kb-spec pre` → `/speckit.specify` → `spec.md`                       | yes → 3                               |
 | 2b  | Market & UX research        | `market-swot project` (-> web-search, dribbble-design, jev, kb-spec, agy-delegate) | yes -> 3 (hard stop for owner approval) |
+| 2c  | System design (hard stop)   | `system-design` (new apps only) → `system-design.md` (fusion /opinion once)           | no: owner approves D/Q codes → 3      |
 | 3   | Architectural plan          | `/kb-spec plan` → `/speckit.plan` → `writing-plans` → `plan.md`       | yes → 4                               |
 | 4   | Task breakdown              | `/kb-spec tasks` → `/speckit.tasks` → `tasks.md`                      | yes → 5 (decision: solo vs fan-out)   |
 | 5a  | Implement (solo)            | `executing-plans` in current session                                  | yes → 6                               |

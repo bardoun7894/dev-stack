@@ -1,0 +1,24 @@
+== references/template.md
+FAIL (--full): skills/system-design/references/template.md
+template placeholders still present:
+1:# System design: <project> (<LITE|FULL>, <why>)
+3:Spec: specs/NNN-<name>/spec.md  Research: specs/NNN-<name>/research.md  Date: YYYY-MM-DD
+exit 1
+== tests/sample-full.md
+PASS (--full): skills/system-design/tests/sample-full.md
+exit 0
+== tests/empty.md
+FAIL (--full): skills/system-design/tests/empty.md
+missing heading: ## 1.
+missing heading: ## 2.
+missing heading: ## 3.
+missing heading: ## 4.
+missing heading: ## 5.
+missing heading: ## 6.
+missing heading: ## 7.
+missing heading: ## 8.
+missing heading: ## 9.
+missing heading: ## 10.
+missing: at least one ```mermaid block
+missing: decision D1
+exit 1

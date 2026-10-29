@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# capability-refresh — scan transcripts (incremental) -> label skill-suggest outcomes -> rebuild capabilities.json.
+# Quiet unless --verbose. Meant to run hourly; env overrides are documented in the three scripts it calls.
+set -u
+HERE="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+S="$HERE/../scripts"
+V=0; [ "${1:-}" = "--verbose" ] && V=1
+step() {  # step <label> <cmd...>
+  local label="$1" out rc; shift
+  out="$("$@" 2>&1)"; rc=$?
+  [ $V -eq 1 ] && echo "[$label] $out"
+  [ $rc -eq 0 ] || { echo "capability-refresh: $label failed ($rc): $out" >&2; exit $rc; }
+}
+step scan python3 "$S/capability-scan.py"
+step outcomes python3 "$S/capability-outcomes.py"
+step registry python3 "$S/capability-registry.py" build
+step quota "$HERE/quota-snapshot"

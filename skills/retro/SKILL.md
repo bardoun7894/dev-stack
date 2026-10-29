@@ -1,10 +1,70 @@
 ---
 name: retro
-description: Weekly engineering retrospective. Reads last 7 days of KB daily logs, compiled concepts, git activity, shipped PRs, and open incidents, then writes `retros/YYYY-WW.md` with wins / blockers / themes / next week's bets. Triggers on "weekly retro", "run the retro", "/retro", end-of-week (Friday afternoon or Sunday evening). Standalone — never auto-fires mid-week.
+description: Two modes. (1) `/retro session [last N | <id>]` — audit real Claude Code session transcripts (default: current session) for hidden waste and risk: navigation, missing/unwired automated checks, coding standards, bloated or no-op steering files, tool economy, missing information, irreversible actions taken without asking; presents ranked fixes for the human to pick, never auto-applies (after Matt Pocock skills v1.3 `retro`, MIT). Triggers "retro this session", "session retro", "what went wrong in that session", "audit my last sessions", "/retro session". (2) Weekly engineering retrospective — reads last 7 days of KB daily logs, compiled concepts, git activity, shipped PRs, open incidents, writes `retros/YYYY-WW.md`. Triggers "weekly retro", "run the retro", end-of-week. Neither mode auto-fires.
 allowed-tools: Bash Read Write Grep Glob
 ---
 
-# retro — weekly engineering retrospective
+# retro — session audit + weekly retrospective
+
+Pick the mode from the request: a session, a transcript, "what went wrong" → **Session mode**.
+A week, a sprint, "weekly" → **Weekly mode** (further below).
+
+## Session mode — audit real agent sessions
+
+Agents rarely complain. They push through broken tools, missing checks and lost context and still
+finish, so the waste stays hidden. Session mode reads what actually happened and proposes changes to
+the agent's **environment** (repo, checks, steering files, tools) so the next run is cheaper and safer.
+
+### Steps
+
+1. **Digest, never raw JSONL.** Transcripts are 100 KB–10 MB. Run the zero-AI digest and read only its output:
+   ```bash
+   python3 ~/code/dev-stack/skills/retro/scripts/session-digest.py            # current/newest session
+   python3 ~/code/dev-stack/skills/retro/scripts/session-digest.py last 5     # sample of recent sessions
+   python3 ~/code/dev-stack/skills/retro/scripts/session-digest.py <id-prefix>
+   ```
+   It prints tokens, compactions, tool-call counts, the heaviest tool results, repeated calls, tool
+   errors, hook blocks and the user's messages. Open a specific transcript slice (`grep -n` on the
+   jsonl, then `sed -n`) only to confirm one finding. Pi sessions: `~/.pi/agent/sessions/`.
+2. **Read the repo's own guardrails first**: CLAUDE.md/AGENTS.md size, `package.json`/`composer.json`/
+   `Makefile`/`pubspec.yaml` check scripts, `.github/workflows/`, pre-commit hooks, `CODING_STANDARDS.md`.
+   A check that exists but nothing runs is the finding — not a new check.
+3. **Look for candidates** in these categories:
+   - **Irreversible actions**: did the agent push, deploy, release, delete, send a message, or touch
+     prod/`~/.claude` without asking? Highest severity. Fix = a hook, a confirm step, or a memory rule.
+   - **Navigation**: long searches to find one file or fact → a one-line navigation pointer in
+     CLAUDE.md/AGENTS.md, or a docs file the pointer names.
+   - **Automated checks**: a mistake a lint/type/test/CI step would have caught; or a repo with no
+     guardrail at all (no pre-commit and no CI running lint/typecheck/test) — that alone is a finding.
+   - **Coding standards**: mechanical violations get a deterministic check (lint rule, hook, CI job),
+     not prose. Only judgement calls go to `CODING_STANDARDS.md` (read by the reviewer, not the implementer).
+   - **Steering-file health**: global `~/.claude/CLAUDE.md`, project CLAUDE.md, memory index — instructions
+     that should be checks or standards instead, and **no-ops** (lines that change nothing the agent does).
+   - **Tool economy**: heavy results (large `cat`, unbounded `ps`/`grep`, full test logs), repeated calls,
+     custom CLIs/MCPs that waste tokens, compactions that lost context → a better script, a flag, a skill.
+   - **Information access**: what the agent needed but could not see (server logs, a service, a PATH entry).
+   - **Rule/hook friction**: a hook blocked legitimate work (see `hook blocks` / `tool errors`). Hand these
+     to the `self-tune` skill, which owns TOKEN BUDGET, `no-poll-guard.sh` and the gate kit.
+4. **Present** findings ranked by severity, coded `F1, F2…`. Each: what happened (cite the digest line),
+   the proposed environment change (exact file + the change), and its cost. Lead with the 1–3 worth doing.
+5. **Stop.** The human picks what to apply. Never apply fixes in the same run, never loop retro on its
+   own output — automated retro drifts into fixing false positives. Run it on a sample of sessions,
+   especially ones that felt off.
+6. If the user accepts findings and the project has `ai-knowledge-base/`, write them to
+   `ai-knowledge-base/raw/retro-session-YYYY-MM-DD.md` for `/kb-ingest`.
+
+### Where a fix belongs
+
+| Change | Home |
+|---|---|
+| Pointer to where things live | CLAUDE.md / AGENTS.md (keep tiny — loads into every implementer) |
+| Judgement-call rule | `CODING_STANDARDS.md` (reviewer reads it, implementer does not) |
+| Mechanical rule | lint rule, pre-commit hook, CI job |
+| Repeated multi-step procedure | a skill (its description is what loads, so write it well) |
+| Fact about this machine/user | memory file |
+
+## Weekly mode — engineering retrospective
+
 
 A structured Friday-afternoon reflection that turns a week of scattered work into a single markdown page. Read-only against the KB; writes one new `retros/YYYY-WW.md`.
 
