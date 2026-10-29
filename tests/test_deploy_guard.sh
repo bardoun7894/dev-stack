@@ -73,4 +73,12 @@ check exec-cd-bash deny Linux 'cd /root/x && bash ops/dev-deploy.sh' A=1
 check exec-ssh-cd-dot-slash deny Darwin 'ssh MyContabo "cd x; ./scripts/deploy.sh"' A=1
 check exec-env-sudo deny Linux 'FOO=1 sudo bash deploy.sh' A=1
 check exec-source deny Linux 'source ops/deploy-prod.sh' A=1
+# round 2: loops and heredoc bodies
+check loop-test-scripts allow Linux 'for t in a b; do timeout 300 bash tests/$t.sh >/dev/null 2>&1; echo "$t rc=$?"; done' A=1
+check heredoc-then-bash-script allow Linux $'cat > /tmp/p.sh <<\'EOF\'\nt \'for d in a b; do ssh MyContabo "bash /root/$d/ops/dev-deploy.sh"; done\' x\nEOF\nbash /tmp/p.sh' A=1
+check var-script-path allow Linux 'S=/tmp/x; bash $S/probe.sh deploy' A=1
+check ssh-bash-s-stdin allow Darwin 'ssh MyContabo bash -s < /tmp/deploy-notes.sh' A=1
+check loop-deploy-ssh deny Darwin 'for d in a b; do ssh MyContabo "bash /root/$d/ops/dev-deploy.sh"; done' A=1
+check loop-deploy-plain deny Linux 'for d in a b; do bash /root/$d/ops/dev-deploy.sh; done' A=1
+check glob-deploy deny Linux 'bash ops/dep*.sh' A=1
 exit $fails
