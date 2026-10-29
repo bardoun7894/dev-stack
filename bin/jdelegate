@@ -834,11 +834,15 @@ function worldTrack(args) {
 const REG_HOST = process.env.JDELEGATE_REG_HOST || "MyContabo";
 const REG_SPOOL = join(CACHE, "reg-spool.jsonl");
 const regOn = () => !process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH;
-/** Run `tool ...args` on the server, 6 s cap. Returns the spawnSync result. */
-function regSsh(tool, args, input) {
+/** Run `tool ...args` on the server, 25 s cap (measured 2026-10-29: bare ssh 3 s, frun 5 s, factory submit 9 s; a 6 s cap lost events). Returns the spawnSync result. */
+function regSsh(tool, args, input, timeout = 25000) {
   const remote = [tool, ...args.map((a) => (/^[A-Za-z0-9._:\/=@-]+$/.test(a) ? a : q(a)))].join(" ");
-  return spawnSync(process.env.JDELEGATE_REG_SSH || "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", REG_HOST, remote],
-    { encoding: "utf8", timeout: 6000, input: input ?? "" });
+  const r = spawnSync(process.env.JDELEGATE_REG_SSH || "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/jdreg-%C", "-o", "ControlPersist=120", REG_HOST, remote],
+    { encoding: "utf8", timeout, input: input ?? "" });
+  if (r.status !== 0) {  // evidence for a lost event: what failed, when, and how long it took
+    try { writeFileSync(join(CACHE, "reg-errors.log"), `${new Date().toISOString()} ${remote.slice(0, 200)} -> status=${r.status} signal=${r.signal} err=${r.error?.code || ""} stderr=${(r.stderr || "").trim().slice(0, 300)}\n`, { flag: "a" }); } catch { /* diagnostics only */ }
+  }
+  return r;
 }
 let spoolReplayed = false;
 function replayRegSpool() {
