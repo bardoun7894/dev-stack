@@ -39,8 +39,8 @@ is_heavy() { # one segment
 }
 while IFS= read -r seg; do
   is_heavy "$seg" || continue
-  printf '%s' "$seg" | grep -qE 'gate-run[[:space:]]+[^[:space:]].*[[:space:]]--[[:space:]]' && continue
-  echo "BLOCKED by gate-run-guard: heavy command outside the gate queue. Wrap it: gate-run <project> <duration> -- <cmd>, e.g. ssh MyContabo \"cd /root/x && gate-run x 45m -- pnpm build\". GATE_SKIP=1 bypasses." >&2
+  printf '%s' "$seg" | grep -qE 'gate-(run|submit)[[:space:]]+[^[:space:]].*[[:space:]]--[[:space:]]' && continue
+  echo "BLOCKED by gate-run-guard: heavy command outside the gate queue. Wrap it: gate-run (or gate-submit for long runs) <project> <duration> -- <cmd>, e.g. ssh MyContabo \"cd /root/x && gate-run x 45m -- pnpm build\". GATE_SKIP=1 bypasses." >&2
   exit 2
 done < <(printf '%s\n' "$scan" | sed -E 's/(&&|\|\||;|\|)/\n/g')
 exit 0
