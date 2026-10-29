@@ -17,7 +17,7 @@ cwd=$(jq -r '.cwd // empty' <<<"$in" 2>/dev/null)
 printf '%s' "$cmd" | tr -d "\"'" | grep -qiE 'deploy' || exit 0
 live=$(printf '%s\n' "$cmd" | awk '
   skip { if ($0 ~ "^[[:space:]]*" term "[\"'"'"']?[[:space:]]*$") skip=0; next }
-  { print; if ($0 !~ /<<</ && $0 !~ /(^|[^[:alnum:]_-])(bash|sh|zsh)([[:space:]]|$)|[[:space:]]-s([[:space:]]|$)/ && match($0, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) { t=substr($0, RSTART, RLENGTH); gsub(/<<-?[[:space:]]*["'"'"']?/, "", t); term=t; skip=1 } }')
+  { print; if ($0 !~ /<<</ && $0 ~ /(^|[^[:alnum:]_-])(cat|tee|python3|git)([[:space:]]|$)/ &&$0 !~ /(^|[^[:alnum:]_-])(bash|sh|zsh)([[:space:]]|$)|[[:space:]]-s([[:space:]]|$)/ && match($0, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) { t=substr($0, RSTART, RLENGTH); gsub(/<<-?[[:space:]]*["'"'"']?/, "", t); term=t; skip=1 } }')
 scan=$live
 if printf '%s' "$live" | grep -qE '^[[:space:]]*(git[[:space:]]+commit|echo|tokyo-deploy)([[:space:]]|$)'; then
   scan=$(printf '%s\n' "$live" | sed -E "s/\"([^\"\\\\]|\\\\.)*\"//g; s/'[^']*'//g")
@@ -32,7 +32,12 @@ while IFS= read -r seg; do
   # walk to the command word: skip VAR=val, sudo/env/time/nohup/exec, wrappers and their flags/numbers, and `ssh [opts] host`
   while [ $i -lt $n ]; do
     case ${toks[$i]} in
-      *=*|sudo|env|time|nohup|exec|command|nice|timeout|setsid|flock|stdbuf|xargs|-*|[0-9]*) i=$((i+1)) ;;
+      sudo|env|nice|timeout)
+        i=$((i+1))
+        while [ $i -lt $n ]; do
+          case ${toks[$i]} in -[ugskn]|-C|-U|-h|-p|-r|-t) i=$((i+2)) ;; *) break ;; esac
+        done ;;
+      *=*|time|nohup|exec|command|setsid|flock|stdbuf|xargs|-*|[0-9]*|if|then|else|do|while|until|'{'|'!') i=$((i+1)) ;;
       ssh)
         i=$((i+1))
         while [ $i -lt $n ]; do
@@ -66,7 +71,7 @@ while IFS= read -r seg; do
     *)
       case $w in ./*|/*|*/*) is_script "$w" && { found=1; spath=$w; } ;; esac ;;
   esac
-done < <(printf '%s\n' "$scan" | sed -E 's/(&&|\|\||;|\|)/\n/g')
+done < <(printf '%s\n' "$scan" | sed -E 's/(&|\|\||;|\||\$\(|`)/\n/g')
 [ $found = 1 ] || exit 0
 
 [ "${DEPLOY_GUARD_SKIP:-}" = 1 ] && { echo "deploy-guard: DEPLOY_GUARD_SKIP=1, G20 bypassed" >&2; exit 0; }
@@ -97,6 +102,7 @@ fi
 set -- $status
 [ "${2:-}" = approved ] || deny "$base (offer $id is ${2:-unknown})"
 proj=${1:-}
+[ -n "$proj" ] && [ "$proj" != "?" ] || deny "$base (offer $id has no project)"
 if [ -n "$proj" ] && [ "$proj" != "?" ]; then
   if [ -n "$target" ]; then
     case $target in "$proj"|"$proj"-*) ;; *) deny "$base (offer $id is for $proj, command deploys $target)" ;; esac
