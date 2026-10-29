@@ -17,14 +17,19 @@ cwd=$(jq -r '.cwd // empty' <<<"$in" 2>/dev/null)
 printf '%s' "$cmd" | tr -d "\"'\\\\" | grep -qiE 'deploy|[*?[]' || exit 0
 live=$(printf '%s\n' "$cmd" | awk '
   skip { if ($0 ~ "^[[:space:]]*" term "[\"'"'"']?[[:space:]]*$") skip=0; next }
-  { print; if ($0 !~ /<<</ && $0 ~ /(^|[^[:alnum:]_-])(cat|tee|python3|git)([[:space:]]|$)/ &&$0 !~ /(^|[^[:alnum:]_-])(bash|sh|zsh)([[:space:]]|$)|[[:space:]]-s([[:space:]]|$)/ && match($0, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) { t=substr($0, RSTART, RLENGTH); gsub(/<<-?[[:space:]]*["'"'"']?/, "", t); term=t; skip=1 } }')
+  { print; if ($0 !~ /<<</ && $0 ~ /(^|[^[:alnum:]_-])(cat|tee|python3|git)([[:space:]]|$)/ &&$0 !~ /(^|[[:space:];&|(])(bash|sh|zsh)([[:space:]]|$)|[[:space:]]-s([[:space:]]|$)/ && match($0, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) { t=substr($0, RSTART, RLENGTH); gsub(/<<-?[[:space:]]*["'"'"']?/, "", t); term=t; skip=1 } }')
 scan=$live
 if printf '%s' "$live" | grep -qE '^[[:space:]]*(git[[:space:]]+commit|echo|tokyo-deploy)([[:space:]]|$)'; then
   scan=$(printf '%s\n' "$live" | sed -E "s/\"([^\"\\\\\$\`]|\\\\.)*\"//g; s/'[^']*'//g")
 fi
 
 targets=""; found=0; cdpath=""; spaths=""; unk=0
-is_script() { case $(printf '%s' "${1##*/}" | tr A-Z a-z) in deploy.sh|dev-deploy.sh|deploy-*.sh|deploy_*.sh|*[\*\?\[\$]*) return 0;; esac; return 1; }
+is_script() { # a deploy script name, or a glob in the basename that could expand to one; $var is not a name
+  local b c; b=$(printf '%s' "${1##*/}" | tr A-Z a-z)
+  case $b in deploy.sh|dev-deploy.sh|deploy-*.sh|deploy_*.sh) return 0;; esac
+  case $b in *\$*) return 1;; *[\*\?\[]*) for c in deploy.sh dev-deploy.sh deploy-x.sh deploy_x.sh; do [[ $c == $b ]] && return 0; done;; esac
+  return 1
+}
 while IFS= read -r seg; do
   # shellcheck disable=SC2206
   toks=($(printf '%s' "$seg" | tr -d "\"'()\`\\\\"))
