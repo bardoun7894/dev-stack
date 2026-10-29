@@ -18,7 +18,7 @@ fails=0
 # check <name> <allow|deny> <os> <command> [env...]
 check() {
   local name=$1 want=$2 os=$3 c=$4 out got; shift 4
-  out=$(jq -n --arg c "$c" '{tool_name:"Bash",tool_input:{command:$c}}' | env PATH="$T/bin:$PATH" GATE_GUARD_UNAME="$os" DEPLOY_GUARD_CACHE="$T/cache" "$@" "$H" 2>/dev/null)
+  out=$(jq -n --arg c "$c" '{tool_name:"Bash",tool_input:{command:$c},cwd:"/root/proj"}' | env PATH="$T/bin:$PATH" GATE_GUARD_UNAME="$os" DEPLOY_GUARD_CACHE="$T/cache" "$@" "$H" 2>/dev/null)
   if printf '%s' "$out" | grep -q '"deny"'; then got=deny; else got=allow; fi
   if [ "$got" = "$want" ] && { [ "$want" = allow ] || printf '%s' "$out" | grep -q 'G20: no approved Deploy-it offer'; }; then echo "ok   $name"; else echo "FAIL $name (got $got, want $want) $out"; fails=1; fi
 }
@@ -37,7 +37,7 @@ check srv-sed-readonly allow Linux 'sed -n 1,20p deploy-prod.sh' A=1
 check srv-bash-n allow Linux 'bash -n ops/dev-deploy.sh' A=1
 check srv-tokyo-deploy-yes allow Linux 'tokyo-deploy yes ab12cd' A=1
 check srv-tokyo-deploy-ask allow Linux 'tokyo-deploy ask proj "ran deploy.sh tests"' A=1
-check srv-skip allow Linux 'DEPLOY_GUARD_SKIP=1 bash ops/dev-deploy.sh' A=1
+check srv-skip allow Linux 'bash ops/dev-deploy.sh' A=1 DEPLOY_GUARD_SKIP=1
 check srv-non-deploy allow Linux 'ls -la && pnpm test' A=1
 check srv-commit-text allow Linux 'git commit -m "fix: bash ops/dev-deploy.sh docs"' A=1
 check mac-ssh-deny deny Darwin 'ssh MyContabo "cd /root/x && bash ops/dev-deploy.sh"' A=1
@@ -45,7 +45,21 @@ check mac-ssh-host-deny deny Darwin "ssh other 'cd /x && ./deploy.sh'" A=1
 check mac-ssh-approved allow Darwin 'TOKYO_OFFER=ok1 ssh MyContabo "cd /root/proj && bash ops/dev-deploy.sh"' A=1
 check mac-ssh-cat allow Darwin 'ssh MyContabo "cat /root/x/ops/dev-deploy.sh"' A=1
 check mac-ssh-gate-run deny Darwin 'ssh MyContabo "gate-run deploy-x 10m -- ./d"' A=1
-check mac-local-no-ssh allow Darwin 'bash ops/dev-deploy.sh' A=1
+check mac-local-no-ssh deny Darwin 'bash ops/dev-deploy.sh' A=1
+# bypass regressions: each must deny without an approved offer
+check bypass-bash-c deny Linux 'bash -c "./deploy.sh"' A=1
+check bypass-sh-lc deny Linux "sh -lc 'bash ops/dev-deploy.sh'" A=1
+check bypass-skip-in-command deny Linux 'bash deploy.sh # DEPLOY_GUARD_SKIP=1' A=1
+check bypass-heredoc-bash deny Linux $'bash <<EOF\nbash deploy.sh\nEOF' A=1
+check bypass-herestring deny Linux $'cat <<<"x"\nbash deploy.sh' A=1
+check bypass-ssh-bash-s deny Darwin $'ssh MyContabo bash -s <<EOF\nbash deploy.sh\nEOF' A=1
+check bypass-other-path deny Linux 'TOKYO_OFFER=ok1 bash /root/B/deploy.sh' A=1
+check bypass-cd-prefix-substring deny Linux 'TOKYO_OFFER=ok1 cd /root/proj-old && bash deploy.sh' A=1
+check bypass-case deny Linux 'bash ops/Deploy.sh' A=1
+check bypass-quote-split deny Linux "bash ops/dev-dep''loy.sh" A=1
+check bypass-timeout deny Linux 'timeout 600 bash deploy.sh' A=1
+check bypass-xargs deny Linux 'xargs bash deploy.sh' A=1
+check approved-other-project-path allow Linux 'TOKYO_OFFER=ok1 bash /root/proj/ops/dev-deploy.sh' A=1
 # F1 regression: a deploy script path as an argument is not a deploy
 check arg-cmp allow Linux 'cmp ~/.claude/hooks/deploy-guard.sh ~/code/x/hooks/dev-deploy.sh && echo same' A=1
 check arg-cp allow Linux 'cp ops/dev-deploy.sh /tmp/dev-deploy.sh.bak' A=1
