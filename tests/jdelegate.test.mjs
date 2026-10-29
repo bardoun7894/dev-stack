@@ -988,7 +988,8 @@ const AGY_QUOTA_ERR = 'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429):
 const agyRoute = (exFile, args = [], env = {}) => spawnSync(process.execPath, [JD, '--print', ...args, 'restyle the settings page layout'], {
   encoding: 'utf8',
   env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: join(tmp, 'cache'),
-    JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AGY_EXHAUSTED_FILE: exFile, UI_ANSWER: '0.9', JEV_LOG: jevLog, ...env },
+    JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AGY_EXHAUSTED_FILE: exFile, UI_ANSWER: '0.9', JEV_LOG: jevLog,
+    JEV_EXHAUSTED_FILE: join(tmp, 'no-exhausted.json') /* not the host's ~/.config/jev-router/exhausted.json, which marks agy exhausted on the server */, ...env },
 }).stdout;
 const exFile = (name, until) => { const f = join(tmp, `agy-ex-${name}.json`); if (until !== undefined) write(f, JSON.stringify({ until, seen: new Date().toISOString() })); return f; };
 
