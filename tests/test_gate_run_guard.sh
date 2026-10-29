@@ -47,4 +47,7 @@ check srv-tsc-wrapped 0 Linux 'gate-run x 20m -- npx tsc --noEmit'
 check srv-tsconfig-text 0 Linux 'cat tsconfig.json'
 check srv-tsc-alias 0 Linux 'npx tsc-alias'
 check srv-commit-tsc-text 0 Linux 'git commit -m "ci: run tsc --noEmit"'
+check mac-ssh-gate-submit 0 Darwin 'ssh MyContabo "cd /root/x && gate-submit x 15m -- npx tsc --noEmit"'
+check srv-gate-submit 0 Linux 'cd /root/x && gate-submit x 45m -- pnpm build'
+check srv-gate-submit-no-dash 2 Linux 'gate-submit x 45m pnpm build'
 exit $fails
