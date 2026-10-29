@@ -1,0 +1,5 @@
+{
+  "worker": ["frontend-engineer", "backend-engineer", "qa-engineer", "debugger", "designer", "reviewer"],
+  "never": ["orchestrator", "planner", "browser-worker", "lean-coder", "lean-reader"],
+  "note": "Roles jdelegate may auto-pick for a worker (agent definitions in ~/.claude/agents or agents-parked). 'never' roles are orchestrator-side or redundant; edit 'worker' to change the choice set."
+}

@@ -5,12 +5,13 @@ When you add, rename, or remove a skill, update this file first — then mirror 
 change into `docs/RELATIONS.md`, `skills/kb-dev/SKILL.md`, and the affected
 individual `SKILL.md` descriptions.
 
-## Node list (39 skills)
+## Node list (40 skills)
 
 | ID                              | Tier         | Role                                 |
 |---------------------------------|--------------|--------------------------------------|
 | `kb-dev`                        | first-party  | Pipeline hub (12-phase orchestrator) |
 | `grill-me`                      | first-party  | Adversarial planner (standalone)     |
+| `system-design`                 | first-party  | Architecture doc + owner approval stop |
 | `design-check`                  | first-party  | Design conformance scanner           |
 | `design-md`                     | first-party  | Brand design system adopter          |
 | `caveman`                       | first-party  | Output-style modifier (standalone)   |
@@ -80,6 +81,10 @@ kb-dev                       → kb-query                          [phase 0 — 
 kb-query                     → brainstorming                     [phase 0 → 1]
 brainstorming                → kb-spec pre                       [phase 1 → 2]
 kb-spec pre                  → /speckit.specify                  [phase 2 — spec authoring]
+/speckit.specify             → system-design                     [phase 2 → 2c — new apps only]
+kb-dev                       → system-design                     [phase 2c — hard stop for owner approval]
+system-design                → fusion                            [one /opinion on load-bearing decisions]
+system-design                → kb-spec plan                      [phase 2c → 3 — after owner approves D/Q codes]
 /speckit.specify             → kb-spec plan                      [phase 2 → 3]
 kb-spec plan                 → /speckit.plan                     [phase 3 — plan authoring]
 /speckit.plan                → writing-plans                     [phase 3 — plan elaboration]
@@ -156,7 +161,8 @@ Skills with `—` in a column are pipeline endpoints or standalone-only.
 | `kb-query`                        | USER, kb-dev (phase 0), kb-spec (all phases)      | brainstorming (inside kb-dev), — (standalone)  |
 | `brainstorming`                   | kb-dev (phase 1), USER                            | kb-spec pre                                     |
 | `kb-spec pre`                     | brainstorming, kb-dev (phase 2)                   | /speckit.specify                                |
-| `kb-spec plan`                    | /speckit.specify, kb-dev (phase 3)                | /speckit.plan, writing-plans                    |
+| `system-design`                   | kb-dev (phase 2c), USER                           | fusion, kb-spec plan                            |
+| `kb-spec plan`                    | /speckit.specify, system-design, kb-dev (phase 3)                | /speckit.plan, writing-plans                    |
 | `writing-plans`                   | kb-spec plan, /speckit.plan                       | kb-spec tasks                                   |
 | `kb-spec tasks`                   | writing-plans, kb-dev (phase 4)                   | /speckit.tasks                                  |
 | `executing-plans`                 | kb-dev (phase 5a), receiving-code-review (fix loop)| test-driven-development, UI specialists       |

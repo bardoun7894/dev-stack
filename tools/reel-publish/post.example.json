@@ -1,0 +1,29 @@
+{
+  "video": "fixtures/example.mp4",
+  "slug": "day00-example",
+  "schedule": null,
+  "platforms": {
+    "youtube": {
+      "title": "مثال على فيديو #shorts",
+      "description": "وصف تجريبي للفيديو.",
+      "tags": ["ai", "shorts"]
+    },
+    "tiktok": {
+      "caption": "مثال على كابشن تيك توك #ai"
+    },
+    "facebook_page": {
+      "title": "مثال",
+      "description": "وصف تجريبي لصفحة فيسبوك."
+    },
+    "facebook_profile": {
+      "description": "وصف تجريبي للملف الشخصي."
+    },
+    "linkedin": {
+      "text": "نص تجريبي لمنشور لينكدإن."
+    },
+    "drive": {},
+    "portfolio": {
+      "title": "مثال على فيديو"
+    }
+  }
+}

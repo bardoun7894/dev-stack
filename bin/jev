@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+"""jev — typed decisions from TypeSafe Jev (via OpenRouter) for shells, hooks, skills and agents.
+
+Jev is a decisions model, not a chat model: it answers a question about some state with a
+label, a probability or a score, plus a calibrated confidence. ~0.5-1 s, ~$0.00002 per call.
+It never writes text, never sees images/audio, and state is capped at 32k tokens.
+
+Usage:
+  jev choice "<question>" opt="description" opt2="description" ... [state options]
+  jev noul   "<yes/no statement>"                                 [state options]
+  jev score  "<question>" "level 0" "level 1" "level 2" ...       [state options]
+  jev route  "<task description>"     which model tier should do this task (T0-T4)
+  jev raw    < request.json           full {"state":…,"questions":{…}} body, prints the response
+
+System 2 retraining System 1 (see skills/jev/SKILL.md, "System 1 and System 2"):
+  --log TAG            on any command: append each decision to the decision log under TAG
+                       (the decision id goes to stderr as `jev-id: <id>`)
+  jev outcome ID VALUE record what the answer should have been (choice name, yes/no, score level)
+  jev tune TAG [--n N] disagreements and least-confident decisions for TAG, as JSON, for an LLM
+                       to revise the criteria, options and thresholds
+  Log: $JEV_LOG_DIR/decisions.jsonl (default ~/.local/state/jev/).
+
+State options (the thing being judged):
+  -s, --state TEXT     text, or a JSON object/array (parsed if it is valid JSON)
+  -f, --state-file P   read state from a file
+  (stdin)              used when neither is given and stdin is not a terminal
+
+Output and exit codes:
+  default     JSON: {"choice":…,"confidence":…} / {"noul":…} / {"score":…,"confidence":…}
+  -q          only the answer: the choice, the probability, or the score
+  --min C     choice/score: exit 2 when confidence < C (so `jev … --min 0.8 || fallback`)
+  --yes T     noul: exit 0 when probability >= T, else 1 (so `if jev noul … --yes 0.7`)
+  exit 3      API / key / network error (message on stderr)
+  --dry-run   print the exact (redacted) request body that would be sent, send nothing
+              (JEV_DRY_RUN=1 does the same for the importable post(): it prints to stderr and
+              raises JevError, so callers fall back)
+
+Secrets: every request body goes through lib/jev_redact.py redact() inside post(), the one place
+anything leaves the machine, and is not sent if redaction fails. Decision logs store the
+redacted state only. --state-file refuses .env / key / credential files.
+
+Key: $OPENROUTER_API_KEY, else the openrouter key in ~/.local/share/opencode/auth.json.
+Key: TypeSafe direct first ($TYPESAFE_API_KEY, else ~/.config/typesafe/api_key, model jev-latest), else OpenRouter.
+Model: $JEV_MODEL (default typesafe/jev-1.13 on OpenRouter). Endpoint: $JEV_DECISIONS_URL forces OpenRouter-style.
+
+Also importable (the other jev-* tools load it): post(), ask(), ask_many(), log_decision(), JevError.
+"""
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+# lib/ (not bin/, so install.sh does not link it onto PATH); realpath follows the ~/.local/bin symlink.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+try:
+    import jev_redact
+except ImportError:  # fail closed: post() refuses to send without the redactor
+    jev_redact = None
+
+URL = os.environ.get("JEV_DECISIONS_URL", "https://openrouter.ai/api/alpha/decisions")
+TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
+PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000
+
+ROUTE_TIERS = {
+    "T0": "A label, yes/no, score or routing decision. No text needs to be written.",
+    "T1": "Internal summary, digest, extraction or rewrite that only the owner reads; public or non-sensitive input.",
+    "T2": "Text a client, recruiter or the public reads (replies, proposals, posts, captions), or describing an image.",
+    "T3": "Coding, debugging, refactoring, multi-file changes, a deploy, or planning a feature.",
+    "T4": "Hardest long-horizon work: architecture across systems, security-critical review, or driving a GUI.",
+}
+ROUTE_MODELS = {
+    "T0": "jev (typesafe/jev-1.13)",
+    "T1": "free: openrouter deepseek/deepseek-v4-flash-0731:free (public input only)",
+    "T2": "claude-sonnet-5 (haiku-4-5 for short chat)",
+    "T3": "claude-opus-5",
+    "T4": "claude-fable-5-1, or gpt-6-astra for computer use",
+}
+
+
+class JevError(Exception):
+    """No key, HTTP error, network failure, or a malformed response. Callers fall back."""
+
+
+def die(msg, code=3):
+    print(f"jev: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def api_key():
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        with open(os.path.expanduser("~/.local/share/opencode/auth.json")) as f:
+            key = (json.load(f).get("openrouter") or {}).get("key", "")
+    except (OSError, ValueError):
+        key = ""
+    if not key:
+        raise JevError("no key: set OPENROUTER_API_KEY or add an openrouter key to opencode auth.json")
+    return key
+
+
+def check_url(url):
+    """The bearer key only goes to an https endpoint (or a local test server)."""
+    u = urllib.parse.urlparse(url)
+    if u.scheme == "https" or (u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")):
+        return url
+    raise JevError(f"refusing to send the API key to a non-https endpoint: {u.scheme}://{u.hostname}")
+
+
+def safe_body(body):
+    """The request body with every secret masked. Raises JevError (send nothing) on failure."""
+    if jev_redact is None:
+        raise JevError("lib/jev_redact.py missing; refusing to send unredacted state")
+    try:
+        return jev_redact.redact(body)
+    except Exception as e:  # fail closed
+        raise JevError(f"redaction failed, nothing sent: {type(e).__name__}") from e
+
+
+def target_url():
+    """Where post() would send (for --dry-run); reads no OpenRouter key."""
+    return URL if os.environ.get("JEV_DECISIONS_URL") or not typesafe_key() else TYPESAFE_URL
+
+
+def typesafe_key():
+    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        with open(os.path.expanduser("~/.config/typesafe/api_key")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def route(body):
+    """(url, key, body). TypeSafe direct when a key exists: the OpenRouter credit ran out on 2026-10-13."""
+    key = "" if os.environ.get("JEV_DECISIONS_URL") else typesafe_key()
+    if not key:
+        return URL, api_key(), body
+    return TYPESAFE_URL, key, {**body, "model": os.environ.get("JEV_TYPESAFE_MODEL", "jev-latest")}
+
+
+def post(body, timeout=None):
+    """The only function that sends anything off the machine. Redacts the whole body first, then
+    Jev first; on any JevError the local Laya daemon answers instead, else the error stands."""
+    body = safe_body(body)
+    if os.environ.get("JEV_DRY_RUN") == "1":
+        print(json.dumps({"dry_run": True, "url": target_url(), "body": body}, ensure_ascii=False), file=sys.stderr)
+        raise JevError("dry run: nothing sent")
+    try:
+        return post_jev(body, timeout)
+    except JevError as e:
+        res = laya_post(body)
+        if res is None:
+            raise
+        print(f"jev: fallback=laya ({str(e)[:80]})", file=sys.stderr)
+        return res
+
+
+def laya_post(body):
+    """The bin/laya-serve daemon on 127.0.0.1, or None. JEV_NO_LAYA=1 opts out (e2e judges:
+    Laya over-predicts pass). Answers are tagged engine=laya: its confidence is uncalibrated, so
+    every --min gate fails closed, and jev tune leaves them out."""
+    if os.environ.get("JEV_NO_LAYA"):
+        return None
+    url = os.environ.get("JEV_LAYA_URL", "http://127.0.0.1:8719/decisions")
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"state": body.get("state"), "questions": body.get("questions")}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=float(os.environ.get("JEV_LAYA_TIMEOUT", "3"))) as r:
+            res = json.loads(r.read().decode())
+    except (OSError, ValueError):
+        return None
+    answers = res.get("answers") if isinstance(res, dict) else None
+    if not isinstance(answers, dict):
+        return None
+    for a in answers.values():
+        if isinstance(a, dict):
+            a["engine"] = "laya"
+    res["engine"] = "laya"
+    return res
+
+
+def post_jev(body, timeout=None):
+    orig = body
+    url, key, body = route(body)
+    try:
+        return _send(url, key, body, timeout)
+    except JevError as e:
+        code = str(e).split(":")[0]
+        if url != TYPESAFE_URL or code not in ("HTTP 401", "HTTP 402", "HTTP 403"):
+            raise
+        try:
+            or_key = api_key()
+        except JevError:
+            raise e
+        print(f"jev: fallback=openrouter ({code})", file=sys.stderr)
+        return _send(URL, or_key, orig, timeout)
+
+
+def _send(url, key, body, timeout=None):
+    req = urllib.request.Request(
+        check_url(url),
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            # urllib's default User-Agent gets Cloudflare error 1010 on some gateways.
+            "User-Agent": "dev-stack-jev/1.0",
+            "X-Title": "dev-stack jev",
+        },
+        method="POST",
+    )
+    if timeout is None:
+        timeout = float(os.environ.get("JEV_TIMEOUT", "20"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raise JevError(f"HTTP {e.code}: {redact(e.read().decode(errors='replace')[:300])}") from e
+    except (OSError, ValueError) as e:
+        raise JevError(f"request failed: {e}") from e
+
+
+# --- decision log (System 2 retrains System 1) -------------------------------------------
+
+def log_path():
+    d = os.environ.get("JEV_LOG_DIR") or os.path.expanduser("~/.local/state/jev")
+    return os.path.join(d, "decisions.jsonl")
+
+
+def _append(rec):
+    p = log_path()
+    os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _value(answer):
+    kind = answer.get("type")
+    return kind, answer.get(kind) if kind in ("choice", "noul", "score") else None
+
+
+def log_decision(tag, state, question, answer):
+    """Append one decision; returns its id. State is kept as a hash (plus, with JEV_LOG_PREVIEW=1,
+    a 600-char preview of the *redacted* state). The question is stored redacted too."""
+    state, question = redact(state), redact(question)
+    s = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, sort_keys=True)
+    kind, value = _value(answer)
+    did = hashlib.sha1(f"{time.time_ns()}{tag}{s}{json.dumps(question, sort_keys=True)}".encode()).hexdigest()[:12]
+    _append({
+        "kind_of_record": "decision", "id": did, "ts": int(time.time()), "tag": tag,
+        "state_hash": hashlib.sha1(s.encode()).hexdigest()[:12], "state_preview": s[:600],
+        "question": question, "kind": kind, "value": value, "confidence": answer.get("confidence"),
+        "engine": answer.get("engine", "jev"),
+    })
+    return did
+
+
+def log_outcome(did, outcome):
+    _append({"kind_of_record": "outcome", "id": did, "ts": int(time.time()), "outcome": str(outcome)})
+
+
+def uncertainty(rec):
+    """0 = certain, 1 = coin flip / unknown."""
+    if rec.get("kind") == "noul":
+        p = rec.get("value")
+        return 1.0 if p is None else 1.0 - 2.0 * abs(p - 0.5)
+    c = rec.get("confidence")
+    return 1.0 if c is None else 1.0 - c
+
+
+def disagrees(rec, outcome):
+    kind, value = rec.get("kind"), rec.get("value")
+    if kind == "noul":
+        want = str(outcome).lower() in ("yes", "true", "1")
+        return ((value or 0) >= 0.5) != want
+    if kind == "score":
+        try:
+            return round(value or 0) != round(float(outcome))
+        except ValueError:
+            return True
+    return str(value) != str(outcome)
+
+
+def tune_report(tag, n=20):
+    decisions, outcomes = {}, {}
+    try:
+        with open(log_path()) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("kind_of_record") == "outcome":
+                    outcomes[r["id"]] = r["outcome"]
+                elif r.get("tag") == tag and r.get("engine", "jev") == "jev":
+                    decisions[r["id"]] = r
+    except OSError:
+        pass
+    rows = []
+    for did, r in decisions.items():
+        row = {k: r.get(k) for k in ("id", "ts", "kind", "value", "confidence", "state_preview", "question")}
+        # Older logs may hold unredacted previews; this report is meant to be pasted into an LLM.
+        row["state_preview"], row["question"] = redact(row["state_preview"]), redact(row["question"])
+        row["uncertainty"] = round(uncertainty(r), 3)
+        if did in outcomes:
+            row["outcome"] = outcomes[did]
+            row["disagrees"] = disagrees(r, outcomes[did])
+        rows.append(row)
+    dis = [r for r in rows if r.get("disagrees")]
+    unc = sorted((r for r in rows if not r.get("disagrees")), key=lambda r: -r["uncertainty"])
+    return {
+        "tag": tag, "decisions": len(rows), "with_outcome": sum(1 for r in rows if "outcome" in r),
+        "disagreements": dis[:n], "uncertain": unc[:n],
+        "how_to_use": "Revise the criteria/options/instructions/thresholds for this tag so the disagreements "
+                      "would be answered right, then re-run the uncertain states to check.",
+    }
+
+
+# --- asking --------------------------------------------------------------------------------
+
+def parse_state(text):
+    try:
+        v = json.loads(text)
+        return v if isinstance(v, (dict, list)) else text
+    except ValueError:
+        return text
+
+
+def redact(obj):
+    """Mask key- and secret-shaped strings (see lib/jev_redact.py). Fails closed."""
+    return safe_body(obj)
+
+
+def ask_many(state, questions, tag=None, timeout=None):
+    """Several questions over one state in one request. Returns (answers, ids, cost)."""
+    state = redact(state)
+    res = post({"model": MODEL, "state": state, "questions": questions}, timeout)
+    answers = res.get("answers") or {}
+    if not all(k in answers for k in questions):
+        raise JevError(f"unexpected response: {redact(json.dumps(res)[:300])}")
+    ids = {k: log_decision(tag, state, questions[k], answers[k]) for k in questions} if tag else {}
+    return answers, ids, (res.get("usage") or {}).get("cost")
+
+
+def ask(state, question, tag=None, timeout=None):
+    answers, ids, _ = ask_many(state, {"q": question}, tag, timeout)
+    if ids:
+        print(f"jev-id: {ids['q']}", file=sys.stderr)
+    return answers["q"]
+
+
+def take_opts(args):
+    """Split flags from positionals. Returns (positionals, opts)."""
+    opts = {"quiet": False, "min": None, "yes": None, "state": None, "log": None, "n": 20, "dry_run": False}
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-q", "--quiet"):
+            opts["quiet"] = True
+        elif a == "--dry-run":
+            opts["dry_run"] = True
+        elif a in ("-s", "--state", "-f", "--state-file", "--min", "--yes", "--log", "--n"):
+            if i + 1 >= len(args):
+                die(f"{a} needs a value", 64)
+            v = args[i + 1]
+            i += 1
+            if a in ("-s", "--state"):
+                opts["state"] = parse_state(v)
+            elif a in ("-f", "--state-file"):
+                if jev_redact is None or jev_redact.is_sensitive_path(os.path.realpath(v)) \
+                        or jev_redact.is_sensitive_path(v):
+                    die(f"refusing to send a secrets/credential file as state: {os.path.basename(v)}", 64)
+                try:
+                    with open(v) as fh:
+                        opts["state"] = parse_state(fh.read())
+                except OSError as e:
+                    die(f"cannot read {v}: {e}", 64)
+            elif a == "--log":
+                opts["log"] = v
+            elif a == "--n":
+                opts["n"] = int(v)
+            else:
+                opts[a[2:]] = float(v)
+        else:
+            pos.append(a)
+        i += 1
+    return pos, opts
+
+
+def dry_run(body):
+    """--dry-run: show exactly what would leave the machine, send nothing, no key needed."""
+    print(json.dumps({"dry_run": True, "url": target_url(), "body": safe_body(body)}, ensure_ascii=False, indent=1))
+    sys.exit(0)
+
+
+def cli_ask(opts, question):
+    state = opts["state"]
+    # stdin only when nothing else supplied the state, so `jev route "task"` never blocks on it.
+    if state is None and not sys.stdin.isatty():
+        state = parse_state(sys.stdin.read())
+    if state is None or state == "":
+        die("no state: pass --state, --state-file, or pipe it on stdin", 64)
+    if opts["dry_run"]:
+        dry_run({"model": MODEL, "state": state, "questions": {"q": question}})
+    return ask(state, question, opts["log"])
+
+
+def emit_choice_or_score(a, key, opts, extra=None):
+    conf = a.get("confidence")
+    out = {key: a.get(key), "confidence": conf}
+    if a.get("engine"):
+        out["engine"] = a["engine"]
+    if extra:
+        out.update(extra)
+    print(a.get(key) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
+    if opts["min"] is not None and (conf is None or conf < opts["min"]):
+        sys.exit(2)
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return
+    cmd, rest = argv[0], argv[1:]
+    pos, opts = take_opts(rest)
+
+    if cmd == "raw":
+        body = json.load(sys.stdin)
+        body.setdefault("model", MODEL)
+        # Redact the whole body (state, questions, any extra field), not just "state":
+        # post() would do it anyway; doing it here means the log below sees the same masked copy.
+        body = redact(body)
+        if opts["dry_run"]:
+            dry_run(body)
+        res = post(body)
+        if opts["log"]:
+            for k, a in (res.get("answers") or {}).items():
+                q = (body.get("questions") or {}).get(k)
+                if q:
+                    print(f"jev-id: {k} {log_decision(opts['log'], body.get('state'), q, a)}", file=sys.stderr)
+        print(json.dumps(res, ensure_ascii=False))
+    elif cmd == "choice":
+        if len(pos) < 3:
+            die('usage: jev choice "<question>" a="…" b="…" [--state …]', 64)
+        criteria = {}
+        for p in pos[1:]:
+            name, _, desc = p.partition("=")
+            criteria[name] = desc or None
+        a = cli_ask(opts, {"type": "choice", "instructions": pos[0], "criteria": criteria})
+        emit_choice_or_score(a, "choice", opts)
+    elif cmd == "noul":
+        if len(pos) != 1:
+            die('usage: jev noul "<statement>" [--state …] [--yes 0.7]', 64)
+        a = cli_ask(opts, {"type": "noul", "instructions": pos[0]})
+        p = a.get("noul")
+        out = {"noul": p, "engine": a["engine"]} if a.get("engine") else {"noul": p}
+        print(p if opts["quiet"] else json.dumps(out))
+        if opts["yes"] is not None:
+            sys.exit(0 if (p or 0) >= opts["yes"] else 1)
+    elif cmd == "score":
+        if len(pos) < 3:
+            die('usage: jev score "<question>" "level 0" "level 1" … [--state …]', 64)
+        a = cli_ask(opts, {"type": "score", "instructions": pos[0], "criteria": pos[1:]})
+        emit_choice_or_score(a, "score", opts)
+    elif cmd == "route":
+        if pos:
+            opts["state"] = " ".join(pos)
+        a = cli_ask(opts, {
+            "type": "choice",
+            "instructions": "Which model tier should do this task. Pick the cheapest tier that can do it well.",
+            "criteria": ROUTE_TIERS,
+        })
+        emit_choice_or_score(a, "choice", opts, {"model": ROUTE_MODELS.get(a.get("choice"))})
+    elif cmd == "outcome":
+        if len(pos) != 2:
+            die("usage: jev outcome <id> <value>", 64)
+        log_outcome(pos[0], pos[1])
+    elif cmd == "tune":
+        if len(pos) != 1:
+            die("usage: jev tune <tag> [--n 20]", 64)
+        print(json.dumps(tune_report(pos[0], opts["n"]), ensure_ascii=False, indent=1))
+    else:
+        die(f"unknown command {cmd!r}; see jev --help", 64)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except JevError as e:
+        die(str(e))

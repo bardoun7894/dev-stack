@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "dogfood",
+  "owner": "vercel-labs",
+  "repo": "agent-browser",
+  "path": "skill-data/dogfood",
+  "branch": "main",
+  "sha": "c818a5daf6e6ef6ec6375705df201499de4e6437",
+  "source": "manual"
+}

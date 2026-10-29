@@ -22,7 +22,18 @@ Load:
 - `scope` — list of files to focus on (optional — default: all changed files in the diff)
 - `kb_context` — cited [[wikilinks]] from the orchestrator's prior /kb-query
 
-## Your job (two passes)
+## Your job (Jev screen, then two passes)
+
+### Pass 0 — Jev screen (System 1)
+Run `jev-review diff <diff_target> --json` from the repo root before reading anything. It asks Jev five risk
+questions and a severity score for every hunk (~$0.00003 and under a second per hunk) and returns only the
+flagged hunks plus a `route` (`none | reviewer | codex | panel`).
+- Read the flagged hunks first, worst severity first. They are where Pass 2 findings usually are.
+- Still read the whole diff for Pass 1. Jev screens risk; it does not check the spec.
+- Report the route in your output. `codex` means ask for a `/codex` second opinion on the flagged hunks, and
+  `panel` means the change needs `/panel` before merge.
+- Exit 3 (no key or network) means skip Pass 0 and review normally.
+- If you dismiss a flagged hunk as a false alarm, say so in OPEN QUESTIONS. Those cases feed `jev tune review`.
 
 ### Pass 1 — Spec compliance
 For each task in `tasks.md` (or the implicit task from a direct request):

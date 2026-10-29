@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# jev-page — Jev decides the next action for a page someone else is driving (claude-in-chrome, any driver).
+# See skills/jev/scripts/jev-page.mjs and skills/jev/references/e2e-browsing.md
+here="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")" && pwd)"
+exec node "$here/../skills/jev/scripts/jev-page.mjs" "$@"
