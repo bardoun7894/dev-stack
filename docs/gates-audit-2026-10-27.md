@@ -21,13 +21,13 @@ Scope: rules in `~/.claude/CLAUDE.md` (after the WORK SPLIT rewrite) and `~/.cla
 | G15 | Never split one spec into parallel workers (new) | `overlap.sh` catches shared files only | Prompt-only | extend `overlap.sh` to also fail when two live workers share a spec dir |
 | G16 | Reviewer sees only spec + diff, Opus xhigh | `agents/reviewer.md` model pin | Config (partial) | check in `jdelegate` that `--role reviewer` passes no extra context files |
 | G17 | Every spec has a "Done when" with user-flow matrix (new) | None | Prompt-only | add grep check to Phase 11 gate and to `/kb-spec tasks` template |
-| G18 | Verifier resets DB/state between flows, non-prod only | None | Prompt-only | verifier brief template with a refusal if the DB URL matches a prod pattern |
+| G18 | Verifier resets DB/state between flows, non-prod only | `scripts/gate/verify-env-guard.sh` + `scripts/gate/prod-db-patterns.txt` + `scripts/gate/verifier-brief-template.md` | Script | none |
 | G19 | Locked checks untouched by builder | `lock-checks` (deny rule + pre-commit + verify) | Script | none |
 | G20 | Deploy only after "Deploy it?" yes | `tokyo-deploy` ask/yes flow; deploy by another path is not blocked | Partial | deploy scripts check for an approved offer id |
-| G21 | Server-first: website work on MyContabo | None | Prompt-only | SessionStart hook that warns when cwd is a website repo on the Mac |
+| G21 | Server-first: website work on MyContabo | `hooks/server-first-warn.sh` (SessionStart, Darwin only; copy in `~/.claude/hooks/`) | Hook (warn) | none |
 | G22 | New project = own folder + kb-setup + kb-spec init | `user-prompt-kb-check.sh` injects "run /kb-setup now" | Reminder only | none |
 | G23 | Max 3 parallel workers | `bin/jdelegate`: refuses a new non-resume worker when 3 live records exist (reviewer, verify*, research* exempt); `JDELEGATE_MAX_LIVE` overrides | Script | none |
-| G24 | Comms contract (banned phrases, codes) | None (`comms.md` appended to prompt) | Prompt-only | Stop hook regex on banned phrases, warn only |
+| G24 | Comms contract (banned phrases, codes) | `hooks/comms-guard.sh` + `hooks/comms-banned.txt` (Stop, warn only; copy in `~/.claude/hooks/`) | Hook (warn) | none |
 | G25 | No completion claim without pasted output | `verification-before-completion` skill only | Prompt-only | leave as is; low-precision to detect |
 | G26 | Jev first for labels/scores | `skills/jev`, no hook | Prompt-only | leave as is |
 

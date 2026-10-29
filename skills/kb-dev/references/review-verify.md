@@ -10,6 +10,7 @@
 - Max 1 review + 1 fix round; docs-only diffs get no review.
 
 ## Verify (fresh verifier, flow matrix only)
+- Brief template: `~/code/dev-stack/scripts/gate/verifier-brief-template.md`; preflight runs `~/code/dev-stack/scripts/gate/verify-env-guard.sh <repo>` first and stops on exit 1 if any prod DB/env pattern matches.
 - No runnable surface (docs, CI, types, pure refactor): say so and stop.
 - Per flow, write the end state the user reaches, rows the app must write, outside side effects, before booting.
 - Boot the app against a real non-prod database; fake only the outside services the brief names. Browser for screens, real requests for APIs. Reset DB/state between flows.

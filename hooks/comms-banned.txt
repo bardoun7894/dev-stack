@@ -1,0 +1,25 @@
+# Banned phrases from ~/.claude/comms.md section 2 (one per line, case-insensitive).
+# "canonical" is special-cased in comms-guard.sh to allow URL/path tokens after it.
+load-bearing
+worth stating plainly
+here's the honest truth
+the real tension
+carry the argument
+you're absolutely right
+great question
+let me be clear
+at a high level
+it's worth noting
+surgical
+canonical
+non-trivial
+the key insight
+here's the thing
+in practice
+the load of the piece
+this is the load
+carries it
+the through-line
+the crux
+the heart of it
+what makes this work
