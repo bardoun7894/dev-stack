@@ -23,7 +23,7 @@ Scope: rules in `~/.claude/CLAUDE.md` (after the WORK SPLIT rewrite) and `~/.cla
 | G17 | Every spec has a "Done when" with user-flow matrix (new) | None | Prompt-only | add grep check to Phase 11 gate and to `/kb-spec tasks` template |
 | G18 | Verifier resets DB/state between flows, non-prod only | `scripts/gate/verify-env-guard.sh` + `scripts/gate/prod-db-patterns.txt` + `scripts/gate/verifier-brief-template.md` | Script | none |
 | G19 | Locked checks untouched by builder | `lock-checks` (deny rule + pre-commit + verify) | Script | none |
-| G20 | Deploy only after "Deploy it?" yes | `tokyo-deploy` ask/yes flow; deploy by another path is not blocked | Partial | deploy scripts check for an approved offer id |
+| G20 | Deploy only after "Deploy it?" yes | `tokyo-deploy` ask/yes flow; deploy by another path is not blocked | Partial | hooks/deploy-guard.sh (PreToolUse Bash, both machines) denies deploy commands without an approved TOKYO_OFFER; Tokyo must export TOKYO_OFFER into deploy runs |
 | G21 | Server-first: website work on MyContabo | `hooks/server-first-warn.sh` (SessionStart, Darwin only; copy in `~/.claude/hooks/`) | Hook (warn) | none |
 | G22 | New project = own folder + kb-setup + kb-spec init | `user-prompt-kb-check.sh` injects "run /kb-setup now" | Reminder only | none |
 | G23 | Max 3 parallel workers | `bin/jdelegate`: refuses a new non-resume worker when 3 live records exist (reviewer, verify*, research* exempt); `JDELEGATE_MAX_LIVE` overrides | Script | none |

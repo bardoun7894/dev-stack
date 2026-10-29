@@ -1,0 +1,49 @@
+#!/bin/bash
+# bash tests/test_deploy_guard.sh — hooks/deploy-guard.sh (G20): deploy only under an approved Deploy-it offer
+H="$(cd "$(dirname "$0")/.." && pwd)/hooks/deploy-guard.sh"
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+mkdir -p "$T/bin"
+cat >"$T/bin/tokyo-deploy" <<'SH'
+#!/bin/bash
+[ "$1" = status ] || exit 2
+case "$2" in
+  ok1) echo "proj approved on telegram" ;;
+  no1) echo "proj declined on terminal" ;;
+  pe1) echo "proj pending" ;;
+  *) echo "tokyo-deploy: no such offer" >&2; exit 4 ;;
+esac
+SH
+chmod +x "$T/bin/tokyo-deploy"
+fails=0
+# check <name> <allow|deny> <os> <command> [env...]
+check() {
+  local name=$1 want=$2 os=$3 c=$4 out got; shift 4
+  out=$(jq -n --arg c "$c" '{tool_name:"Bash",tool_input:{command:$c}}' | env PATH="$T/bin:$PATH" GATE_GUARD_UNAME="$os" DEPLOY_GUARD_CACHE="$T/cache" "$@" "$H" 2>/dev/null)
+  if printf '%s' "$out" | grep -q '"deny"'; then got=deny; else got=allow; fi
+  if [ "$got" = "$want" ] && { [ "$want" = allow ] || printf '%s' "$out" | grep -q 'G20: no approved Deploy-it offer'; }; then echo "ok   $name"; else echo "FAIL $name (got $got, want $want) $out"; fails=1; fi
+}
+check srv-unapproved deny Linux 'cd /root/proj && bash ops/dev-deploy.sh' A=1
+check srv-gate-run-unapproved deny Linux 'gate-run deploy-proj 10m -- ./x' A=1
+check srv-approved allow Linux 'TOKYO_OFFER=ok1 bash ops/dev-deploy.sh' A=1
+check srv-approved-env allow Linux 'cd /root/proj && ./deploy.sh' TOKYO_OFFER=ok1
+check srv-approved-gate-run allow Linux 'TOKYO_OFFER=ok1 gate-run deploy-proj 10m -- ./x' A=1
+check srv-wrong-project deny Linux 'TOKYO_OFFER=ok1 gate-run deploy-other 10m -- ./x' A=1
+check srv-declined deny Linux 'TOKYO_OFFER=no1 bash deploy.sh' A=1
+check srv-pending deny Linux 'TOKYO_OFFER=pe1 bash deploy.sh' A=1
+check srv-status-error deny Linux 'TOKYO_OFFER=zz9 bash deploy.sh' A=1
+check srv-cat-readonly allow Linux 'cat ops/dev-deploy.sh' A=1
+check srv-grep-readonly allow Linux 'grep -n curl ./deploy.sh' A=1
+check srv-sed-readonly allow Linux 'sed -n 1,20p deploy-prod.sh' A=1
+check srv-bash-n allow Linux 'bash -n ops/dev-deploy.sh' A=1
+check srv-tokyo-deploy-yes allow Linux 'tokyo-deploy yes ab12cd' A=1
+check srv-tokyo-deploy-ask allow Linux 'tokyo-deploy ask proj "ran deploy.sh tests"' A=1
+check srv-skip allow Linux 'DEPLOY_GUARD_SKIP=1 bash ops/dev-deploy.sh' A=1
+check srv-non-deploy allow Linux 'ls -la && pnpm test' A=1
+check srv-commit-text allow Linux 'git commit -m "fix: bash ops/dev-deploy.sh docs"' A=1
+check mac-ssh-deny deny Darwin 'ssh MyContabo "cd /root/x && bash ops/dev-deploy.sh"' A=1
+check mac-ssh-host-deny deny Darwin "ssh other 'cd /x && ./deploy.sh'" A=1
+check mac-ssh-approved allow Darwin 'TOKYO_OFFER=ok1 ssh MyContabo "cd /root/proj && bash ops/dev-deploy.sh"' A=1
+check mac-ssh-cat allow Darwin 'ssh MyContabo "cat /root/x/ops/dev-deploy.sh"' A=1
+check mac-ssh-gate-run deny Darwin 'ssh MyContabo "gate-run deploy-x 10m -- ./d"' A=1
+check mac-local-no-ssh allow Darwin 'bash ops/dev-deploy.sh' A=1
+exit $fails
