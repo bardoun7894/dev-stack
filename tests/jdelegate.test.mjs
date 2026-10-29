@@ -49,7 +49,7 @@ test('lean command isolates the worker from user config and loads a system-promp
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.script, /CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p/);
   assert.match(r.script, /--setting-sources project,local/);
-  assert.match(r.script, /--settings '\{"disableAllHooks":true,"autoMemoryEnabled":false,/);
+  assert.match(r.script, /--settings '\{"autoMemoryEnabled":false,/);
   assert.match(r.script, new RegExp(`--append-system-prompt-file '${r.run}/worker-prompt.md'`));
   assert.match(r.script, /--strict-mcp-config/);
   assert.doesNotMatch(r.script, /--bare/);
@@ -328,7 +328,12 @@ test('lean --settings switches commit and PR attribution off', () => {
   const settings = JSON.parse(r.script.match(/--settings '(\{.*?\})'/)[1]);
   assert.equal(settings.includeCoAuthoredBy, false);
   assert.deepEqual(settings.attribution, { commit: '', pr: '' });
-  assert.equal(settings.disableAllHooks, true);
+  // Q8: no disableAllHooks; the only hook is the gate guard on Bash
+  assert.equal(settings.disableAllHooks, undefined);
+  assert.deepEqual(Object.keys(settings.hooks), ['PreToolUse']);
+  assert.equal(settings.hooks.PreToolUse.length, 1);
+  assert.equal(settings.hooks.PreToolUse[0].matcher, 'Bash');
+  assert.deepEqual(settings.hooks.PreToolUse[0].hooks.map((h) => h.command.endsWith('/.claude/hooks/gate-run-guard.sh') && h.command.startsWith('/')), [true]);
 });
 
 test('--help documents the new flags', () => {

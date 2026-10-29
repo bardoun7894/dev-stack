@@ -30,6 +30,11 @@ is_heavy() { # one segment
   if printf '%s' "$seg" | grep -qE '(^|[^[:alnum:]_.-])pytest([[:space:]"'"'"']|$)'; then
     rest=${seg#*pytest}; printf '%s' "$rest" | grep -qE '(^|[[:space:]])[^[:space:]-][^[:space:]]*(/|\.py|::)' || return 0
   fi
+  if printf '%s' "$seg" | grep -qE '(^|[^[:alnum:]_.-])tsc([[:space:]"'"'"']|$)'; then  # Q8: whole-project tsc (~0.9 GB) is heavy; tsc with explicit .ts files stays light
+    rest=${seg#*tsc}
+    printf '%s' "$rest" | grep -qE '(^|[[:space:]])(--version|-v|--help|-h|--init)([[:space:]"'"'"']|$)' && return 1
+    printf '%s' "$rest" | grep -qE '(^|[[:space:]])[^[:space:]-][^[:space:]]*\.[cm]?tsx?($|[[:space:]"'"'"'])' || return 0
+  fi
   return 1
 }
 while IFS= read -r seg; do
