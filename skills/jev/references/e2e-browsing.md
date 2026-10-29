@@ -446,4 +446,4 @@ Group failures by cause in the summary. Only `regression` pages anyone; `selecto
 - Treating a Jev error or timeout as `pass`.
 - Retrying a test until Jev says `pass`. That's a flake with extra steps.
 - Sending secrets: strip auth tokens, cookies, emails of real users, and payment fields from the snapshot.
-- Screenshots or visual questions to Jev — it's text only. That's L3.
+- Screenshots as the primary check: Jev can take a PNG/JPEG (`--image`, danger zone, see SKILL.md "Images and Box"), but for e2e prefer the aria snapshot; reading page content from pixels is L3.

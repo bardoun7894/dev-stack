@@ -3,12 +3,14 @@
 
 Jev is a decisions model, not a chat model: it answers a question about some state with a
 label, a probability or a score, plus a calibrated confidence. ~0.5-1 s, ~$0.00002 per call.
-It never writes text, never sees images/audio, and state is capped at 32k tokens.
+It never writes text, never hears audio or sees video, and state is capped at 32k tokens.
+It reads still images (PNG or JPEG, up to 16 MiB each) and can find a Box in one.
 
 Usage:
   jev choice "<question>" opt="description" opt2="description" ... [state options]
   jev noul   "<yes/no statement>"                                 [state options]
   jev score  "<question>" "level 0" "level 1" "level 2" ...       [state options]
+  jev box    "<what to find>" --image PATH                        print the box {top,bottom,left,right}
   jev route  "<task description>"     which model tier should do this task (T0-T4)
   jev raw    < request.json           full {"state":…,"questions":{…}} body, prints the response
 
@@ -25,6 +27,17 @@ State options (the thing being judged):
   -f, --state-file P   read state from a file
   (stdin)              used when neither is given and stdin is not a terminal
 
+Images (choice / noul / score / box):
+  --image PATH         repeatable. PNG or JPEG only, up to 16 MiB each; anything else exits 2.
+                       Sent as base64 `assets` referenced by UUID from the state, with the header
+                       `TypeSafe-Danger-Zone-Images: true`, only when an image is present.
+                       Needs a TypeSafe key. Images use jev-latest (jev-1.14.0) unless --model is
+                       given; box needs jev-1.14. Each side 280-1568 px; rotate upright first.
+                       DANGER ZONE: TypeSafe says images and Box are not production-guaranteed;
+                       formats and answers can change. Gate on confidence and keep a vision-LLM fallback.
+  --model NAME         TypeSafe model for this call (default: jev-latest)
+  box output           {"box":{"top","bottom","left","right"},"confidence":…}, edges are 0-1 fractions
+
 Output and exit codes:
   default     JSON: {"choice":…,"confidence":…} / {"noul":…} / {"score":…,"confidence":…}
   -q          only the answer: the choice, the probability, or the score
@@ -32,6 +45,8 @@ Output and exit codes:
   --yes T     noul: exit 0 when probability >= T, else 1 (so `if jev noul … --yes 0.7`)
   exit 3      API / key / network error (message on stderr)
   --dry-run   print the exact (redacted) request body that would be sent, send nothing
+              (image data shows as "<image N bytes>")
+  exit 2      also: unsupported or oversized --image
               (JEV_DRY_RUN=1 does the same for the importable post(): it prints to stderr and
               raises JevError, so callers fall back)
 
@@ -45,6 +60,7 @@ Model: $JEV_MODEL (default typesafe/jev-1.13 on OpenRouter). Endpoint: $JEV_DECI
 
 Also importable (the other jev-* tools load it): post(), ask(), ask_many(), log_decision(), JevError.
 """
+import base64
 import hashlib
 import json
 import os
@@ -53,6 +69,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 # lib/ (not bin/, so install.sh does not link it onto PATH); realpath follows the ~/.local/bin symlink.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
@@ -63,6 +80,8 @@ except ImportError:  # fail closed: post() refuses to send without the redactor
 
 URL = os.environ.get("JEV_DECISIONS_URL", "https://openrouter.ai/api/alpha/decisions")
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
 PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000
 
@@ -123,8 +142,10 @@ def safe_body(body):
         raise JevError(f"redaction failed, nothing sent: {type(e).__name__}") from e
 
 
-def target_url():
+def target_url(images=False):
     """Where post() would send (for --dry-run); reads no OpenRouter key."""
+    if images:
+        return TYPESAFE_URL
     return URL if os.environ.get("JEV_DECISIONS_URL") or not typesafe_key() else TYPESAFE_URL
 
 
@@ -150,14 +171,17 @@ def route(body):
 def post(body, timeout=None):
     """The only function that sends anything off the machine. Redacts the whole body first, then
     Jev first; on any JevError the local Laya daemon answers instead, else the error stands."""
-    body = safe_body(body)
+    assets = body.get("assets")
+    body = safe_body({k: v for k, v in body.items() if k != "assets"})  # image bytes are not text
+    if assets:
+        body["assets"] = assets
     if os.environ.get("JEV_DRY_RUN") == "1":
-        print(json.dumps({"dry_run": True, "url": target_url(), "body": body}, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps({"dry_run": True, "url": target_url(bool(assets)), "body": dry_body(body)}, ensure_ascii=False), file=sys.stderr)
         raise JevError("dry run: nothing sent")
     try:
         return post_jev(body, timeout)
     except JevError as e:
-        res = laya_post(body)
+        res = None if assets else laya_post(body)  # neither Laya nor OpenRouter can see images
         if res is None:
             raise
         print(f"jev: fallback=laya ({str(e)[:80]})", file=sys.stderr)
@@ -194,12 +218,14 @@ def laya_post(body):
 
 def post_jev(body, timeout=None):
     orig = body
+    if body.get("assets") and not typesafe_key():
+        raise JevError("images need a TypeSafe key ($TYPESAFE_API_KEY or ~/.config/typesafe/api_key)")
     url, key, body = route(body)
     try:
         return _send(url, key, body, timeout)
     except JevError as e:
         code = str(e).split(":")[0]
-        if url != TYPESAFE_URL or code not in ("HTTP 401", "HTTP 402", "HTTP 403"):
+        if url != TYPESAFE_URL or orig.get("assets") or code not in ("HTTP 401", "HTTP 402", "HTTP 403"):
             raise
         try:
             or_key = api_key()
@@ -210,18 +236,16 @@ def post_jev(body, timeout=None):
 
 
 def _send(url, key, body, timeout=None):
-    req = urllib.request.Request(
-        check_url(url),
-        data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            # urllib's default User-Agent gets Cloudflare error 1010 on some gateways.
-            "User-Agent": "dev-stack-jev/1.0",
-            "X-Title": "dev-stack jev",
-        },
-        method="POST",
-    )
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        # urllib's default User-Agent gets Cloudflare error 1010 on some gateways.
+        "User-Agent": "dev-stack-jev/1.0",
+        "X-Title": "dev-stack jev",
+    }
+    if body.get("assets"):  # only when an image is in the request
+        headers[IMAGES_HEADER] = "true"
+    req = urllib.request.Request(check_url(url), data=json.dumps(body).encode(), headers=headers, method="POST")
     if timeout is None:
         timeout = float(os.environ.get("JEV_TIMEOUT", "20"))
     try:
@@ -330,6 +354,56 @@ def tune_report(tag, n=20):
     }
 
 
+# --- images ----------------------------------------------------------------------------------
+
+def load_image(path):
+    """(format, bytes) for a PNG or JPEG file up to 16 MiB. Raises JevError otherwise."""
+    try:
+        size = os.path.getsize(path)
+        if size > MAX_IMAGE_BYTES:
+            raise JevError(f"image too large: {os.path.basename(path)} is {size} bytes, the limit is 16 MiB")
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        raise JevError(f"cannot read image {path}: {e}") from e
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png", data
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg", data
+    raise JevError(f"unsupported image type: {os.path.basename(path)} (only PNG or JPEG; no video, no audio)")
+
+
+def build_assets(paths):
+    """({uuid: asset}, [uuid, ...]) in the order given."""
+    assets, refs = {}, []
+    for p in paths:
+        fmt, data = load_image(p)
+        ref = str(uuid.uuid4())
+        assets[ref] = {"type": "image", "format": fmt, "data_base64": base64.b64encode(data).decode()}
+        refs.append(ref)
+    return assets, refs
+
+
+def with_images(state, refs):
+    """State plus one reference per image (the UUID of its entry in `assets`)."""
+    items = [{"asset": r} for r in refs]
+    if state is None or state == "":
+        return items
+    return [state] + items
+
+
+def dry_body(body):
+    """A copy of the body with the base64 replaced by "<image N bytes>"."""
+    assets = body.get("assets")
+    if not assets:
+        return body
+    shown = {}
+    for ref, a in assets.items():
+        n = len(base64.b64decode(a.get("data_base64", "")))
+        shown[ref] = {**a, "data_base64": f"<image {n} bytes>"}
+    return {**body, "assets": shown}
+
+
 # --- asking --------------------------------------------------------------------------------
 
 def parse_state(text):
@@ -345,10 +419,14 @@ def redact(obj):
     return safe_body(obj)
 
 
-def ask_many(state, questions, tag=None, timeout=None):
-    """Several questions over one state in one request. Returns (answers, ids, cost)."""
+def ask_many(state, questions, tag=None, timeout=None, assets=None, model=None):
+    """Several questions over one state in one request. Returns (answers, ids, cost).
+    `assets` ({uuid: image}) are sent as-is and must be referenced from the state."""
     state = redact(state)
-    res = post({"model": MODEL, "state": state, "questions": questions}, timeout)
+    body = {"model": model or MODEL, "state": state, "questions": questions}
+    if assets:
+        body["assets"] = assets
+    res = post(body, timeout)
     answers = res.get("answers") or {}
     if not all(k in answers for k in questions):
         raise JevError(f"unexpected response: {redact(json.dumps(res)[:300])}")
@@ -356,8 +434,8 @@ def ask_many(state, questions, tag=None, timeout=None):
     return answers, ids, (res.get("usage") or {}).get("cost")
 
 
-def ask(state, question, tag=None, timeout=None):
-    answers, ids, _ = ask_many(state, {"q": question}, tag, timeout)
+def ask(state, question, tag=None, timeout=None, assets=None, model=None):
+    answers, ids, _ = ask_many(state, {"q": question}, tag, timeout, assets, model)
     if ids:
         print(f"jev-id: {ids['q']}", file=sys.stderr)
     return answers["q"]
@@ -365,7 +443,8 @@ def ask(state, question, tag=None, timeout=None):
 
 def take_opts(args):
     """Split flags from positionals. Returns (positionals, opts)."""
-    opts = {"quiet": False, "min": None, "yes": None, "state": None, "log": None, "n": 20, "dry_run": False}
+    opts = {"quiet": False, "min": None, "yes": None, "state": None, "log": None, "n": 20, "dry_run": False,
+            "images": [], "model": None}
     pos, i = [], 0
     while i < len(args):
         a = args[i]
@@ -373,7 +452,7 @@ def take_opts(args):
             opts["quiet"] = True
         elif a == "--dry-run":
             opts["dry_run"] = True
-        elif a in ("-s", "--state", "-f", "--state-file", "--min", "--yes", "--log", "--n"):
+        elif a in ("-s", "--state", "-f", "--state-file", "--min", "--yes", "--log", "--n", "--image", "--model"):
             if i + 1 >= len(args):
                 die(f"{a} needs a value", 64)
             v = args[i + 1]
@@ -391,6 +470,11 @@ def take_opts(args):
                     die(f"cannot read {v}: {e}", 64)
             elif a == "--log":
                 opts["log"] = v
+            elif a == "--image":
+                opts["images"].append(v)
+            elif a == "--model":
+                opts["model"] = v
+                os.environ["JEV_TYPESAFE_MODEL"] = v
             elif a == "--n":
                 opts["n"] = int(v)
             else:
@@ -403,20 +487,37 @@ def take_opts(args):
 
 def dry_run(body):
     """--dry-run: show exactly what would leave the machine, send nothing, no key needed."""
-    print(json.dumps({"dry_run": True, "url": target_url(), "body": safe_body(body)}, ensure_ascii=False, indent=1))
+    assets = body.get("assets")
+    safe = safe_body({k: v for k, v in body.items() if k != "assets"})
+    if assets:
+        safe["assets"] = assets
+    print(json.dumps({"dry_run": True, "url": target_url(bool(assets)), "body": dry_body(safe)}, ensure_ascii=False, indent=1))
     sys.exit(0)
 
 
 def cli_ask(opts, question):
     state = opts["state"]
     # stdin only when nothing else supplied the state, so `jev route "task"` never blocks on it.
-    if state is None and not sys.stdin.isatty():
+    if state is None and not opts["images"] and not sys.stdin.isatty():
         state = parse_state(sys.stdin.read())
-    if state is None or state == "":
-        die("no state: pass --state, --state-file, or pipe it on stdin", 64)
+    if (state is None or state == "") and not opts["images"]:
+        die("no state: pass --state, --state-file, --image, or pipe it on stdin", 64)
+    assets = None
+    if opts["images"]:
+        try:
+            assets, refs = build_assets(opts["images"])
+        except JevError as e:
+            die(str(e), 2)
+        if question.get("type") == "box" and (opts["model"] or "jev-latest") not in ("jev-latest", "jev-1.14", "jev-1.14.0"):
+            die("box questions need jev-1.14 or jev-latest", 2)
+        state = with_images(redact(state), refs)
+    model = opts["model"] or MODEL
     if opts["dry_run"]:
-        dry_run({"model": MODEL, "state": state, "questions": {"q": question}})
-    return ask(state, question, opts["log"])
+        body = {"model": model, "state": state, "questions": {"q": question}}
+        if assets:
+            body["assets"] = assets
+        dry_run(body)
+    return ask(state, question, opts["log"], assets=assets, model=model)
 
 
 def emit_choice_or_score(a, key, opts, extra=None):
@@ -476,6 +577,14 @@ def main(argv):
             die('usage: jev score "<question>" "level 0" "level 1" … [--state …]', 64)
         a = cli_ask(opts, {"type": "score", "instructions": pos[0], "criteria": pos[1:]})
         emit_choice_or_score(a, "score", opts)
+    elif cmd == "box":
+        if len(pos) != 1 or not opts["images"]:
+            die('usage: jev box "<what to find>" --image PATH [--model jev-latest]', 64)
+        a = cli_ask(opts, {"type": "box", "instructions": pos[0]})
+        out = {"box": a.get("box"), "confidence": a.get("confidence")}
+        print(json.dumps(a.get("box")) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
+        if opts["min"] is not None and (out["confidence"] is None or out["confidence"] < opts["min"]):
+            sys.exit(2)
     elif cmd == "route":
         if pos:
             opts["state"] = " ".join(pos)

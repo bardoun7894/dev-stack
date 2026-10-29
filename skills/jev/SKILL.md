@@ -1,13 +1,13 @@
 ---
 name: jev
-description: Use TypeSafe Jev (via OpenRouter) for fast, cheap, typed decisions instead of an LLM call — classify, route, gate, triage, score, pick a model tier. Triggers "/jev", "use jev", "classify these", "triage", "route this", "is this spam", "which model should do this", "gate before the LLM", "sentiment", "score each", and whenever code or a hook asks an LLM for a label, yes/no, score, or one-word answer, or Claude is about to read many items only to sort them. Also when adding AI decisions to Tokyo, godhome, mostqlAi, portfolio, Laravel apps, or dev-stack hooks. Also for e2e / browser tests and browsing agents — "e2e test", "playwright", "browser test", "did this step pass", "flaky test triage", "why did CI fail", driving a page with claude-in-chrome / agent-browser / Lightpanda — as the judge between the browser driver and any LLM; and for unit tests of code that calls Jev. Not for writing text, images, audio, or inputs over 32k tokens.
+description: Use TypeSafe Jev (via OpenRouter) for fast, cheap, typed decisions instead of an LLM call — classify, route, gate, triage, score, pick a model tier. Triggers "/jev", "use jev", "classify these", "triage", "route this", "is this spam", "which model should do this", "gate before the LLM", "sentiment", "score each", and whenever code or a hook asks an LLM for a label, yes/no, score, or one-word answer, or Claude is about to read many items only to sort them. Also when adding AI decisions to Tokyo, godhome, mostqlAi, portfolio, Laravel apps, or dev-stack hooks. Also for e2e / browser tests and browsing agents — "e2e test", "playwright", "browser test", "did this step pass", "flaky test triage", "why did CI fail", driving a page with claude-in-chrome / agent-browser / Lightpanda — as the judge between the browser driver and any LLM; and for unit tests of code that calls Jev. Also reads still images (PNG/JPEG) and finds a Box in one: "what type of paper is this", "is it readable", "is it signed", "is this a duplicate", "find the stamp/signature zone". Not for writing text, audio, video, or inputs over 32k tokens.
 ---
 
 # Jev — typed decisions for software
 
 Jev (TypeSafe "System One", OpenRouter `typesafe/jev-1.13`) takes **state + named questions** and returns
 **typed answers with calibrated confidence**. ~0.5–1 s, ~$0.00002 per call ($0.042/M input, $0 output),
-32k context, text only. It never writes prose — that is the point: no parsing, no hallucinated format.
+32k context, text plus still images (see Images and Box). It never writes prose — that is the point: no parsing, no hallucinated format.
 (The API itself answers in ~100–300 ms; the 0.5–1 s is the CLI's Python start plus the round trip from here.)
 
 ## When Jev, when an LLM
@@ -16,7 +16,7 @@ Jev (TypeSafe "System One", OpenRouter `typesafe/jev-1.13`) takes **state + name
 |---|---|
 | a label, yes/no, probability, score, routing target, model tier | **Jev** |
 | an internal summary/digest of public data | free model (`deepseek/deepseek-v4-flash-0731:free`) |
-| text a client/recruiter/public reads, or image understanding | Claude Sonnet 5 / Haiku 4.5 |
+| text a client/recruiter/public reads, or describing/reading the fields of an image | Claude Sonnet 5 / Haiku 4.5 |
 | computer use, browser/e2e testing, running tests, QA | Claude Haiku 5.5 for running and reading (`cliproxy/claude-haiku-5-5`, kind `test` T0-T2); Sonnet 5.5 for debugging and fixing (T3), then Opus 5.5 -> Gemini 4 Argon -> Grok 4.7 |
 | Arabic text (translate, write, correct) | Claude Sonnet 5.5 (Haiku 5.5 for short text), Gemini 4 Argon fallback (`kinds.language`); no OpenAI (owner 2026-10-22) |
 | code, debugging, multi-file work | Claude Sonnet 5.5 (frontend at xhigh); Opus 5.5 takes the task back when a worker fails |
@@ -106,6 +106,27 @@ fallback path for exit ≠ 0. Run `jev --help` for everything.
   https. Check what would leave the machine with `--dry-run` (or `JEV_DRY_RUN=1` for the jev-* tools).
   Pattern redaction is a safety net, not a licence: don't put credentials in state on purpose.
 
+## Images and Box
+
+`jev choice|noul|score ... --image PATH` (repeatable) and `jev box "<what to find>" --image PATH`.
+PNG or JPEG only, up to 16 MiB each, each side 280-1568 px (rotate upright first; EXIF is stripped, not applied).
+No video, no audio. Images use `jev-latest` (jev-1.14.0) unless `--model`; Box needs 1.14. The CLI sends base64
+`assets` plus the `TypeSafe-Danger-Zone-Images: true` header only when an image is present; a wrong type or
+oversized file exits 2. `--dry-run` shows `<image N bytes>` instead of the data.
+
+**Danger zone:** TypeSafe says images and Box are not production-guaranteed; formats and answers can change.
+
+Use for classification of a paper, not for reading its fields:
+- paper type (`choice`: invoice / delivery note / ID / cheque / other), readable (`noul`), signed or stamped (`noul`),
+  duplicate of another page (`noul`, two images), where a zone is (`box`: signature, stamp, total).
+- Do NOT use it to read digits or text off a page (small print is lost at 1568 px): a reader/OCR or vision LLM does that.
+  Jev classifies and boxes; it still never writes text.
+- Box crops must stay at least 280 px per side; if smaller, send the full image.
+
+Confidence: always pass `--min` (start at 0.8; tune from `jev tune`). Below it, or on any error (exit 2/3), fall back to a
+vision LLM (Claude Sonnet for sensitive or Arabic papers). Never treat an image answer as final until the item's offline
+evaluation has passed.
+
 ## Designing questions (what makes Jev accurate)
 
 1. **One narrow property per question.** Split "is this spam?" into `requests_credentials`,
@@ -125,7 +146,7 @@ fallback path for exit ≠ 0. Run `jev --help` for everything.
    one sentence of state or instruction. A/B the wording with `jev raw` before changing thresholds.
 
 Limits: Choice ≤ 255 options; Score ≤ 11 levels (0–10); Noul has no `confidence`, and a Noul near 0.5 means
-"undecided", not "medium"; state ≤ 32k tokens, text only. Choice/Score `confidence` is how concentrated the
+"undecided", not "medium"; state ≤ 32k tokens; images only via `--image` (see Images and Box). Choice/Score `confidence` is how concentrated the
 distribution is. It is not permission to act; thresholds come from your own data. The official docs index
 is `https://docs.typesafe.ai/llms.txt` (pages serve Markdown with `.md` appended). Read the closest cookbook
 before designing a new integration.
