@@ -44,7 +44,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 const HOME = homedir();
@@ -825,6 +825,40 @@ function worldTrack(args) {
   } catch { /* the world feed never affects a worker */ }
 }
 
+/**
+ * Server registry (F5, 2026-10-29): the job, the run start and the run end live in the SERVER registry, reached over ssh
+ * (`ssh MyContabo factory|frun ...`; JDELEGATE_REG_HOST / JDELEGATE_REG_SSH override host and ssh binary, tests use a fake).
+ * FACTORY_BIN set (tests, a local factory) keeps the old local call for submit and skips the run events.
+ * A run end that cannot reach the server goes to $CACHE/reg-spool.jsonl and is replayed on the next jdelegate launch.
+ */
+const REG_HOST = process.env.JDELEGATE_REG_HOST || "MyContabo";
+const REG_SPOOL = join(CACHE, "reg-spool.jsonl");
+const regOn = () => !process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH;
+/** Run `tool ...args` on the server, 6 s cap. Returns the spawnSync result. */
+function regSsh(tool, args, input) {
+  const remote = [tool, ...args.map((a) => (/^[A-Za-z0-9._:\/=@-]+$/.test(a) ? a : q(a)))].join(" ");
+  return spawnSync(process.env.JDELEGATE_REG_SSH || "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", REG_HOST, remote],
+    { encoding: "utf8", timeout: 6000, input: input ?? "" });
+}
+let spoolReplayed = false;
+function replayRegSpool() {
+  if (spoolReplayed) return;
+  spoolReplayed = true;
+  let lines;
+  try { lines = readFileSync(REG_SPOOL, "utf8").split("\n").filter((l) => l.trim()); } catch { return; }
+  const keep = [];
+  for (const [i, l] of lines.entries()) {
+    try {
+      const ev = JSON.parse(l);
+      if (i >= 20 || regSsh("frun", ev.args).status !== 0) keep.push(l);
+    } catch { /* a corrupt line is dropped */ }
+  }
+  try { writeFileSync(REG_SPOOL, keep.map((l) => l + "\n").join("")); } catch { /* the spool is best effort */ }
+}
+function spoolReg(args) {
+  try { mkdirSync(CACHE, { recursive: true }); writeFileSync(REG_SPOOL, JSON.stringify({ args }) + "\n", { flag: "a" }); } catch { /* nothing more to try */ }
+}
+
 /** Register the job with `factory submit` once per process (retries reuse the id). Returns the job id or "". Exit 97 = project halted: exit 97, nothing launched. Any other failure only warns. */
 let factoryJobId;
 function submitJob(briefFile) {
@@ -833,7 +867,13 @@ function submitJob(briefFile) {
   const top = spawnSync("git", ["-C", opt.cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 5000 }).stdout?.trim();
   const project = slug(basename(top || opt.cwd));
   const owner = slug(workerRole?.name || opt.role || "jdelegate");
-  const r = spawnSync(process.env.FACTORY_BIN || "factory", ["submit", project, "--brief", briefFile, "--owner", owner], { encoding: "utf8", timeout: 4000 });
+  let r;
+  if (process.env.FACTORY_BIN && !process.env.JDELEGATE_REG_SSH) {
+    r = spawnSync(process.env.FACTORY_BIN, ["submit", project, "--brief", briefFile, "--owner", owner], { encoding: "utf8", timeout: 4000 });
+  } else {
+    replayRegSpool();
+    r = regSsh("factory", ["submit", project, "--brief", "-", "--owner", owner], readFileSync(briefFile));
+  }
   if (r.status === 97) {
     console.error(`jdelegate: project ${project} is halted (factoryctl): ${(r.stderr || "").split("\n")[0].trim()}`);
     process.exit(97);
@@ -842,6 +882,20 @@ function submitJob(briefFile) {
   if (factoryJobId) process.env.FACTORY_JOB_ID = factoryJobId;
   else console.error(`jdelegate: warning: factory submit did not register the job (${r.error?.code || r.signal || `exit ${r.status}`}); launching unregistered`);
   return factoryJobId;
+}
+/** `frun start` on the server for a launched worker. Returns the run id or "". The label carries `timeout=SECS` for the reaper. */
+function regStart({ rec, label, pane }) {
+  if (!regOn()) return "";
+  const args = ["start", "--source", "jdelegate", "--project", basename(opt.cwd).toLowerCase().replace(/[^a-z0-9._-]/g, "-"),
+    "--name", nameLabel, "--label", `timeout=${Math.round(timeoutMs() / 1000)} ${label}`, "--host", hostname(), "--pid", String(rec.pid),
+    "--model", rec.model, ...(pane ? ["--pane", pane] : []), ...(rec.role ? ["--role", rec.role] : []), ...(factoryJobId ? ["--job", factoryJobId] : [])];
+  const r = regSsh("frun", args);
+  return r.status === 0 ? (r.stdout || "").trim().split("\n")[0].replace(/[^A-Za-z0-9._:-]/g, "") : "";
+}
+function regEnd(runId, rc, reason) {
+  if (!runId) return;
+  const args = ["finish", runId, String(rc), ...(reason ? ["--reason", reason] : [])];
+  if (regSsh("frun", args).status !== 0) spoolReg(args);
 }
 
 function makeRun(attemptBrief, attemptP, attemptTier) {
@@ -963,6 +1017,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     try { rec.pid = Number(readFileSync(join(run, "pid"), "utf8").trim()) || 0; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
   if (rec.pid) saveRecord(rec);
+  const regRun = rec.pid ? regStart({ rec, label, pane: process.env.HERDR_PANE_ID || "" }) : "";
   // The timeout we enforce here, in ms. JDELEGATE_TIMEOUT_MS overrides --timeout for tests.
   const limitMs = timeoutMs();
   while (!existsSync(join(run, "exit"))) {
@@ -971,6 +1026,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
       // The user-facing value, in minutes. Use the original --timeout number (so the message matches what was passed
       // on the command line, even when JDELEGATE_TIMEOUT_MS overrides the wall-clock value for tests).
       worldEvent("failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
+      regEnd(regRun, 124, `timeout: jdelegate killed the worker after ${opt.timeout} min`);
       const minutesText = `${opt.timeout} min`;
       console.log(`${head}\n[jdelegate] timed out after ${minutesText} in ${where}; worker tree killed, result will be in ${run}`);
       process.exit(124);
@@ -978,6 +1034,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     await new Promise((r) => setTimeout(r, 500));
   }
   const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
+  regEnd(regRun, rc);
   worldEvent(rc === 0 ? "done" : "failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
   const answer = finalAnswer(attemptP, run);
   const tabFile = join(run, "tab");
