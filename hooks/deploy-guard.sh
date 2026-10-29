@@ -12,7 +12,7 @@ in=$(cat); cmd=$(jq -r '.tool_input.command // empty' <<<"$in")
 printf '%s' "$cmd" | grep -qE 'deploy' || exit 0
 os=${GATE_GUARD_UNAME:-$(uname -s)}
 live=$(printf '%s\n' "$cmd" | awk '
-  skip { if ($0 ~ "^[[:space:]]*" term "[[:space:]]*$") skip=0; next }
+  skip { if ($0 ~ "^[[:space:]]*" term "[\"'"'"']?[[:space:]]*$") skip=0; next }
   { print; if (match($0, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*/)) { t=substr($0, RSTART, RLENGTH); gsub(/<<-?[[:space:]]*["'"'"']?/, "", t); term=t; skip=1 } }')
 scan=$live
 if printf '%s' "$live" | grep -qE '^[[:space:]]*(git[[:space:]]+commit|echo|tokyo-deploy)([[:space:]]|$)'; then
@@ -22,40 +22,45 @@ if [ "$os" = Darwin ]; then
   printf '%s' "$scan" | grep -qE '(^|[^[:alnum:]_-])ssh[[:space:]]' || exit 0
 fi
 
-target=""; found=0
+target=""; found=0; cdpath=""
+is_script() { case ${1##*/} in deploy.sh|dev-deploy.sh|deploy-*.sh|deploy_*.sh) return 0;; esac; return 1; }
 while IFS= read -r seg; do
   # shellcheck disable=SC2206
-  toks=($(printf '%s' "$seg" | tr -d "\"'()\`" ))
+  toks=($(printf '%s' "$seg" | tr -d "\"'()\`"))
   n=${#toks[@]}; i=0
+  # walk to the command word: skip VAR=val, sudo/env/time/nohup/exec, and `ssh [opts] host`
   while [ $i -lt $n ]; do
-    t=${toks[$i]}; p=""; [ $i -gt 0 ] && p=${toks[$((i-1))]}
-    case $t in
-      deploy-*) if [ "$p" = gate-run ] || [ "${toks[$((i-2))]:-}" = gate-run ]; then found=1; target=${t#deploy-}; fi ;;
-    esac
-    case ${t##*/} in
-      deploy.sh|dev-deploy.sh|deploy-*.sh|deploy_*.sh)
-        j=$((i-1)); ro=0
-        while [ $j -ge 0 ] && case ${toks[$j]} in -*) true;; *) false;; esac; do
-          case ${toks[$j]} in -*n*) ro=1;; esac; j=$((j-1))
-        done
-        w=""; [ $j -ge 0 ] && w=${toks[$j]}
-        if [ $ro = 0 ]; then
-          case $w in
-            bash|sh|zsh|source|.|*/bash|*/sh) found=1 ;;
-            cat|grep|egrep|rg|sed|less|more|head|tail|bat|wc|ls|stat|diff|file|shellcheck|vim|nano|nl|awk|cp|mv|rm|chmod|git|scp|rsync) ;;
-            *) case $t in ./*|/*)
-                 k=0; rd=0
-                 while [ $k -lt $i ]; do
-                   case ${toks[$k]} in cat|grep|egrep|rg|sed|less|more|head|tail|bat|wc|ls|stat|diff|file|shellcheck|vim|nano|nl|awk|cp|mv|rm|chmod|git|scp|rsync|echo) rd=1;; esac
-                   k=$((k+1))
-                 done
-                 [ $rd = 0 ] && found=1 ;; esac ;;
+    case ${toks[$i]} in
+      *=*|sudo|env|time|nohup|exec|command|nice) i=$((i+1)) ;;
+      ssh)
+        i=$((i+1))
+        while [ $i -lt $n ]; do
+          case ${toks[$i]} in
+            -[oiplFJLRDEWbcem]) i=$((i+2)) ;;
+            -*) i=$((i+1)) ;;
+            *) i=$((i+1)); break ;;
           esac
-        fi ;;
-      cd) [ $((i+1)) -lt $n ] && cdpath=${toks[$((i+1))]} ;;
+        done ;;
+      *) break ;;
     esac
-    i=$((i+1))
   done
+  [ $i -lt $n ] || continue
+  w=${toks[$i]}; nx=${toks[$((i+1))]:-}
+  case ${w##*/} in
+    cd) cdpath=$nx ;;
+    gate-run)
+      case $nx in deploy-*) found=1; target=${nx#deploy-} ;; esac ;;
+    bash|sh|zsh)
+      j=$((i+1)); ro=0
+      while [ $j -lt $n ]; do
+        case ${toks[$j]} in -c) ro=1; break ;; -*n*) ro=1; j=$((j+1)) ;; -*) j=$((j+1)) ;; *) break ;; esac
+      done
+      [ $ro = 0 ] && [ $j -lt $n ] && is_script "${toks[$j]}" && found=1 ;;
+    source|.)
+      [ -n "$nx" ] && is_script "$nx" && found=1 ;;
+    *)
+      case $w in ./*|/*|*/*) is_script "$w" && found=1 ;; esac ;;
+  esac
 done < <(printf '%s\n' "$scan" | sed -E 's/(&&|\|\||;|\|)/\n/g')
 [ $found = 1 ] || exit 0
 

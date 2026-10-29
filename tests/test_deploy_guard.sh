@@ -46,4 +46,17 @@ check mac-ssh-approved allow Darwin 'TOKYO_OFFER=ok1 ssh MyContabo "cd /root/pro
 check mac-ssh-cat allow Darwin 'ssh MyContabo "cat /root/x/ops/dev-deploy.sh"' A=1
 check mac-ssh-gate-run deny Darwin 'ssh MyContabo "gate-run deploy-x 10m -- ./d"' A=1
 check mac-local-no-ssh allow Darwin 'bash ops/dev-deploy.sh' A=1
+# F1 regression: a deploy script path as an argument is not a deploy
+check arg-cmp allow Linux 'cmp ~/.claude/hooks/deploy-guard.sh ~/code/x/hooks/dev-deploy.sh && echo same' A=1
+check arg-cp allow Linux 'cp ops/dev-deploy.sh /tmp/dev-deploy.sh.bak' A=1
+check arg-scp allow Linux 'scp ops/dev-deploy.sh MyContabo:/root/x/ops/' A=1
+check arg-md5sum allow Linux 'md5sum ops/dev-deploy.sh' A=1
+check arg-git-add allow Linux 'git add ops/dev-deploy.sh' A=1
+check arg-heredoc allow Linux $'cat > notes.md <<EOF\nrun bash ops/dev-deploy.sh later\nEOF'
+check arg-grep-deploy allow Linux 'grep -n deploy ops/dev-deploy.sh' A=1
+check arg-mac-ssh-cmp-heredoc allow Darwin $'cmp a b && echo same; ssh MyContabo \'cmp ops/dev-deploy.sh x ; cp ops/dev-deploy.sh y ; python3 - <<PY\nprint("bash ops/dev-deploy.sh")\nPY\'' A=1
+check exec-cd-bash deny Linux 'cd /root/x && bash ops/dev-deploy.sh' A=1
+check exec-ssh-cd-dot-slash deny Darwin 'ssh MyContabo "cd x; ./scripts/deploy.sh"' A=1
+check exec-env-sudo deny Linux 'FOO=1 sudo bash deploy.sh' A=1
+check exec-source deny Linux 'source ops/deploy-prod.sh' A=1
 exit $fails
