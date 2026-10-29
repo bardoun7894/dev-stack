@@ -5,9 +5,13 @@ Sources, read over ssh MyContabo with a script sent on stdin (nothing is written
   /root/tokyo/logs/biz-inbound.jsonl, biz-site-inbound.jsonl, and promises in life.db
   (sqlite3 -readonly). /root/tokyo/.env is never touched.
 
-Rule for "waiting on me": the logs hold inbound messages only, there is no outbound or
-handled marker anywhere in them. So we list the last inbound per sender within N days
-with its age and message count. Entries the bot itself muted, deduplicated or could not
+Outbound source: crmAi postgres (container crmai-postgres-1), table messages joined to
+conversations/contacts; sender in ('owner','assistant') is a message from our side
+(owner from the phone, assistant = auto-reply), created_at is naive UTC. Read-only SELECT.
+
+Rule for "waiting on me": per sender (phone digits), waiting = last inbound newer than
+last outbound. Answered senders are dropped from the list (flag replied=true, listed
+under "answered" in --json). Entries the bot itself muted, deduplicated or could not
 handle (muted/dup/unsupported/capped/skipped) are not counted as waiting.
 """
 import argparse, json, subprocess, sys
@@ -21,6 +25,8 @@ echo ===BIZ===
 tail -n 4000 /root/tokyo/logs/biz-inbound.jsonl 2>/dev/null
 echo ===SITE===
 tail -n 500 /root/tokyo/logs/biz-site-inbound.jsonl 2>/dev/null
+echo ===OUT===
+docker exec crmai-postgres-1 sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -At -F "|" -c "select c.phone, to_char(max(m.created_at),\$\$YYYY-MM-DD\"T\"HH24:MI:SS\$\$) from messages m join conversations v on v.id=m.conversation_id join contacts c on c.id=v.contact_id where m.sender in (\$\$owner\$\$,\$\$assistant\$\$) and m.created_at > now() - interval \$\$40 days\$\$ group by c.phone"' 2>/dev/null
 echo ===PROMISES===
 sqlite3 -readonly -json /root/tokyo/life.db "select id,content,made_to,due_date,status from promises where status in ('pending','due_soon','overdue') and due_date is not null and due_date <> '' order by due_date" 2>/dev/null || echo '[]'
 """
@@ -37,7 +43,7 @@ def fetch():
 def split(out):
     parts, cur = {}, None
     for line in out.splitlines():
-        if line in ("===BIZ===", "===SITE===", "===PROMISES==="):
+        if line in ("===BIZ===", "===SITE===", "===OUT===", "===PROMISES==="):
             cur = line.strip("="); parts[cur] = []
         elif cur:
             parts[cur].append(line)
@@ -48,7 +54,24 @@ def parse_ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+def digits(s):
+    return "".join(ch for ch in (s or "").split("@")[0] if ch.isdigit())
+
+
+def outbound(parts):
+    out = {}
+    for line in parts.get("OUT", []):
+        ph, _, ts = line.partition("|")
+        try:
+            out[digits(ph)] = parse_ts(ts + "+00:00")
+        except ValueError:
+            continue
+    return out
+
+
 def waiting(parts, days, now):
+    """All senders in the window, each with a replied flag (later outbound exists)."""
+    out = outbound(parts)
     cutoff = now - timedelta(days=days)
     senders = {}
     for src in ("BIZ", "SITE"):
@@ -68,6 +91,8 @@ def waiting(parts, days, now):
                 e["ts"], e["text"] = ts, (d.get("text") or "").replace("\n", " ")
     res = sorted(senders.values(), key=lambda e: e["ts"], reverse=True)
     for e in res:
+        last_out = out.get(digits(e["phone"]))
+        e["replied"] = bool(last_out and last_out > e["ts"])
         e["age_h"] = round((now - e["ts"]).total_seconds() / 3600, 1)
         e["ts"] = e["ts"].isoformat()
     return res
@@ -93,14 +118,15 @@ def main():
     a = ap.parse_args()
     now = datetime.now(timezone.utc)
     parts = split(fetch())
-    w, p = waiting(parts, a.days, now), promises(parts, now.astimezone().date())
+    allw, p = waiting(parts, a.days, now), promises(parts, now.astimezone().date())
+    w = [e for e in allw if not e["replied"]]
     if a.json:
-        print(json.dumps({"waiting": w, "promises": p}, ensure_ascii=False, indent=1))
+        print(json.dumps({"waiting": w, "answered": [e for e in allw if e["replied"]], "promises": p}, ensure_ascii=False, indent=1))
         return
     pshow = p[:10]
     room = MAX_LINES - 2 - len(pshow) - (1 if len(p) > len(pshow) else 0)
     wshow = w[:room - (1 if len(w) > room else 0)]
-    print(f"Waiting on me (last {a.days}d, {len(w)} senders)")
+    print(f"Waiting on me (last {a.days}d, {len(w)} of {len(allw)} senders unanswered)")
     for e in wshow:
         tail = e["phone"][-3:] if e["phone"] else ""
         who = f"{e['name']} ..{tail}" if tail else e["name"]
