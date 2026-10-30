@@ -49,7 +49,7 @@ test('lean command isolates the worker from user config and loads a system-promp
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.script, /CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p/);
   assert.match(r.script, /--setting-sources project,local/);
-  assert.match(r.script, /--settings '\{"disableAllHooks":true,"autoMemoryEnabled":false,/);
+  assert.match(r.script, /--settings '\{"autoMemoryEnabled":false,/);
   assert.match(r.script, new RegExp(`--append-system-prompt-file '${r.run}/worker-prompt.md'`));
   assert.match(r.script, /--strict-mcp-config/);
   assert.doesNotMatch(r.script, /--bare/);
@@ -328,7 +328,12 @@ test('lean --settings switches commit and PR attribution off', () => {
   const settings = JSON.parse(r.script.match(/--settings '(\{.*?\})'/)[1]);
   assert.equal(settings.includeCoAuthoredBy, false);
   assert.deepEqual(settings.attribution, { commit: '', pr: '' });
-  assert.equal(settings.disableAllHooks, true);
+  // Q8: no disableAllHooks; the only hook is the gate guard on Bash
+  assert.equal(settings.disableAllHooks, undefined);
+  assert.deepEqual(Object.keys(settings.hooks), ['PreToolUse']);
+  assert.equal(settings.hooks.PreToolUse.length, 1);
+  assert.equal(settings.hooks.PreToolUse[0].matcher, 'Bash');
+  assert.deepEqual(settings.hooks.PreToolUse[0].hooks.map((h) => h.command.endsWith('/.claude/hooks/gate-run-guard.sh') && h.command.startsWith('/')), [true]);
 });
 
 test('--help documents the new flags', () => {
@@ -1254,7 +1259,7 @@ test('G23: a 4th non-exempt worker is refused; review*/verify*/research* names a
 // ── D4: WAITING-GATE <id>: the worker waits for a server gate as a file plus a bash process, not as a live model session ──
 const d4Cache = join(tmp, 'cache-d4');
 const d4Env = (extra = {}) => ({ ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: d4Cache,
-  JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_MAX_LIVE: '99', JDELEGATE_GATE_RETRY_MS: '50', ...extra });
+  JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_MAX_LIVE: '99', JDELEGATE_GATE_RETRY_MS: '50', JDELEGATE_GATE_HOSTS: 'MyContabo', FACTORY_BIN: 'true', ...extra });
 const d4Run = (name, extra = {}) => spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', name, 'do the thing'],
   { encoding: 'utf8', timeout: 60_000, env: d4Env(extra) });
 
@@ -1324,6 +1329,28 @@ test('D4 final answer WAITING-GATE <id>: record goes waiting-gate, ssh gate-wait
   const rec = JSON.parse(readFileSync(join(cache, '.names', 'd4a.json'), 'utf8'));
   assert.notEqual(rec.state, 'waiting-gate', 'the resumed run is a normal live/finished record again');
   assert.equal(rec.sessionId, JSON.parse(readFileSync(`${probe}.rec`, 'utf8')).sessionId, 'same claude session');
+});
+
+test('D4 gate host is resolved per ticket: probe MyContabo then MediaContabo, remember it in the record; a named host skips the probe', () => {
+  const sshBody = 'case "$*" in *"test -e"*) case "$*" in *MediaContabo*) exit 0;; *) exit 1;; esac;; *) echo "gate tk-H finished rc=0"; echo ok; exit 0;; esac';
+  const log = d4Stubs('h', { claudeFirst: 'echo "WAITING-GATE tk-H"', claudeResume: 'echo done', sshBody });
+  const cache = join(tmp, 'cache-d4-h');
+  const r = d4Run('d4h', { JDELEGATE_CACHE: cache, JDELEGATE_GATE_HOSTS: 'MyContabo,MediaContabo' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const lines = readFileSync(log, 'utf8');
+  assert.match(lines, /SSH .*MyContabo test -e \/root\/.gate\/tickets\/tk-H.cmd/);
+  assert.match(lines, /SSH .*MediaContabo test -e/);
+  assert.match(lines, /SSH .*MediaContabo gate-wait tk-H \d+/);
+  assert.doesNotMatch(lines, /MyContabo gate-wait/);
+  assert.equal(JSON.parse(readFileSync(join(cache, '.names', 'd4h.json'), 'utf8')).gateHost, 'MediaContabo');
+
+  const log2 = d4Stubs('h2', { claudeFirst: 'echo "WAITING-GATE tk-N"', claudeResume: 'echo done', sshBody });
+  const r2 = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'd4h2', 'do it, gate host: MyContabo'],
+    { encoding: 'utf8', timeout: 60_000, env: d4Env({ JDELEGATE_CACHE: join(tmp, 'cache-d4-h2'), JDELEGATE_GATE_HOSTS: 'MyContabo,MediaContabo' }) });
+  assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+  const l2 = readFileSync(log2, 'utf8');
+  assert.match(l2, /SSH .*MyContabo gate-wait tk-N/);
+  assert.doesNotMatch(l2, /test -e/);
 });
 
 test('D4 a failing gate rc and an ssh drop are handed to the resumed worker; a plain answer never waits', () => {

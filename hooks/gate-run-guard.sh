@@ -30,12 +30,17 @@ is_heavy() { # one segment
   if printf '%s' "$seg" | grep -qE '(^|[^[:alnum:]_.-])pytest([[:space:]"'"'"']|$)'; then
     rest=${seg#*pytest}; printf '%s' "$rest" | grep -qE '(^|[[:space:]])[^[:space:]-][^[:space:]]*(/|\.py|::)' || return 0
   fi
+  if printf '%s' "$seg" | grep -qE '(^|[^[:alnum:]_.-])tsc([[:space:]"'"'"']|$)'; then  # Q8: whole-project tsc (~0.9 GB) is heavy; tsc with explicit .ts files stays light
+    rest=${seg#*tsc}
+    printf '%s' "$rest" | grep -qE '(^|[[:space:]])(--version|-v|--help|-h|--init)([[:space:]"'"'"']|$)' && return 1
+    printf '%s' "$rest" | grep -qE '(^|[[:space:]])[^[:space:]-][^[:space:]]*\.[cm]?tsx?($|[[:space:]"'"'"'])' || return 0
+  fi
   return 1
 }
 while IFS= read -r seg; do
   is_heavy "$seg" || continue
-  printf '%s' "$seg" | grep -qE 'gate-run[[:space:]]+[^[:space:]].*[[:space:]]--[[:space:]]' && continue
-  echo "BLOCKED by gate-run-guard: heavy command outside the gate queue. Wrap it: gate-run <project> <duration> -- <cmd>, e.g. ssh MyContabo \"cd /root/x && gate-run x 45m -- pnpm build\". GATE_SKIP=1 bypasses." >&2
+  printf '%s' "$seg" | grep -qE 'gate-(run|submit)[[:space:]]+[^[:space:]].*[[:space:]]--[[:space:]]' && continue
+  echo "BLOCKED by gate-run-guard: heavy command outside the gate queue. Wrap it: gate-run (or gate-submit for long runs) <project> <duration> -- <cmd>, e.g. ssh MyContabo \"cd /root/x && gate-run x 45m -- pnpm build\". GATE_SKIP=1 bypasses." >&2
   exit 2
 done < <(printf '%s\n' "$scan" | sed -E 's/(&&|\|\||;|\|)/\n/g')
 exit 0
