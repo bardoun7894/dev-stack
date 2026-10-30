@@ -78,7 +78,7 @@ done
 # Tickets from gate-submit (D4): waiting = queued, gate-run has not started the command; running = it has; done rc=N.
 # Done tickets show for $GATE_TICKET_SHOW_DONE_S s (default 7200); --reap deletes tickets older than 7 days.
 echo "== gate tickets ($GATE_DIR/tickets)"
-shown=0
+shown=0; lost_moved=0
 for f in "$GATE_DIR"/tickets/*.started; do
   [ -e "$f" ] || continue
   id=$(basename "$f" .started); tb=$GATE_DIR/tickets/$id
@@ -87,7 +87,12 @@ for f in "$GATE_DIR"/tickets/*.started; do
     state="done rc=$(head -1 "$tb.rc")"
   else
     pid=$(head -1 "$tb.pid" 2>/dev/null)
-    if [ -n "$pid" ] && ! alive "$pid"; then state="LOST(runner $pid dead)"
+    if [ -n "$pid" ] && ! alive "$pid"; then
+      # LOST older than $GATE_LOST_ARCHIVE_S (default 6h) moves to tickets/lost/ and is only counted, never listed.
+      if [ $((nowe - $(stat -c %Y "$f"))) -gt "${GATE_LOST_ARCHIVE_S:-21600}" ]; then
+        mkdir -p "$GATE_DIR/tickets/lost"; mv -f "$tb".* "$GATE_DIR/tickets/lost/" 2>/dev/null; lost_moved=$((lost_moved+1)); continue
+      fi
+      state="LOST(runner $pid dead)"
     elif grep -q 'gate-run\[[^]]*\]: running' "$tb.out" 2>/dev/null; then state=running
     else state=waiting; fi
   fi
@@ -95,6 +100,8 @@ for f in "$GATE_DIR"/tickets/*.started; do
   shown=$((shown+1))
 done
 [ $shown -gt 0 ] || echo "none"
+lost_total=$(ls "$GATE_DIR"/tickets/lost/*.started 2>/dev/null | wc -l)
+[ "$lost_total" -gt 0 ] && echo "lost tickets archived (runner dead >6h): $lost_total in $GATE_DIR/tickets/lost ($lost_moved moved now)"
 
 if [ $REAP = 1 ]; then
   for f in "$GATE_DIR"/*.lock; do
@@ -109,7 +116,7 @@ if [ $REAP = 1 ]; then
     rlog "STALE-RELEASE $(basename "$f") ($why) -> $(basename "$dst")"
   done
   find "$GATE_DIR" -maxdepth 1 -name '*.stale-*' -mtime +7 -delete 2>/dev/null
-  find "$GATE_DIR/tickets" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null
+  find "$GATE_DIR/tickets" -maxdepth 2 -type f -mtime +7 -delete 2>/dev/null
 fi
 
 echo "== legacy lock $LEGACY"
