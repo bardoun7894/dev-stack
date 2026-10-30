@@ -936,6 +936,7 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     name: nameLabel, slug: nameSlug, sessionId: currentSession, cwd: opt.cwd, repo: repoOf(opt.cwd), model: attemptP.ref.split("/").pop(), ref: attemptP.ref,
     harness: attemptP.harness, full: !isLean(), role: workerRole?.name || opt.role || "", skills: workerSkills.filter((x) => !x.auto).map((x) => x.name),
     mcp: attemptP.harness === "claude" && isLean() ? mcpNames : [], specs: EXEMPT_SPEC ? [] : opt.resumeRec ? (opt.resumeRec.specs ?? []) : specsIn(opt.brief), run, pid: 0, at: new Date().toISOString(),
+    ...(opt.resumeRec?.gateHost ? { gateHost: opt.resumeRec.gateHost } : {}),   // a resumed worker keeps the host its gate ran on
   };
   saveRecord(rec);
   return { run, label, rec };
@@ -1107,15 +1108,29 @@ async function killWorkerTree({ run, inlinePid, where, tab }) {
 // the record goes `waiting-gate` (not live), a bash+ssh `gate-wait <id>` blocks for the result, and the same session is resumed
 // (--resume NAME, a child jdelegate) with it. At most GATE_CYCLES waits per worker; the count rides in JDELEGATE_GATE_CYCLE.
 const GATE_CYCLES = 3;
-const GATE_HOST = process.env.JDELEGATE_GATE_HOST || "MyContabo";
+// Gate hosts differ per project (mediatgb gates run on MediaContabo), so a ticket's host is resolved per wait: the worker record or
+// the brief names it, else the first of JDELEGATE_GATE_HOST, then JDELEGATE_GATE_HOSTS that has the ticket file. The answer is kept in the record.
+const GATE_HOSTS = (process.env.JDELEGATE_GATE_HOSTS || "MyContabo,MediaContabo").split(",").map((h) => h.trim()).filter(Boolean);
+function resolveGateHost(id, rec) {
+  const named = rec?.gateHost || String(opt.brief).match(/\bgate[ _-]?host\s*[:=]\s*([A-Za-z0-9._@-]+)/i)?.[1];
+  if (named) return named;
+  const cands = [...new Set([process.env.JDELEGATE_GATE_HOST, ...GATE_HOSTS].filter(Boolean))];
+  if (cands.length > 1) {
+    for (const h of cands) {
+      const r = spawnSync("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", h, "test", "-e", `/root/.gate/tickets/${id}.cmd`], { timeout: 5000, stdio: "ignore" });
+      if (r.status === 0) return h;
+    }
+  }
+  return cands[0] || "MyContabo";   // nobody has it (or one candidate): the first host answers with its own "no ticket"
+}
 const waitingGate = (answer) => String(answer).split("\n").map((l) => l.trim()).filter(Boolean).pop()?.match(/^WAITING-GATE ([A-Za-z0-9._-]+)$/)?.[1] ?? "";
 /** `ssh HOST gate-wait ID MAX` in bash; an ssh drop (255) is retried, gate-wait is idempotent. Resolves { rc, out }. */
-async function sshGateWait(id) {
+async function sshGateWait(id, host) {
   const max = String(Number(process.env.JDELEGATE_GATE_MAX_S) || 15000);   // 75 min lock wait + 150 min run, as gate-run allows
   for (let attempt = 0; ; attempt++) {
     const r = await new Promise((res) => {
       let out = "";
-      const c = spawn("bash", ["-c", 'ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=5 "$0" gate-wait "$1" "$2"', GATE_HOST, id, max], { stdio: ["ignore", "pipe", "inherit"] });
+      const c = spawn("bash", ["-c", 'ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=5 "$0" gate-wait "$1" "$2"', host, id, max], { stdio: ["ignore", "pipe", "inherit"] });
       c.stdout.on("data", (b) => { out += b; });
       c.on("close", (code) => res({ rc: code ?? 255, out }));
       c.on("error", () => res({ rc: 255, out }));
@@ -1134,9 +1149,10 @@ async function gateCycle(result, attemptP) {
   }
   const rec = readRecord(nameLabel);
   if (!rec?.sessionId) return;   // nothing to resume: report the answer as it is
-  saveRecord({ ...rec, state: "waiting-gate", gate: id, gateAt: new Date().toISOString() });
+  const gateHost = resolveGateHost(id, rec);
+  saveRecord({ ...rec, state: "waiting-gate", gate: id, gateHost, gateAt: new Date().toISOString() });
   console.error(`[jdelegate] "${nameLabel}" waits for gate ${id} (wait ${cycle + 1}/${GATE_CYCLES}); no model session is alive meanwhile`);
-  const { rc, out } = await sshGateWait(id);
+  const { rc, out } = await sshGateWait(id, gateHost);
   const [first = "", ...rest] = out.split("\n");
   const tail = rest.join("\n").trim();
   // gate-wait's exit code is the gate's own rc, so 3 and 4 (still running / runner died) are ambiguous: the verdict is its first line.
