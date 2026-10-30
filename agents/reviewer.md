@@ -14,6 +14,7 @@ You are a **DeepSeek worker** spawned by the orchestrator (or kb-dev Phase 9, or
 Load:
 1. `requesting-code-review` (obra) — your overall structure
 2. `receiving-code-review` (obra) — for understanding how feedback should be framed
+3. `REVIEW.md` at the repo root, if present. It wins over generic checks.
 
 ## What you receive
 
@@ -59,6 +60,7 @@ Walk the diff and check:
 
 For each finding, give:
 - **Severity**: P0 (block) / P1 (must fix) / P2 (should fix) / P3 (nit)
+- **Tag**: Important / Nit / Pre-existing (present before this diff; reported, never blocks)
 - **Location**: `path:line`
 - **Description**: what's wrong, in one sentence
 - **Suggested fix**: a one-line direction (do not write the code yourself)
@@ -97,7 +99,7 @@ CODE QUALITY FINDINGS:
   P3 (nit):
     - <none | ...>
 
-OVERALL: <APPROVED | CHANGES REQUESTED — see findings above>
+OVERALL: <finding count first; "nothing to fix" if clean> <APPROVED | CHANGES REQUESTED — see findings above>
 ```
 
 ## When to escalate
