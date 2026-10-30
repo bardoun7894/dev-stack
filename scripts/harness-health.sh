@@ -41,7 +41,7 @@ if ssh -o BatchMode=yes -o ConnectTimeout=10 MyContabo true 2>/dev/null; then
   mac=$(md5 -q "$H/.claude/CLAUDE.md"); srv=$(ssh -o BatchMode=yes MyContabo 'md5sum /root/.claude/CLAUDE.md' | cut -d' ' -f1)
   [ "$mac" = "$srv" ] && ok "server CLAUDE.md matches Mac" || warn "server CLAUDE.md differs from Mac"
   # Server disk, ports, containers and services are owned by Servers & Domains and the server-health cron.
-  ssh -o BatchMode=yes MyContabo 'for c in jdelegate gemini; do command -v $c >/dev/null || echo "WARN server missing $c"; done; crontab -l 2>/dev/null | grep -q "pr-review" && echo "INFO pr-review auto-merge cron active on server"'
+  ssh -o BatchMode=yes MyContabo 'for c in jdelegate gemini; do command -v $c >/dev/null || echo "WARN server missing $c"; done; crontab -l 2>/dev/null | grep -v "^#" | grep -q "pr-review" && echo "WARN pr-review cron active on server (since 2026-10-30 it runs on the CachyOS laptop: systemd --user pr-review.timer, bardouni@100.64.0.3)"'
 else warn "ssh MyContabo unreachable"; fi
 for p in com.mycontabo.ssh-reverse-tunnel com.tokyo.cliproxy-tunnel com.tokyo.wa-tunnel com.mohamedbardouni.factory-temporal-worker; do
   launchctl list | grep -q "^[0-9].*$p$" && ok "running $p" || warn "not running $p"; done
