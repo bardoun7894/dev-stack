@@ -332,7 +332,6 @@ const nameSlug = slugOf(opt.name);
 
 // G16: a reviewer sees the spec + the diff and nothing else: no auto skill/role/MCP, no implementer session or transcript.
 opt.role = String(opt.role ?? "").trim().toLowerCase();
-if (!opt.role && /^review/i.test(nameLabel)) opt.role = "reviewer";
 if (opt.role === "reviewer") {
   const bypass = process.env.JDELEGATE_REVIEW_CONTEXT === "1";
   opt.autoSkill = false; opt.autoRole = false; opt.autoMcp = false;
