@@ -14,7 +14,7 @@ Scope: rules in `~/.claude/CLAUDE.md` (after the WORK SPLIT rewrite) and `~/.cla
 | G8 | Unbounded Read of files over 25 KB denied | `hooks/read-size-guard.sh` | Hook | none |
 | G9 | No finishing with uncommitted work | `hooks/commit-guard.sh` (Stop, once) | Hook (soft) | none |
 | G10 | No Co-Authored-By / "Generated with" in commits | None found | Prompt-only | `commit-msg` hook in `~/.githooks` rejecting those lines; deny pattern for `gh pr create --body` |
-| G11 | Run `/kb-query` before edits; log task with `/kb-spec log` | `user-prompt-kb-check.sh` injects a reminder only | Reminder only | Stop hook that checks the session log has an entry when files changed |
+| G11 | Run `/kb-query` before edits; log task with `/kb-spec log` | `user-prompt-kb-check.sh` reminder + `hooks/kb-log-guard.sh` (Stop, warn only, once per session per repo; copy in `~/.claude/hooks/`) warns when a repo was edited or committed with no `specs/_session/<today>-tasks.md` and no `/kb-spec log` call | Hook (warn) | none |
 | G12 | Mark done only in the spec (tasks.md box + SHA) | None | Prompt-only | Phase 11 gate script: fail if tasks.md has unchecked boxes at PR time |
 | G13 | One review + one fix round per branch | `bin/jdelegate`: per repo+branch counter in `$CACHE/review-count.json`, refuses the 3rd `--role reviewer` run (exit 2); `JDELEGATE_REVIEW_FORCE=1` bypasses | Script | none |
 | G14 | Review fixes go to the SAME implementer session (new) | None | Prompt-only | `jdelegate --resume <name>` convention; refuse a second worker `--name` on the same spec branch while the first is alive |
