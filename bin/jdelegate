@@ -331,25 +331,27 @@ const nameLabel = opt.name.replace(/[\x00-\x1f\x7f]+/g, " ").trim() || "job";
 const nameSlug = slugOf(opt.name);
 
 // G16: a reviewer sees the spec + the diff and nothing else: no auto skill/role/MCP, no implementer session or transcript.
+opt.role = String(opt.role ?? "").trim().toLowerCase();
+if (!opt.role && /^review/i.test(nameLabel)) opt.role = "reviewer";
 if (opt.role === "reviewer") {
   const bypass = process.env.JDELEGATE_REVIEW_CONTEXT === "1";
   opt.autoSkill = false; opt.autoRole = false; opt.autoMcp = false;
-  if (opt.resume) { console.error("jdelegate: --role reviewer: --resume hands a reviewer another worker's session; a reviewer sees only spec + diff"); process.exit(2); }
   const refuse = (why) => {
     if (bypass) { console.error(`jdelegate: warning: ${why} (allowed by JDELEGATE_REVIEW_CONTEXT=1)`); return; }
     console.error(`jdelegate: --role reviewer: ${why}; a reviewer sees only spec + diff (JDELEGATE_REVIEW_CONTEXT=1 overrides)`);
     process.exit(2);
   };
+  if (opt.resume) refuse("--resume hands a reviewer another worker's session");
   if (opt.skills.length) refuse("--skill adds context a reviewer must not have");
   if (opt.mcp.length) refuse("--mcp adds context a reviewer must not have");
   if (opt.full) refuse("--full adds context a reviewer must not have");
   const cachePaths = [...new Set(["~/.cache/jdelegate/", join(HOME, ".cache", "jdelegate") + "/", CACHE + "/"])];
-  if (/\.jsonl\b/i.test(opt.brief) || /--resume\b/.test(opt.brief) || cachePaths.some((c) => opt.brief.includes(c))) {
+  if (/\.jsonl\b/i.test(opt.brief) || /--resume\b/.test(opt.brief) || cachePaths.some((c) => opt.brief.toLowerCase().includes(c.toLowerCase())) || /\.cache\/jdelegate\b/i.test(opt.brief) || /\$\{?(HOME|CACHE|JDELEGATE_CACHE)\b/.test(opt.brief)) {
     refuse("the brief references another worker's session or transcript (*.jsonl, the jdelegate cache dir or --resume)");
   }
   const missing = [];
   if (!/\bspecs\/\d{3}-[\w.-]*\w/.test(opt.brief)) missing.push("specs/NNN-x/spec.md path");
-  if (!/\bgit\s+diff\b|\b[\w./-]+\.{2,3}[\w./-]+|\bdiff\s+(of\s+|for\s+|on\s+)?[\w./-]+|(^|[\s(])#\d+\b|\bpr\s*#?\d+\b|\.(diff|patch)\b/i.test(opt.brief)) missing.push("diff source (git diff, A..B range, PR number or .diff file)");
+  if (!/\bgit\s+diff\b|(^|[\s(])[\w/-]+\.{2,3}[\w/-]+(?=$|[\s),;])|(^|[\s(])#\d+\b|\bpr\s*#?\d+\b|\.(diff|patch)\b/i.test(opt.brief)) missing.push("diff source (git diff, A..B range, PR number or .diff file)");
   if (missing.length) console.error(`jdelegate: warning: reviewer brief names no ${missing.join(" and no ")}`);
 }
 
