@@ -19,7 +19,7 @@ Scope: rules in `~/.claude/CLAUDE.md` (after the WORK SPLIT rewrite) and `~/.cla
 | G13 | One review + one fix round per branch | `bin/jdelegate`: per repo+branch counter in `$CACHE/review-count.json`, refuses the 3rd `--role reviewer` run (exit 2); `JDELEGATE_REVIEW_FORCE=1` bypasses | Script | none |
 | G14 | Review fixes go to the SAME implementer session (new) | None | Prompt-only | `jdelegate --resume <name>` convention; refuse a second worker `--name` on the same spec branch while the first is alive |
 | G15 | Never split one spec into parallel workers (new) | `overlap.sh` catches shared files only | Prompt-only | extend `overlap.sh` to also fail when two live workers share a spec dir |
-| G16 | Reviewer sees only spec + diff, Opus xhigh | `agents/reviewer.md` model pin | Config (partial) | check in `jdelegate` that `--role reviewer` passes no extra context files |
+| G16 | Reviewer sees only spec + diff, Opus xhigh | `agents/reviewer.md` model pin | Config + code | `jdelegate --role reviewer` forces auto skill/role/MCP off, refuses `--skill`/`--mcp`/`--full` and briefs that cite a `*.jsonl`, the jdelegate cache dir or `--resume` (exit 2; `JDELEGATE_REVIEW_CONTEXT=1` overrides), and warns when the brief names no spec or no diff |
 | G17 | Every spec has a "Done when" with user-flow matrix (new) | None | Prompt-only | add grep check to Phase 11 gate and to `/kb-spec tasks` template |
 | G18 | Verifier resets DB/state between flows, non-prod only | `scripts/gate/verify-env-guard.sh` + `scripts/gate/prod-db-patterns.txt` + `scripts/gate/verifier-brief-template.md` | Script | none |
 | G19 | Locked checks untouched by builder | `lock-checks` (deny rule + pre-commit + verify) | Script | none |
