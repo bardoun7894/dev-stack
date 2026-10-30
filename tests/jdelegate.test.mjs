@@ -9,6 +9,10 @@ import { fileURLToPath } from 'node:url';
 
 const JD = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'jdelegate');
 const tmp = mkdtempSync(join(tmpdir(), 'jdelegate-test-'));
+// Test isolation: jdelegate's world hook spawns the real `track`, which POSTs to the live world store.
+// Off by default for every spawn below; the hook tests turn it back on with a fake track on PATH.
+process.env.WORLD_TRACK = '0';
+process.env.WORLD_URL = 'http://127.0.0.1:9';
 const sh = (cmd, cwd) => spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
 const write = (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); };
 
@@ -939,7 +943,7 @@ function trackRun(env, { claudeBody = 'echo worker-output; exit 0', cwd = repo }
   const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', cwd, '--name', 'Wjob', 'do the thing'], {
     encoding: 'utf8', timeout: 30_000,
     env: { ...process.env, PATH: `${tbin}:/usr/bin:/bin:${dirname(process.execPath)}`, JDELEGATE_JEV: join(tbin, 'jev'), JEV_ROUTER_CONFIG: tiers,
-      JDELEGATE_CACHE: join(tdir, 'cache'), JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', ...rest },
+      JDELEGATE_CACHE: join(tdir, 'cache'), JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', WORLD_TRACK: '1', ...rest },
   });
   spawnSync('sleep', ['0.5']);
   const calls = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => l.split('\t').slice(0, -1)) : [];
@@ -1391,4 +1395,9 @@ test('D4 at most 3 gate cycles, then the last answer is reported with exit 4', (
   assert.equal(r.status, 4, r.stdout + r.stderr);
   assert.match(r.stdout + r.stderr, /gate wait limit/i);
   assert.match(r.stdout, /WAITING-GATE tk-C/);
+});
+
+test('test setup never lets jdelegate reach the real track / live world store', () => {
+  assert.equal(process.env.WORLD_TRACK, '0');
+  assert.match(process.env.WORLD_URL, /127\.0\.0\.1/);
 });
