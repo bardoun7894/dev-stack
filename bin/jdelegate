@@ -221,6 +221,8 @@ if (opt.resume) {
   if (!rec) { console.error(`jdelegate: --resume "${opt.resume}": no worker record under ${NAMES_DIR}; start it with a normal run first`); process.exit(2); }
   if (rec.harness !== "claude" || !rec.sessionId) { console.error(`jdelegate: --resume "${opt.resume}": that worker ran on the ${rec.harness} harness; only claude workers can be resumed`); process.exit(2); }
   if (recordLive(rec)) { console.error(`jdelegate: --resume "${opt.resume}": the worker is still running (pid ${rec.pid || "?"}); wait for it first (jdelegate wait ${opt.resume})`); process.exit(2); }
+  const isReviewer = (r) => String(r ?? "").trim().toLowerCase() === "reviewer";
+  if (isReviewer(opt.role) || isReviewer(rec.role)) { console.error(`jdelegate: --role reviewer: ${isReviewer(rec.role) ? "worker role is reviewer; " : ""}--resume hands a reviewer another worker's session; a reviewer sees only spec + diff (JDELEGATE_REVIEW_CONTEXT=1 does not apply to --resume)`); process.exit(2); }
   opt.cwd = rec.cwd; opt.name = rec.name; opt.harness = "claude"; opt.model = rec.ref; opt.full = !!rec.full;
   opt.role = rec.role || ""; opt.skills = rec.skills ?? []; opt.mcp = rec.mcp ?? [];
   opt.autoSkill = false; opt.autoRole = false; opt.autoMcp = false;
@@ -340,7 +342,6 @@ if (opt.role === "reviewer") {
     console.error(`jdelegate: --role reviewer: ${why}; a reviewer sees only spec + diff (JDELEGATE_REVIEW_CONTEXT=1 overrides)`);
     process.exit(2);
   };
-  if (opt.resume) refuse("--resume hands a reviewer another worker's session");
   if (opt.skills.length) refuse("--skill adds context a reviewer must not have");
   if (opt.mcp.length) refuse("--mcp adds context a reviewer must not have");
   if (opt.full) refuse("--full adds context a reviewer must not have");
