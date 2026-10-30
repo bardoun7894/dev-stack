@@ -55,6 +55,7 @@ else if (cmd === "claude") {
   if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); }
   const role = stdin.startsWith("You are a security filter") ? "guard" : stdin.startsWith("You are a merge judge") ? "judge"
     : stdin.startsWith("You are fixing a pull request") ? "fix" : "review";
+  if (role === "review" && sc.reviewSleep) await new Promise((r) => setTimeout(r, sc.reviewSleep * 1000));
   if (role === "fix" && sc.fixSleep) await new Promise((r) => setTimeout(r, sc.fixSleep * 1000));
   if (role === "fix" && sc.fixFail) { process.stderr.write("fixer died"); process.exit(1); }
   if (role === "fix" && sc.fixTouchesGit) appendFileSync(process.cwd() + "/.git/config", "[core]\\n\\tfsmonitor = /tmp/pwn.sh\\n");
@@ -67,6 +68,7 @@ else if (cmd === "claude") {
   else out(JSON.stringify({ type: "result", result: sc.claudeOut ?? "No blocking issues", total_cost_usd: sc.claudeCost ?? 0.0123, usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 50 } }));
 }
 else if (cmd === "git") {
+  if (args.includes("commit") && sc.commitFail) { process.stderr.write(sc.commitFail); process.exit(1); }
   if (args.includes("push") && sc.pushFail) { process.stderr.write("rejected"); process.exit(1); }
   if (args[0] === "status") out(sc.gitStatus ?? "");
   else if (args[0] === "fetch") out("");
@@ -1193,4 +1195,101 @@ test("without a Telegram env file the comment still posts and the sweep does not
   assert.equal(a.status, 0);
   assert.equal(exhaustedComments(a).length, 1);
   assert.equal(tgCalls(a).length, 0);
+});
+
+// ---- P1: a repo commit hook that blocks the bot's fix commit is terminal; P2: timeouts/errors never mark a head seen; P3: fix -> re-review -> auto-merge ----
+const HOOK_OUT = "\u256d\u2500\u256e\n\u2502  Commit blocked \u2014 1 file(s) over 5000 tokens (tokens = bytes/4)\n\u2570\u2500\u256f\n\n    app/resources/js/Components/erp/DataTable.tsx  (~5683 tokens, 22735 bytes)\n\n  Your changes are blocked.";
+const hookComments = (r) => r.comments.filter((c) => c.bodyFile.includes("<!-- pr-review-exhausted -->"));
+
+test("P1: commit hook blocks the fix commit -> terminal: one comment + one Telegram naming the file, no fix-error, no push, no bypass", () => {
+  const { env } = shared3();
+  const a = fixGo({ files: TG, commitFail: HOOK_OUT }, [], env);
+  assert.equal(gitCalls(a, "push").length, 0);
+  assert.doesNotMatch(a.stdout, /fix-error/);
+  assert.match(a.stdout, /fix-blocked/);
+  assert.equal(hookComments(a).length, 1);
+  assert.match(hookComments(a)[0].bodyFile, /DataTable\.tsx/);
+  assert.match(hookComments(a)[0].bodyFile, /commit hook/);
+  assert.equal(tgCalls(a).length, 1);
+  assert.match(tgCalls(a)[0].args.join(" "), /DataTable\.tsx/);
+  assert.ok(!JSON.stringify(a.calls).includes("SKIP_TOKEN_CHECK"), "the hook is never bypassed");
+  assert.ok(!a.calls.some((c) => c.cmd === "git" && c.args.includes("--no-verify")), "no --no-verify");
+  // Next sweep on the same head: nothing more posted, no second fix attempt.
+  const b = fixGo({ files: TG, commitFail: HOOK_OUT, pr: seenPr([{ body: hookComments(a)[0].bodyFile }]) }, [], env);
+  assert.equal(fixCalls(b).length, 0);
+  assert.equal(hookComments(b).length, 0);
+  assert.equal(tgCalls(b).length, 0);
+});
+
+test("P1: another commit failure (not the hook) stays a plain fix-error", () => {
+  const { env } = shared3();
+  const a = fixGo({ files: TG, commitFail: "fatal: unable to write index" }, [], env);
+  assert.match(a.stdout, /fix-error/);
+  assert.equal(hookComments(a).length, 0);
+});
+
+test("P2: the third fixer timeout on a sha ends in the exhaustion comment + Telegram, not a silent already-tried", () => {
+  const { env } = shared3();
+  const sc = { files: TG, fixSleep: 3 };
+  for (let i = 0; i < 2; i++) {
+    const t = fixGo(sc, [], { ...env, ...quick });
+    assert.match(t.decisions.at(-1).fix.reason, /timeout/);
+    assert.equal(hookComments(t).length, 0, "retries 1 and 2 are quiet");
+  }
+  const c = fixGo(sc, [], { ...env, ...quick });
+  assert.match(c.decisions.at(-1).fix.reason, /timeout/);
+  assert.equal(hookComments(c).length, 1);
+  assert.equal(tgCalls(c).length, 1);
+  assert.match(tgCalls(c)[0].args.join(" "), /timed out/);
+  const d = fixGo({ files: TG, pr: seenPr([{ body: hookComments(c)[0].bodyFile }]) }, [], env);
+  assert.equal(fixCalls(d).length, 0);
+  assert.equal(hookComments(d).length, 0);
+});
+
+const failedReview = (sc, env) => run(["o/r", "1"], { pr: pr(), prMerge: green(), ...sc }, env);
+test("P2: a review timeout or error posts nothing and never marks the head seen; the next sweep reviews it", () => {
+  const { env } = shared3();
+  const a = failedReview({ reviewSleep: 3, claudeOut: PASS }, { ...env, PR_REVIEW_TIMEOUT_MS: "300" });
+  assert.equal(a.posts.length, 0);
+  assert.match(a.stderr, /claude: timeout/);
+  const b = failedReview({ claudeOut: PASS }, env);
+  assert.match(b.stdout, /abcdef1 reviewed/);
+  assert.doesNotMatch(b.stdout, /skipped-seen/);
+  assert.equal(b.posts.length, 1);
+});
+
+test("P2: after 2 retries (3 failures) on one head: exhaustion comment + Telegram once, then no more model calls on that head", () => {
+  const { env } = shared3();
+  for (let i = 0; i < 3; i++) {
+    const f = failedReview({ files: TG, claudeFail: true }, env);
+    assert.equal(f.status, 1);
+    assert.equal(hookComments(f).length, i === 2 ? 1 : 0);
+  }
+  const g = failedReview({ files: TG, claudeFail: true }, env);
+  assert.equal(g.claudes.length, 0, "no model call once exhausted");
+  assert.equal(hookComments(g).length, 0);
+  assert.equal(tgCalls(g).length, 0);
+});
+
+test("P2: a different head resets the review failure count", () => {
+  const { env } = shared3();
+  for (let i = 0; i < 3; i++) failedReview({ files: TG, claudeFail: true }, env);
+  const n = run(["o/r", "1"], { pr: pr({ headRefOid: "1111111111111111" }), prMerge: green({ headRefOid: "1111111111111111" }), claudeOut: PASS }, env);
+  assert.match(n.stdout, /1111111 reviewed/);
+});
+
+test("P3: fix-pushed, then the next sweep reviews the new head and queues auto-merge with --match-head-commit", () => {
+  const { env } = shared3();
+  const NEW = "fedcba9876543210";
+  const a = fixGo({ allowAutoMerge: true }, [], env);
+  assert.match(a.stdout, /fix-pushed/);
+  assert.equal(merges(a).length, 0);
+  const b = run(["o/r", "1"], { pr: fixPr({ headRefOid: NEW }), prMerge: green({ headRefOid: NEW }), claudeOut: PASS, allowAutoMerge: true }, env);
+  assert.match(b.stdout, /fedcba9 reviewed/);
+  assert.equal(b.posts.length, 1, "the new head gets its own review");
+  assert.match(b.stdout, /fedcba9 auto-merge-queued/);
+  const m = merges(b);
+  assert.equal(m.length, 1);
+  for (const f of ["--auto", "--squash", "--match-head-commit"]) assert.ok(m[0].args.includes(f), f);
+  assert.equal(m[0].args[m[0].args.indexOf("--match-head-commit") + 1], NEW);
 });
