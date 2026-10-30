@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# gate-run: run one gate/deploy command under a named lock with a time limit, so a hung or leaky
+# run can never block the queue. Installed 2026-10-22 (pipeline reliability fix 1).
+#
+#   gate-run <lockname> [<timeout>] -- <cmd> [args...]
+#
+#   lockname  project lock, e.g. mediatgb, crmai, transport-tms. Lock file: $GATE_DIR/<lockname>.lock
+#             Names starting with "deploy-" (deploy-mediatgb, deploy-tms ...) are deploy locks: they never
+#             wait on test locks or the shared heavy slots, so a deploy cannot block tests and vice versa.
+#   timeout   anything timeout(1) accepts (45m, 2h, 900). Default $GATE_TIMEOUT or 45m.
+#
+# Behaviour
+#   - waits at most $GATE_WAIT seconds (default 7200) for the project lock, then exits 75;
+#   - test runs (non deploy- names) also take one of $GATE_SLOTS shared heavy slots (default 1 on MediaContabo), so at most
+#     two heavy test runs share the 8-core / 23 GB box at once; GATE_SLOTS=0 turns the cap off;
+#   - the lock fds are closed in the command, so a server it spawns can never inherit the lock;
+#   - the command runs in its own process group under timeout(1) (TERM at the limit, KILL $GATE_KILL_GRACE s later);
+#   - when the command ends (pass, fail, timeout, or gate-run killed) the whole process group and every
+#     process carrying this run's GATE_RUN_ID (also ones that escaped with setsid) are killed;
+#     GATE_KEEP_CHILDREN=1 skips that cleanup;
+#   - a lock whose recorded holder is dead, or whose run is past its limit + grace, is released while waiting
+#     (the lock file is moved aside to <lock>.stale-<time> and logged).
+#   - status: $GATE_DIR/<lockname>.lock.status while running; history in $GATE_DIR/history.log. See gate-status.
+#   - FIFO (2026-10-30): waiters of the same lock are served in arrival order. Each waiter drops a ticket
+#     $GATE_DIR/queue/<lock>/<epoch_ns>-<pid>; it only tries the flock when its ticket is the oldest live one.
+#     Tickets of dead pids are removed, so a crash never blocks the queue. Old-version waiters have no ticket.
+#   - locks named *-merge are for merges only: a timeout above $GATE_MERGE_MAX (default 90m) is refused (exit 2);
+#     run the tests under your own lock first, then queue the merge.
+# Exit: the command's exit code; 124 timeout; 75 lock wait timed out; 2 usage.
+set -uo pipefail
+# Q5 (2026-10-29): locks, status files and history are group-writable (dir root:gate 2775) so tokyo-agent can use them;
+# the gated command itself keeps the umask the caller had.
+GATE_UMASK_ORIG=$(umask); umask 002
+GATE_DIR=${GATE_DIR:-/root/.gate}
+WAIT=${GATE_WAIT:-7200}; [[ $1 == *-merge ]] && [ -z "${GATE_WAIT:-}" ] && WAIT=28800
+# Hosts with /etc/gate-business-hours (MediaContabo, the live MEDIA TGB site): 1 heavy slot in business hours (08:30-18:00 Casablanca), 2 at night
+_slots_def=2
+if [ -e /etc/gate-business-hours ]; then _hm=$(TZ=Africa/Casablanca date +%H%M); if [ "$_hm" -ge 0830 ] && [ "$_hm" -lt 1800 ]; then _slots_def=1; fi; fi
+SLOTS=${GATE_SLOTS:-$_slots_def}
+GRACE=${GATE_KILL_GRACE:-20}
+STALE_GRACE=${GATE_STALE_GRACE:-300}
+usage() { sed -n 5,13p "$0" >&2; exit 2; }
+[ $# -ge 3 ] || usage
+NAME=$1; shift
+TO=${GATE_TIMEOUT:-45m}
+if [ "$1" != "--" ]; then TO=$1; shift; fi
+[ "${1:-}" = "--" ] || usage
+shift
+[ $# -ge 1 ] || usage
+[[ $NAME =~ ^[A-Za-z0-9._-]+$ ]] || { echo "gate-run: bad lock name '$NAME'" >&2; exit 2; }
+dur2s() { local d=$1 n u; n=${d%[smhd]}; u=${d#"$n"}; [[ $n =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo -1; return; }
+  n=${n%.*}; case $u in ''|s) echo "$n";; m) echo $((n*60));; h) echo $((n*3600));; d) echo $((n*86400));; esac; }
+TO_S=$(dur2s "$TO"); [ "$TO_S" -gt 0 ] 2>/dev/null || { echo "gate-run: bad timeout '$TO'" >&2; exit 2; }
+if [[ $NAME == *-merge ]] && [ "$TO_S" -gt "$(dur2s "${GATE_MERGE_MAX:-90m}")" ]; then
+  echo "gate-run: lock '$NAME' is for merges only: timeout $TO is above ${GATE_MERGE_MAX:-90m}. Run the tests under your own lock first (gate-run <project>-<branch> $TO -- <tests>), then queue the merge under $NAME with a timeout of ${GATE_MERGE_MAX:-90m} or less." >&2
+  exit 2
+fi
+mkdir -p "$GATE_DIR"
+LOCK=$GATE_DIR/$NAME.lock
+HIST=$GATE_DIR/history.log
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log() { printf '%s %s\n' "$(now)" "$*" >> "$HIST"; }
+say() { echo "gate-run[$NAME]: $*" >&2; }
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+
+# stale_check <lockfile>: if the lock is held by a dead or over-limit gate-run, move it aside.
+stale_check() {
+  local f=$1 st=$1.status pid start lim pg reason=""
+  [ -f "$st" ] || return 0
+  pid=$(field "$st" pid); start=$(field "$st" start_epoch); lim=$(field "$st" timeout_s); pg=$(field "$st" pgid)
+  if ! alive "$pid"; then reason="holder pid $pid is gone"
+  elif [ -n "$start" ] && [ -n "$lim" ] && [ $(( $(date +%s) - start )) -gt $(( lim + GRACE + STALE_GRACE )) ]; then
+    reason="run over its limit (${lim}s + grace)"
+    [ -n "$pg" ] && kill -TERM -- "-$pg" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; sleep 2
+    [ -n "$pg" ] && kill -KILL -- "-$pg" 2>/dev/null
+  fi
+  [ -n "$reason" ] || return 0
+  # still held? (if it is free now there is nothing to release)
+  if ( exec 8>>"$f"; flock -n 8 ); then rm -f "$st"; return 0; fi
+  local dst; dst="$f.stale-$(date -u +%Y%m%d%H%M%S)"
+  mv -f "$f" "$dst" 2>/dev/null && mv -f "$st" "$dst.status" 2>/dev/null
+  log "STALE-RELEASE lock=$(basename "$f") reason=\"$reason\" moved-to=$(basename "$dst")"
+  say "released stale lock $(basename "$f"): $reason"
+}
+
+# FIFO ticket queue per lock: $GATE_DIR/queue/<lock>/<epoch_ns>-<pid>
+QDIR=$GATE_DIR/queue/$NAME
+TICKET=""
+ticket_take() { mkdir -p "$QDIR" && chmod 2775 "$QDIR" 2>/dev/null; TICKET=$QDIR/$(date +%s%N)-$$; echo "$$" > "$TICKET"; }
+ticket_drop() { [ -n "$TICKET" ] && rm -f "$TICKET"; TICKET=""; }
+# is_head: true when my ticket is the oldest live one; dead tickets met on the way are removed.
+is_head() {
+  local t b p
+  [ -n "$TICKET" ] || return 0
+  [ -e "$TICKET" ] || echo "$$" > "$TICKET"
+  for t in $(ls "$QDIR" 2>/dev/null | sort); do
+    b=$QDIR/$t; [ "$b" = "$TICKET" ] && return 0
+    p=${t#*-}
+    if alive "$p"; then return 1; fi
+    rm -f "$b"
+  done
+  return 0
+}
+
+# acquire <lockfile> <deadline_epoch>: sets ACQ_FD. Re-opens if the file was moved aside while we waited.
+acquire_one() {
+  local f=$1 deadline=$2 fd left
+  while :; do
+    exec {fd}>>"$f"
+    while :; do
+      if ! is_head; then
+        left=$(( deadline - $(date +%s) )); [ $left -le 0 ] && { exec {fd}>&-; return 1; }
+        sleep 1; continue
+      fi
+      if flock -n "$fd"; then
+        if [ "$(stat -L -c %i "/proc/$$/fd/$fd" 2>/dev/null)" = "$(stat -c %i "$f" 2>/dev/null)" ]; then ACQ_FD=$fd; return 0; fi
+        exec {fd}>&-; break          # we locked a file that was moved aside; re-open the new one
+      fi
+      left=$(( deadline - $(date +%s) )); [ $left -le 0 ] && { exec {fd}>&-; return 1; }
+      [ "$(stat -L -c %i "/proc/$$/fd/$fd" 2>/dev/null)" = "$(stat -c %i "$f" 2>/dev/null)" ] || { exec {fd}>&-; break; }
+      stale_check "$f"
+      flock -w $(( left < 15 ? left : 15 )) "$fd" && continue   # got it: loop re-verifies the inode
+    done
+  done
+}
+
+# Halt check (factoryctl halt PROJECT): before any lock, pure bash, fails closed. Exit 97.
+CONTROL_DIR=${FACTORY_CONTROL_DIR:-/root/.factory-control}
+PROJ=${NAME#deploy-}
+halt_reason=""
+if [ -e "$CONTROL_DIR/state/$PROJ.halt" ]; then
+  halt_reason=$(sed -n '1s/.*"reason"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONTROL_DIR/state/$PROJ.halt" 2>/dev/null)
+  halt_reason=${halt_reason:-no reason given}
+elif [ -e "$CONTROL_DIR/state" ] && ! ls "$CONTROL_DIR/state" >/dev/null 2>&1; then
+  halt_reason="halt state unreadable (failing closed)"
+fi
+if [ -n "$halt_reason" ]; then
+  say "HALTED: $halt_reason"; log "HALTED lock=$NAME project=$PROJ reason=\"$halt_reason\" cmd=\"$*\""
+  exit 97
+fi
+FRUN=${FACTORY_FRUN:-/usr/local/bin/frun}
+
+DEADLINE=$(( $(date +%s) + WAIT ))
+T0=$(date +%s)
+say "waiting for lock $NAME (max ${WAIT}s)"
+ticket_take
+trap ticket_drop EXIT
+acquire_one "$LOCK" "$DEADLINE" || { ticket_drop; say "gave up waiting for $NAME after ${WAIT}s; holder: $(tr '\n' ' ' < "$LOCK.status" 2>/dev/null)"; log "WAIT-TIMEOUT lock=$NAME cmd=\"$*\""; exit 75; }
+LFD=$ACQ_FD
+ticket_drop
+SFD=""; SLOT=""
+if [[ $NAME != deploy-* ]] && ! { [[ $NAME == *-merge ]] && [ "$_slots_def" -ge 2 ] && [ -z "${GATE_SLOTS:-}" ]; } && [ "$SLOTS" -gt 0 ] 2>/dev/null; then
+  while [ -z "$SLOT" ]; do
+    for i in $(seq 1 "$SLOTS"); do
+      sf=$GATE_DIR/slot-$i.lock; stale_check "$sf"
+      exec {fd}>>"$sf"
+      if flock -n "$fd"; then SFD=$fd; SLOT=$i; break; fi
+      exec {fd}>&-
+    done
+    [ -n "$SLOT" ] && break
+    [ "$(date +%s)" -ge "$DEADLINE" ] && { say "no free heavy slot after ${WAIT}s"; log "WAIT-TIMEOUT slot lock=$NAME"; exit 75; }
+    sleep 10
+  done
+fi
+
+RUN_ID="$NAME.$$.$(date +%s)"
+CHILD=""
+END_EXTRA=""
+FINISH_ARGS=()
+run_id=""
+write_status() { # <lockfile> <cmd...>: writes <lockfile>.status (never touches the lock file itself)
+  { echo "pid=$$"; echo "pgid=$CHILD"; echo "start_epoch=$(date +%s)"; echo "start=$(now)"; echo "timeout_s=$TO_S"
+    echo "lock=$NAME"; echo "slot=${SLOT:-none}"; echo "run_id=$RUN_ID"; echo "cwd=$PWD"; echo "caller_ppid=$PPID"
+    echo "claude_pid=${CLAUDE_PID:-}"; echo "herdr_pane=${HERDR_PANE_ID:-}"; echo "cmd=${*:2}"; } > "$1.status.tmp" && mv -f "$1.status.tmp" "$1.status"
+}
+# managed <pid>: true for pm2 apps (a deploy's `pm2 restart` hands our env to the app), docker and
+# systemd services other than herdr/ssh/cron/user sessions. Those are never killed by the cleanup.
+managed() {
+  local cg; grep -qsz '^pm_id=' "/proc/$1/environ" && return 0
+  cg=$(cut -d: -f3 "/proc/$1/cgroup" 2>/dev/null)
+  case $cg in */pm2*|*docker*) return 0;; /system.slice/herdr.service|/system.slice/ssh.service|/system.slice/cron.service|/user.slice/*|"") return 1;; /system.slice/*.service) return 0;; esac
+  return 1
+}
+cleanup_children() {
+  [ "${GATE_KEEP_CHILDREN:-0}" = 1 ] && return 0
+  local p pids=""
+  [ -n "$CHILD" ] && kill -TERM -- "-$CHILD" 2>/dev/null
+  # one grep over every environ file: finds processes that left the group (setsid, double fork)
+  for p in $(grep -lsxzF "GATE_RUN_ID=$RUN_ID" /proc/[0-9]*/environ 2>/dev/null); do
+    p=${p#/proc/}; p=${p%/environ}; [ "$p" != "$$" ] || continue
+    managed "$p" && { log "CLEANUP-SKIP lock=$NAME run=$RUN_ID pid=$p (pm2/systemd/docker managed)"; continue; }
+    pids="$pids $p"
+  done
+  [ -n "$pids" ] && { kill -TERM $pids 2>/dev/null; log "CLEANUP lock=$NAME run=$RUN_ID term-pids=\"$pids\""; sleep 2; }
+  [ -n "$CHILD" ] && kill -KILL -- "-$CHILD" 2>/dev/null
+  for p in $pids; do alive "$p" && kill -KILL "$p" 2>/dev/null; done
+  return 0
+}
+job_phase() { # <phase> <status>: job phase of FACTORY_JOB_ID in project $PROJ, best effort, never changes the exit code
+  [ -n "${FACTORY_JOB_ID:-}" ] || return 0
+  timeout 6 "${FACTORY_CTL:-/usr/local/bin/factoryctl}" phase "$FACTORY_JOB_ID" "$1" "$2" --project "$PROJ" >/dev/null 2>&1 </dev/null
+  return 0
+}
+DEPLOY_OPEN=0
+finish() {
+  local rc=$1
+  cleanup_children
+  [ "$DEPLOY_OPEN" = 1 ] && { DEPLOY_OPEN=0; job_phase deploy failed; }
+  rm -f "$LOCK.status" ${SLOT:+"$GATE_DIR/slot-$SLOT.lock.status"}
+  [ -n "$run_id" ] && timeout 6 "$FRUN" finish "$run_id" "$rc" ${FINISH_ARGS[@]+"${FINISH_ARGS[@]}"} >/dev/null 2>&1 </dev/null
+  log "END lock=$NAME slot=${SLOT:-none} rc=$rc secs=$(( $(date +%s) - T0 )) run=$RUN_ID${END_EXTRA:-}"
+  exit "$rc"
+}
+on_signal() { say "got signal, stopping run"; log "SIGNAL lock=$NAME run=$RUN_ID"; finish 143; }
+trap on_signal TERM INT HUP
+
+# Registry row, best effort: a missing or failing frun never changes the exit code or stdout.
+run_id=$(timeout 6 "$FRUN" start --source gate-run --project "$PROJ" --name "$NAME" --label "$*" --pid $$ 2>/dev/null </dev/null | head -1) || run_id=""
+[ -n "$run_id" ] && export FACTORY_PARENT_RUN=$run_id
+
+# Each test run gets its own TMPDIR, so one suite's /tmp cleanup cannot delete another run's files.
+if [[ $NAME != deploy-* ]] && [ -z "${GATE_SHARED_TMP:-}" ]; then GATE_TMP=$(mktemp -d /tmp/gate-tmp.XXXXXX) && export TMPDIR=$GATE_TMP; fi
+# Close both lock fds in the command so nothing it spawns can hold the lock after it ends.
+if [ -n "$SFD" ]; then
+  GATE_RUN_ID=$RUN_ID timeout -k "$GRACE" "$TO" bash -c 'umask "$0"; exec "$@"' "$GATE_UMASK_ORIG" "$@" {LFD}>&- {SFD}>&- <&0 &
+else
+  GATE_RUN_ID=$RUN_ID timeout -k "$GRACE" "$TO" bash -c 'umask "$0"; exec "$@"' "$GATE_UMASK_ORIG" "$@" {LFD}>&- <&0 &
+fi
+CHILD=$!
+[[ $NAME == deploy-* ]] && { job_phase deploy running; DEPLOY_OPEN=1; }
+write_status "$LOCK" "$@"
+[ -n "$SLOT" ] && write_status "$GATE_DIR/slot-$SLOT.lock" "$@"
+log "START lock=$NAME slot=${SLOT:-none} timeout=$TO waited=$(( $(date +%s) - T0 ))s pid=$$ pgid=$CHILD cwd=$PWD claude_pid=${CLAUDE_PID:-} cmd=\"$*\""
+say "running (timeout $TO, slot ${SLOT:-none}): $*"
+wait "$CHILD"; RC=$?
+[ -n "${GATE_TMP:-}" ] && rm -rf "$GATE_TMP"
+[ "$RC" = 124 ] && { say "TIMEOUT after $TO: $*"; log "TIMEOUT lock=$NAME run=$RUN_ID limit=$TO"; }
+[ "$RC" = 137 ] && log "KILLED-AFTER-TIMEOUT lock=$NAME run=$RUN_ID"
+if [ "$DEPLOY_OPEN" = 1 ]; then DEPLOY_OPEN=0; if [ "$RC" = 0 ]; then job_phase deploy succeeded; else job_phase deploy failed; fi; fi
+# Readback (D14) inside the deploy lock: only deploy- locks, only after a clean exit, opt-in per project
+# (deploy-readback --if-configured skips others). rc 14 is the verdict; any other rc is only logged.
+if [[ $NAME == deploy-* ]] && [ "$RC" = 0 ] && [ "${GATE_READBACK:-1}" != 0 ]; then
+  GATE_RUN_ID=$RUN_ID timeout -k 5 "${GATE_READBACK_TIMEOUT:-150}" "${FACTORY_READBACK:-/usr/local/bin/deploy-readback}" \
+    --if-configured "$PROJ" {LFD}>&- </dev/null >&2; rbrc=$?
+  if [ "$rbrc" = 14 ]; then RC=14; END_EXTRA=" readback=failed"; FINISH_ARGS=(--reason readback)
+  elif [ "$rbrc" != 0 ]; then END_EXTRA=" readback=error"; say "readback error (rc $rbrc), deploy result kept"; fi
+fi
+finish "$RC"

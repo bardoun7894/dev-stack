@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# gate-status [--reap] [--kill-orphans]: show every gate lock, who holds it, since when, and what runs.
+# Installed 2026-10-22 (pipeline reliability fix 1); 2026-10-28 also lists gate-submit tickets. Covers $GATE_DIR/*.lock (gate-run) and the legacy
+# /root/.gate.lock (bare `flock /root/.gate.lock ...` callers).
+#   --reap          release stale gate-run locks (dead holder or past limit) and report the legacy lock's
+#                   state; for the legacy lock it finds the process that inherited the lock fd after the
+#                   locking process died. Logs to $GATE_DIR/reap.log.
+#   --kill-orphans  with --reap: also kill such an inheritor, but only when it is an orphan (PPID 1), not
+#                   pm2/systemd/docker managed, and not tied to a live Claude session (CLAUDE_PID alive).
+#                   Anything else is logged as NEEDS-APPROVAL and left alone.
+#                   Idle-session rule (2026-10-22, fix 3): an inheritor that is a dev/preview server or browser
+#                   (args match $GATE_REAP_SERVER_RE: next-server, vite, node dev servers, chrome ...), not
+#                   pm2/systemd/docker managed and not claude itself, whose CLAUDE_PID session has had no activity
+#                   for > $GATE_REAP_IDLE_S s (default 7200; a dead Claude counts as idle) while the oldest waiter
+#                   has waited > $GATE_REAP_WAIT_S s (default 1800) is killed (that process only, never Claude).
+#                   PIDs listed one per line in $GATE_DIR/reap-keep are never killed (owner decides).
+set -uo pipefail
+GATE_DIR=${GATE_DIR:-/root/.gate}
+LEGACY=${GATE_LEGACY_LOCK:-/root/.gate.lock}
+CLAUDE_DIR=${GATE_CLAUDE_DIR:-/root/.claude}
+IDLE_S=${GATE_REAP_IDLE_S:-7200}; WAIT_S=${GATE_REAP_WAIT_S:-1800}
+SERVER_RE=${GATE_REAP_SERVER_RE:-'next-server|next (dev|start)|vite|webpack|nuxt|astro|remix|node .*(dev|serve|server|start)|(npm|pnpm|yarn|bun)( run)? (dev|start|preview|serve)|chrom(e|ium)|headless_shell'}
+REAP=0; KILL=0
+for a in "$@"; do case $a in --reap) REAP=1;; --kill-orphans) KILL=1;; -h|--help) sed -n 2,17p "$0"; exit 0;; esac; done
+field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+held() { ( exec 8>>"$1"; ! flock -n 8 ) 2>/dev/null; }
+# claude_idle <claude_pid>: seconds since that Claude session last did anything (session file updatedAt,
+# session/transcript mtimes); 999999 when that Claude is gone; -1 when unknown (treated as active).
+claude_idle() {
+  local cp=$1 sj ts=0 t sid f
+  alive "$cp" || { echo 999999; return; }
+  sj=$CLAUDE_DIR/sessions/$cp.json
+  [ -f "$sj" ] || { echo -1; return; }
+  t=$(sed -n 's/.*"updatedAt":\([0-9]*\).*/\1/p' "$sj" | head -1); [ -n "$t" ] && ts=$((t / 1000))
+  t=$(stat -c %Y "$sj"); [ "$t" -gt "$ts" ] && ts=$t
+  sid=$(sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p' "$sj" | head -1)
+  if [ -n "$sid" ]; then for f in "$CLAUDE_DIR"/projects/*/"$sid".jsonl; do
+    [ -f "$f" ] && t=$(stat -c %Y "$f") && [ "$t" -gt "$ts" ] && ts=$t; done; fi
+  echo $(( $(date +%s) - ts ))
+}
+ago() { local s=$1; printf '%dh%02dm' $((s/3600)) $((s%3600/60)); }
+rlog() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$GATE_DIR/reap.log"; echo "$*"; }
+mkdir -p "$GATE_DIR"
+nowe=$(date +%s)
+
+echo "== gate-run locks ($GATE_DIR)"
+shopt -s nullglob
+for f in "$GATE_DIR"/*.lock; do
+  n=$(basename "$f" .lock); st=$f.status
+  if held "$f"; then
+    if [ -f "$st" ]; then
+      pid=$(field "$st" pid); se=$(field "$st" start_epoch); lim=$(field "$st" timeout_s)
+      state=RUNNING; alive "$pid" || state="STALE(holder $pid dead)"
+      [ -n "$se" ] && [ -n "$lim" ] && [ $((nowe - se)) -gt $((lim + 320)) ] && state="STALE(over limit)"
+      printf '%-22s %-26s for %s (limit %ss) pid=%s claude_pid=%s cwd=%s\n    cmd: %s\n' "$n" "$state" "$(ago $((nowe-se)))" "$lim" "$pid" "$(field "$st" claude_pid)" "$(field "$st" cwd)" "$(field "$st" cmd | cut -c1-200)"
+    else printf '%-22s HELD (no status file; not a gate-run holder?)\n' "$n"; fi
+  else printf '%-22s free\n' "$n"; fi
+done
+# FIFO queue per lock (gate-run 2026-10-30): $GATE_DIR/queue/<lock>/<epoch_ns>-<pid>, oldest first = next to run.
+# Tickets of dead pids are shown as dead and removed by the next waiter (or by --reap).
+echo "== gate queues ($GATE_DIR/queue)"
+qshown=0
+for qd in "$GATE_DIR"/queue/*/; do
+  [ -d "$qd" ] || continue
+  ql=$(basename "$qd"); pos=0; qout=""
+  for t in $(ls "$qd" 2>/dev/null | sort); do
+    qp=${t#*-}; qe=$(( ${t%%-*} / 1000000000 )); pos=$((pos+1))
+    if alive "$qp"; then qs=waiting; else qs="dead"; [ $REAP = 1 ] && rm -f "$qd$t"; fi
+    qout="$qout$(printf '  #%d pid=%s waited %s %s  %s' "$pos" "$qp" "$(ago $((nowe-qe)))" "$qs" "$(cat /proc/$qp/cmdline 2>/dev/null | tr "\0" " " | sed 's/^gate-run //; s/^bash [^ ]*gate-run //' | cut -c1-120)")
+"
+  done
+  [ -n "$qout" ] || continue
+  echo "$ql"; printf '%s' "$qout"; qshown=$((qshown+1))
+done
+[ $qshown -gt 0 ] || echo "none"
+
+# Tickets from gate-submit (D4): waiting = queued, gate-run has not started the command; running = it has; done rc=N.
+# Done tickets show for $GATE_TICKET_SHOW_DONE_S s (default 7200); --reap deletes tickets older than 7 days.
+echo "== gate tickets ($GATE_DIR/tickets)"
+shown=0
+for f in "$GATE_DIR"/tickets/*.started; do
+  [ -e "$f" ] || continue
+  id=$(basename "$f" .started); tb=$GATE_DIR/tickets/$id
+  if [ -e "$tb.rc" ]; then
+    [ $((nowe - $(stat -c %Y "$tb.rc"))) -gt "${GATE_TICKET_SHOW_DONE_S:-7200}" ] && continue
+    state="done rc=$(head -1 "$tb.rc")"
+  else
+    pid=$(head -1 "$tb.pid" 2>/dev/null)
+    if [ -n "$pid" ] && ! alive "$pid"; then state="LOST(runner $pid dead)"
+    elif grep -q 'gate-run\[[^]]*\]: running' "$tb.out" 2>/dev/null; then state=running
+    else state=waiting; fi
+  fi
+  printf '%-44s %-22s since %s cwd=%s\n    cmd: %s\n' "$id" "$state" "$(cut -d' ' -f1 "$f")" "$(head -1 "$tb.cwd" 2>/dev/null)" "$(head -1 "$tb.cmd" 2>/dev/null | cut -c1-200)"
+  shown=$((shown+1))
+done
+[ $shown -gt 0 ] || echo "none"
+
+if [ $REAP = 1 ]; then
+  for f in "$GATE_DIR"/*.lock; do
+    st=$f.status; [ -f "$st" ] || continue; held "$f" || { rm -f "$st"; continue; }
+    pid=$(field "$st" pid); se=$(field "$st" start_epoch); lim=$(field "$st" timeout_s); pg=$(field "$st" pgid); why=""
+    if ! alive "$pid"; then why="holder pid $pid gone"
+    elif [ -n "$se" ] && [ -n "$lim" ] && [ $((nowe - se)) -gt $((lim + 320)) ]; then why="over limit"
+      [ -n "$pg" ] && kill -TERM -- "-$pg" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; sleep 2; [ -n "$pg" ] && kill -KILL -- "-$pg" 2>/dev/null
+    fi
+    [ -n "$why" ] || continue
+    dst="$f.stale-$(date -u +%Y%m%d%H%M%S)"; mv -f "$f" "$dst"; mv -f "$st" "$dst.status" 2>/dev/null
+    rlog "STALE-RELEASE $(basename "$f") ($why) -> $(basename "$dst")"
+  done
+  find "$GATE_DIR" -maxdepth 1 -name '*.stale-*' -mtime +7 -delete 2>/dev/null
+  find "$GATE_DIR/tickets" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null
+fi
+
+echo "== legacy lock $LEGACY"
+if [ ! -e "$LEGACY" ]; then echo "absent"; exit 0; fi
+ino=$(stat -c %i "$LEGACY"); dev=$(stat -c %d "$LEGACY")
+maj=$(printf '%02x' $((dev >> 8))); min=$(printf '%02x' $((dev & 255)))
+lines=$(grep -E " FLOCK .* [0-9]+ ${maj}:${min}:${ino} " /proc/locks)
+if [ -z "$lines" ]; then echo "free"; exit 0; fi
+holder=$(echo "$lines" | grep -v -- '->' | awk '{print $5}' | head -1)
+waiters=$(echo "$lines" | grep -c -- '->')
+echo "locked by pid $holder; $waiters waiting"
+oldest=0
+for w in $(echo "$lines" | grep -- '->' | awk '{print $6}'); do echo "  waiter $w: $(ps -o etime=,args= -p "$w" 2>/dev/null | cut -c1-160)"
+  e=$(ps -o etimes= -p "$w" 2>/dev/null | tr -d ' '); [ -n "$e" ] && [ "$e" -gt "$oldest" ] && oldest=$e; done
+if alive "$holder"; then echo "  holder: $(ps -o etime=,args= -p "$holder" | cut -c1-200)"; exit 0; fi
+echo "  holder pid $holder is GONE: the lock fd was inherited by another process"
+# Find the inheritor without walking every /proc/*/fd: orphans plus likely server/test processes.
+cands=$( { ps -eo pid=,ppid= | awk '$2==1{print $1}'; pgrep -f 'node|next|chrome|chromium|php|vite|vitest|playwright|esbuild|docker|bash|sh' ; } | sort -un)
+for p in $cands; do
+  find "/proc/$p/fd" -maxdepth 1 -lname "$LEGACY" 2>/dev/null | grep -q . || continue
+  # a waiter also has the file open; it is not the holder
+  echo "$lines" | grep -- '->' | awk '{print $6}' | grep -qx "$p" && continue
+  ppid=$(ps -o ppid= -p "$p" | tr -d ' '); cg=$(cut -d: -f3 "/proc/$p/cgroup" 2>/dev/null)
+  env=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null)
+  cpid=$(echo "$env" | sed -n 's/^CLAUDE_PID=//p'); pm=$(echo "$env" | grep -c '^pm_id=')
+  desc="pid=$p ppid=$ppid age=$(ps -o etime= -p "$p" | tr -d ' ') cwd=$(readlink "/proc/$p/cwd") cgroup=$cg claude_pid=${cpid:-none} cmd=$(ps -o args= -p "$p" | cut -c1-120)"
+  echo "  INHERITOR $desc"
+  [ $REAP = 1 ] || continue
+  managed=0; [ "$pm" -gt 0 ] && managed=1
+  case $cg in */pm2*|*docker*) managed=1;; /system.slice/herdr.service|/user.slice/*|/system.slice/ssh.service|/system.slice/cron.service) ;; /system.slice/*.service) managed=1;; esac
+  srv=0; args=$(ps -o args= -p "$p"); comm=$(cat "/proc/$p/comm" 2>/dev/null)
+  [ "$comm" != claude ] && [ "$p" != "$cpid" ] && echo "$args" | grep -Eq -- "$SERVER_RE" && srv=1
+  idle=-1; [ -n "$cpid" ] && idle=$(claude_idle "$cpid")
+  if grep -qsx "$p" "$GATE_DIR/reap-keep"; then rlog "NEEDS-APPROVAL legacy inheritor is on the keep list ($GATE_DIR/reap-keep): $desc"
+  elif [ $managed = 1 ]; then rlog "NEEDS-APPROVAL legacy inheritor is service-managed: $desc"
+  elif [ $srv = 1 ] && [ -n "$cpid" ] && [ "$idle" -gt "$IDLE_S" ] && [ "$oldest" -gt "$WAIT_S" ]; then
+    why="server inheritor, holder $holder dead, Claude $cpid idle $(ago "$idle"), oldest waiter $(ago "$oldest")"
+    if [ $KILL = 1 ]; then kill -TERM "$p"; sleep 5; alive "$p" && kill -KILL "$p"; rlog "KILLED idle-session legacy inheritor ($why): $desc"
+    else rlog "WOULD-KILL (run with --kill-orphans) idle-session legacy inheritor ($why): $desc"; fi
+  elif alive "$cpid"; then rlog "NEEDS-APPROVAL legacy inheritor belongs to live Claude pid $cpid: $desc"
+  elif [ "$ppid" != 1 ]; then rlog "NEEDS-APPROVAL legacy inheritor still has a parent: $desc"
+  elif [ $KILL = 1 ]; then kill -TERM "$p"; sleep 3; alive "$p" && kill -KILL "$p"; rlog "KILLED orphan legacy inheritor: $desc"
+  else rlog "WOULD-KILL (run with --kill-orphans) orphan legacy inheritor: $desc"; fi
+done
