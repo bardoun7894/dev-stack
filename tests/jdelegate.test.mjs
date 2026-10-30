@@ -354,7 +354,7 @@ const mixedEnv = { JEV_ROUTER_CONFIG: mixedTiers, JDELEGATE_AGENT_DIRS: `${agent
 for (const [harness, cmd] of [['codex', /codex exec/], ['opencode', /opencode run/]]) {
   test(`--harness ${harness}: brief file = worker prompt (contract, role, skill) + --- TASK --- + brief`, () => {
     jevStub();
-    const r = dry(['--harness', harness, '--role', 'reviewer', '--skill', 'fake-skill'], { env: mixedEnv });
+    const r = dry(['--harness', harness, '--role', 'reviewer', '--skill', 'fake-skill'], { env: { ...mixedEnv, JDELEGATE_REVIEW_CONTEXT: '1' } });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.script, cmd);
     if (harness === 'opencode') {
@@ -997,7 +997,8 @@ const AGY_QUOTA_ERR = 'AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429):
 const agyRoute = (exFile, args = [], env = {}) => spawnSync(process.execPath, [JD, '--print', ...args, 'restyle the settings page layout'], {
   encoding: 'utf8',
   env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: join(tmp, 'cache'),
-    JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AGY_EXHAUSTED_FILE: exFile, UI_ANSWER: '0.9', JEV_LOG: jevLog, ...env },
+    JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AGY_EXHAUSTED_FILE: exFile, UI_ANSWER: '0.9', JEV_LOG: jevLog,
+    JEV_EXHAUSTED_FILE: join(tmp, 'no-exhausted.json') /* not the host's ~/.config/jev-router/exhausted.json, which marks agy exhausted on the server */, ...env },
 }).stdout;
 const exFile = (name, until) => { const f = join(tmp, `agy-ex-${name}.json`); if (until !== undefined) write(f, JSON.stringify({ until, seen: new Date().toISOString() })); return f; };
 
@@ -1232,6 +1233,52 @@ test('G13: a real reviewer launch increments the per-branch counter; a dry run d
   const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--harness', 'claude', '--cwd', repo, '--name', 'rv-real', '--role', 'reviewer', '--no-auto-role', 'review it'], { encoding: 'utf8', timeout: 30_000, env });
   const counts = JSON.parse(readFileSync(join(c, 'review-count.json'), 'utf8'));
   assert.equal(counts[`${realRepo}\t${g13Branch}`], 1, r.stdout + r.stderr);
+});
+
+// ── G16: a reviewer sees only spec + diff ──
+const g16Env = (extra = {}) => ({ JDELEGATE_CACHE: join(tmp, 'cache-g16'), JDELEGATE_MAX_LIVE: '99', JDELEGATE_REVIEW_FORCE: '1', ...extra });
+const g16Good = 'review specs/012-x/spec.md against git diff main...feat';
+const g16 = (args, brief = g16Good, extra = {}) => dry(['--name', 'rv16', '--role', 'reviewer', ...args], { env: g16Env(extra), brief });
+test('G16: reviewer + --skill/--mcp/--full exits 2; JDELEGATE_REVIEW_CONTEXT=1 allows with a warning', () => {
+  for (const flag of [['--skill', 'fake-skill'], ['--mcp', 'foo'], ['--full']]) {
+    const r = g16(flag);
+    assert.equal(r.status, 2, flag.join(' ') + r.stderr);
+    assert.match(r.stderr, /reviewer sees only spec \+ diff/);
+    const ok = g16(flag, g16Good, { JDELEGATE_REVIEW_CONTEXT: '1' });
+    assert.match(ok.stderr, /warning: .*JDELEGATE_REVIEW_CONTEXT=1/, flag.join(' ') + ok.stderr);
+    assert.doesNotMatch(ok.stderr, /reviewer sees only spec/);
+  }
+});
+test('G16: a reviewer brief that references a transcript, the jdelegate cache or --resume exits 2', () => {
+  for (const b of ['see ~/.cache/jdelegate/2026-10-30T10-00-00-x/run.jsonl', 'read abc.jsonl', `look in ${join(tmp, 'cache-g16')}/2026-x/out`, 'redo with --resume impl']) {
+    const r = g16([], `${g16Good} ${b}`);
+    assert.equal(r.status, 2, b + r.stderr);
+    assert.match(r.stderr, /session or transcript/);
+  }
+  assert.notEqual(g16([], `${g16Good} see abc.jsonl`, { JDELEGATE_REVIEW_CONTEXT: '1' }).status, 2);
+  write(join(tmp, 'cache-g16', '.names', 'impl16.json'), JSON.stringify({ name: 'impl16', cwd: repo, repo: realRepo, harness: 'claude', sessionId: '11111111-2222-4333-8444-555555555555', ref: 'cliproxy/claude-test', run: join(tmp, 'run-impl16'), pid: 0, specs: [], at: new Date().toISOString() }));
+  const resumed = g16(['--resume', 'impl16'], g16Good, { JDELEGATE_REVIEW_CONTEXT: '1' });
+  assert.equal(resumed.status, 2, resumed.stderr);
+  assert.match(resumed.stderr, /--resume hands a reviewer another worker's session/);
+});
+test('G16: spec and diff in the brief give no warning; a missing one warns', () => {
+  const noWarn = /reviewer brief names no/;
+  assert.doesNotMatch(g16([]).stderr, noWarn);
+  assert.doesNotMatch(g16([], 'review specs/012-x/ in PR #5').stderr, noWarn);
+  const noSpec = g16([], 'review git diff main...feat');
+  assert.equal(noSpec.status, 0, noSpec.stderr);
+  assert.match(noSpec.stderr, /warning: reviewer brief names no specs\/NNN-x\/spec.md path$/m);
+  assert.doesNotMatch(noSpec.stderr, /diff source/);
+  const noDiff = g16([], 'review specs/012-x/spec.md please');
+  assert.equal(noDiff.status, 0, noDiff.stderr);
+  assert.match(noDiff.stderr, /names no diff source/);
+  assert.doesNotMatch(noDiff.stderr, /NNN-x/);
+});
+test('G16: reviewer dry-run has no auto skill or MCP even when the brief triggers them', () => {
+  const r = g16([], `${g16Good} write a changelog and use the fake-skill skill`, { JDELEGATE_AUTO_SKILL: '1', JDELEGATE_AUTO_ROLE: '1', JDELEGATE_AUTO_MCP: '1' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.prompt, /## Skill:/);
+  assert.deepEqual(JSON.parse(readFileSync(join(r.run, 'mcp.json'), 'utf8')).mcpServers ?? {}, {});
 });
 
 // ── G23: max 3 live workers ──

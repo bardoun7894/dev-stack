@@ -7,6 +7,7 @@
 | 1. Brainstorm options      | `brainstorming` (obra)                                                                 | inline         |
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
 | 2a. Research (mandatory)   | `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher` (one pass, read-only) → `specs/NNN/research.md` | Sonnet (read-only + web) |
+| 2b. Market & UX research   | `market-swot project` — required for new products and UI-heavy features (new screens, redesign, landing pages), optional otherwise; feeds Phase 3 | inline + researcher |
 | 2c. System design          | `system-design` → `specs/NNN/system-design.md`, check.sh gate; HARD STOP for owner approval of D/Q codes. New apps/projects only; skip for features in existing apps | inline         |
 | 3. Architectural plan      | `/kb-spec plan` → `/speckit.plan` → `writing-plans` (obra)                             | inline         |
 | 4. Task breakdown          | `/kb-spec tasks` → `/speckit.tasks`                                                    | inline         |
