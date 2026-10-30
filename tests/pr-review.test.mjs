@@ -82,6 +82,7 @@ else if (args[0] === "repo" && args[1] === "clone") { mkdirSync(args[3] + "/.git
 else if (args[0] === "search") out(JSON.stringify(sc.search ?? []));
 else if (args[0] === "pr" && args[1] === "view") out(JSON.stringify(args.join(" ").includes("mergeStateStatus") ? (sc.prMerge ?? sc.pr) : sc.pr));
 else if (args[0] === "api") {
+  if (args[1] === "repos/o/r") { out(sc.allowAutoMerge ? "true\\n" : "false\\n"); process.exit(0); }
   const m = args[1].match(/contents\\/\\.github\\/workflows(?:\\/([^?]+))?/);
   if (/pulls\\/\\d+\\/files/.test(args[1])) {
     if (sc.filesApiFail) { process.stderr.write("gh: API error (HTTP 502)"); process.exit(1); }
@@ -98,7 +99,11 @@ else if (args[0] === "api") {
     out(JSON.stringify(sc.e2eCheck?.status ?? { state: "pending", statuses: [] }));
   }
 }
-else if (args[0] === "pr" && (args[1] === "merge" || args[1] === "comment")) out("");
+else if (args[0] === "pr" && args[1] === "merge") {
+  if (args.includes("--auto") && sc.autoFail) { process.stderr.write(sc.autoFail); process.exit(1); }
+  out("");
+}
+else if (args[0] === "pr" && args[1] === "comment") out("");
 else if (args[0] === "pr" && args[1] === "diff") {
   if (sc.diffTooLarge) { process.stderr.write("gh: the diff exceeded the maximum number of files (300) (HTTP 406); PullRequest.diff too_large"); process.exit(1); }
   out(sc.diff ?? "diff --git a/x.js b/x.js\\n+1\\n");
@@ -384,6 +389,35 @@ test("Jev pass 0.95 -> squash merge with head commit, merged comment", () => {
   const c = skipComments(r).find((x) => x.bodyFile.includes("haiku-merged"));
   assert.match(c.bodyFile, /Auto-merged after Haiku \+ cliproxy\/claude-opus-5-5:xhigh \+ Jev \(0\.95\) passed\. Revert: `gh pr revert 1 -R o\/r`/);
   assert.ok(c.bodyFile.includes(`<!-- haiku-merged sha=${SHA} -->`));
+});
+
+test("repo allows auto-merge -> gh pr merge --auto, auto-merge-queued, merge-queued track, no merged comment", () => {
+  const t = fakeTrack();
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS, allowAutoMerge: true }, t.env);
+  assert.equal(r.status, 0);
+  assert.equal(merges(r).length, 1);
+  assert.deepEqual(merges(r)[0].args.slice(-4), ["--auto", "--squash", "--match-head-commit", SHA]);
+  assert.equal(r.decisions[0].action, "auto-merge-queued");
+  assert.ok(!skipComments(r).some((x) => x.bodyFile.includes("haiku-merged")));
+  const c = t.calls();
+  assert.ok(c.some((x) => flag(x, "--key") === "merge:o/r#1:merge-queued"), JSON.stringify(c));
+  assert.ok(!c.some((x) => flag(x, "--key") === "merge:o/r#1:merged"));
+});
+
+test("auto-merge refused ('clean status') -> falls back to one plain merge", () => {
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS, allowAutoMerge: true, autoFail: "GraphQL: Pull request is in clean status (enablePullRequestAutoMerge)" });
+  assert.equal(merges(r).length, 2);
+  assert.ok(merges(r)[0].args.includes("--auto"));
+  assert.deepEqual(merges(r)[1].args.slice(-3), ["--squash", "--match-head-commit", SHA]);
+  assert.ok(!merges(r)[1].args.includes("--auto"));
+  assert.equal(r.decisions[0].action, "merged");
+});
+
+test("repo without allow_auto_merge -> plain merge, no --auto", () => {
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS, allowAutoMerge: false });
+  assert.equal(merges(r).length, 1);
+  assert.ok(!merges(r)[0].args.includes("--auto"));
+  assert.equal(r.decisions[0].action, "merged");
 });
 
 test("Jev pass 0.8, block, error, exit 2 -> no merge", () => {

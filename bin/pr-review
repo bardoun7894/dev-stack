@@ -471,6 +471,17 @@ ${state}
   return { choice: j.choice, conf: j.confidence, engine: "haiku" };
 }
 
+// repos/<repo>.allow_auto_merge, cached per repo for the life of the process (one sweep). An API error counts as false.
+const autoMergeCache = new Map();
+function allowsAutoMerge(repo) {
+  if (!autoMergeCache.has(repo)) {
+    let v = false;
+    try { v = gh(["api", `repos/${repo}`, "-q", ".allow_auto_merge"]).trim() === "true"; } catch { /* plain merge */ }
+    autoMergeCache.set(repo, v);
+  }
+  return autoMergeCache.get(repo);
+}
+
 // Decides and (unless dry) performs the merge. Returns { action, reason, jev, conf, lines }.
 // Order: kill switches, both verdicts, size/risk, PR-state guards, Jev, merge. Anything unclear is a skip.
 function mergeGate(repo, n, r, dry) {
@@ -521,6 +532,17 @@ function mergeGate(repo, n, r, dry) {
   if (d.jev !== "pass") return skip("jev-block");
   if (!(d.conf >= (d.judge === "haiku" ? HAIKU_MIN_CONF : MIN_CONF))) return skip("jev-low-confidence");
   if (dry) return { ...d, action: "would-merge", reason: "" };
+  // Branch protection refuses a plain merge until checks pass; where the repo allows it, queue an auto-merge instead.
+  let queued = false;
+  if (allowsAutoMerge(repo)) {
+    try {
+      gh(["pr", "merge", String(n), "-R", repo, "--auto", "--squash", "--match-head-commit", r.sha]);
+      queued = true;
+    } catch (e) {
+      if (!/auto.?merge is not allowed|clean status/i.test(String(e.stderr ?? "") + e.message)) throw e;
+    }
+  }
+  if (queued) return { ...d, action: "auto-merge-queued", reason: "" };
   gh(["pr", "merge", String(n), "-R", repo, "--squash", "--match-head-commit", r.sha]);
   try {
     postComment(repo, n, `Auto-merged after Haiku + ${r.bModel} + ${d.judge === "haiku" ? "Haiku judge" : "Jev"} (${d.conf}) passed. Revert: \`gh pr revert ${n} -R ${repo}\`\n\n<!-- haiku-merged sha=${r.sha} -->`);
@@ -931,9 +953,10 @@ function runOne(repo, n, dry, merge) {
       if (!firstPrinted && !quiet) console.log(firstLine);
       firstPrinted = true;
       if (!quiet) logDecision(rec);
-      if (!dry && (m.action === "merged" || m.action === "merge-skipped" || m.action === "would-merge")) {
+      if (!dry && (m.action === "merged" || m.action === "auto-merge-queued" || m.action === "merge-skipped" || m.action === "would-merge")) {
         worldTrack("review", repo, n, r.verdict === "PASS" && r.bVerdict === "PASS" ? "approve" : "request-changes");
         if (m.action === "merged") worldTrack("merge", repo, n, "merged");
+        if (m.action === "auto-merge-queued") worldTrack("merge", repo, n, "merge-queued");
       }
       if (!quiet) console.log(`${repo}#${n} ${r.sha7} ${m.action === "merge-skipped" ? `merge-skipped:${m.reason}` : m.action} ${secs()}`);
       if (fix && fix.status !== "skipped") console.log(`${repo}#${n} ${r.sha7} fix-${fix.status}${fix.reason ? `:${fix.reason}` : ""} ${secs()}`);
