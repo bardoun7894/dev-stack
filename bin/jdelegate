@@ -642,12 +642,12 @@ function workerScript(p, run, briefFile) {
     case "agy":
       return `node ${q(AGY_RELAY)} --brief ${q(briefFile)} --cd ${q(opt.cwd)} --model ${q(id)} --dangerously-skip-permissions --out-dir ${q(join(run, "agy"))} 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "opencode": {
-      // JSON events to a file for the answer; a readable stream in the tab.
+      // JSON events to a file for the answer; a readable stream in the tab. opencode run has no --dir; run.sh cds into opt.cwd first.
       const show =
         'if .type == "text" then "🤖 " + (.part.text // "") ' +
         'elif .type == "tool_use" then "🔧 " + (.part.tool // "tool") + " " + ((.part.state.input // {}) | tostring | .[0:140]) ' +
         'elif .type == "error" then "✗ " + (.error | tostring | .[0:200]) else empty end';
-      return `opencode run -m ${q(p.ref)} --dir ${q(opt.cwd)} --auto --format json "$(cat ${q(briefFile)})" </dev/null 2>${q(join(run, "err.log"))} | tee ${q(join(run, "out.jsonl"))} | jq --unbuffered -rR ${q(`fromjson? | ${show}`)} | tee ${q(join(run, "out.log"))}`;
+      return `opencode run -m ${q(p.ref)} --auto --format json "$(cat ${q(briefFile)})" </dev/null 2>${q(join(run, "err.log"))} | tee ${q(join(run, "out.jsonl"))} | jq --unbuffered -rR ${q(`fromjson? | ${show}`)} | tee ${q(join(run, "out.log"))}`;
     }
     default: {
       // Bare pi, like software-factory's lib/agent.py: with extensions loaded the

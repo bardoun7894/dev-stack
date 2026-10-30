@@ -357,6 +357,10 @@ for (const [harness, cmd] of [['codex', /codex exec/], ['opencode', /opencode ru
     const r = dry(['--harness', harness, '--role', 'reviewer', '--skill', 'fake-skill'], { env: mixedEnv });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.script, cmd);
+    if (harness === 'opencode') {
+      assert.doesNotMatch(r.script, /opencode run[^\n]*--dir/, 'opencode run has no --dir flag');
+      assert.match(r.script, /cd '?[^\n]+ \|\| exit 1[\s\S]*opencode run -m /);
+    }
     assert.equal(r.prompt, undefined, 'no worker-prompt.md on non-claude harnesses');
     const b = briefOf(r);
     assert.match(b, /^You are a worker\./);
