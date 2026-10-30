@@ -1247,7 +1247,7 @@ test('G16: a reviewer brief that references a transcript, the jdelegate cache or
     assert.match(r.stderr, /session or transcript/);
   }
   assert.notEqual(g16([], `${g16Good} see abc.jsonl`, { JDELEGATE_REVIEW_CONTEXT: '1' }).status, 2);
-  write(join(tmp, 'cache-g16', '.names', 'impl16.json'), JSON.stringify({ name: 'impl16', cwd: repo, repo: realRepo, harness: 'claude', sessionId: '11111111-2222-4333-8444-555555555555', ref: 'cliproxy/claude-test', run: join(tmp, 'run-impl16'), pid: 0, specs: [], at: new Date().toISOString() }));
+  write(join(tmp, 'cache-g16', '.names', 'impl16.json'), JSON.stringify({ name: 'impl16', cwd: repo, repo: realRepo, harness: 'claude', sessionId: '11111111-2222-4333-8444-555555555555', ref: 'cliproxy/claude-test', run: join(tmp, 'run-impl16'), pid: 0, specs: [], at: new Date(Date.now() - 120_000).toISOString() }));
   const resumed = g16(['--resume', 'impl16'], g16Good, { JDELEGATE_REVIEW_CONTEXT: '1' });
   assert.equal(resumed.status, 2, resumed.stderr);
   assert.match(resumed.stderr, /--resume hands a reviewer another worker's session/);
