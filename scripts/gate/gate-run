@@ -111,7 +111,7 @@ acquire_one() {
     while :; do
       if ! is_head; then
         left=$(( deadline - $(date +%s) )); [ $left -le 0 ] && { exec {fd}>&-; return 1; }
-        sleep 1; continue
+        sleep 5; continue
       fi
       if flock -n "$fd"; then
         if [ "$(stat -L -c %i "/proc/$$/fd/$fd" 2>/dev/null)" = "$(stat -c %i "$f" 2>/dev/null)" ]; then ACQ_FD=$fd; return 0; fi
