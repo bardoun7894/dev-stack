@@ -81,6 +81,23 @@ class Compute(unittest.TestCase):
         r = cb.compute(**inputs(conf={"role": "ci", "max": "2"}))
         self.assertEqual(r["result"], 2)
 
+    def test_measured_max_may_exceed_physical_cores_up_to_logical(self):
+        r = cb.compute(**inputs(conf={"role": "ci", "max": "6"}))   # idle laptop 4C/8T
+        self.assertEqual(r["result"], 6)
+
+    def test_max_never_exceeds_logical_cpus(self):
+        r = cb.compute(**inputs(conf={"role": "ci", "max": "16"}))
+        self.assertEqual(r["result"], 8)
+
+    def test_max_with_load_still_subtracts_busy(self):
+        r = cb.compute(**inputs(load1=4.0, conf={"role": "ci", "max": "6"}))   # busy 2
+        self.assertEqual(r["result"], 4)
+
+    def test_mac_all_cores_is_perf_plus_efficiency(self):
+        self.assertEqual(cb.mac_all_cores(4, 6, 10), 10)
+        self.assertEqual(cb.mac_all_cores(4, None, 10), 10)   # no perflevel1: hw.physicalcpu
+        self.assertEqual(cb.mac_all_cores(None, None, None, 8), 8)
+
     def test_no_conf_means_no_role_cap(self):
         r = cb.compute(**inputs())
         self.assertEqual(r["result"], 4)

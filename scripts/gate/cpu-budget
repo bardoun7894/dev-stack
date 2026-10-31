@@ -62,20 +62,29 @@ def _int(v):
         return None
 
 
+def mac_all_cores(perf0, perf1, physical, fallback=1):
+    """ALL physical cores of an Apple Silicon Mac: performance + efficiency (M5: 4 + 6 = 10)."""
+    if perf0 and perf1:
+        return perf0 + perf1
+    return physical or fallback
+
+
 def compute(cores, logical, load1, mem_mb, per_proc_mb=512, conf=None, env=None, all_cores=None):
     conf = conf or {}
     env = env if env is not None else {}
     all_cores = all_cores or cores
     busy = math.ceil(load1 * cores / logical) if logical else 0
-    free = cores - busy
+    mx = _int(conf.get("max"))
+    # a measured max= may exceed the physical cores (SMT helps), never the logical CPU count
+    ceiling = min(mx, logical) if mx else cores
+    free = ceiling - busy
     ram_cap = max(0, mem_mb // max(1, per_proc_mb))
     role = conf.get("role", "")
-    role_cap = {"ci": cores, "hosting": max(1, cores // 4), "production": 1,
-                "build50": max(1, all_cores // 2)}.get(role, cores)
-    mx = _int(conf.get("max"))
+    role_cap = {"ci": ceiling, "hosting": max(1, cores // 4), "production": 1,
+                "build50": max(1, all_cores // 2)}.get(role, ceiling)
     if mx:
         role_cap = min(role_cap, mx)
-    result = max(1, min(min(free, ram_cap, role_cap), cores))
+    result = max(1, min(min(free, ram_cap, role_cap), ceiling))
     override = None
     for k in ("CPU_BUDGET", "PEST_PROCS"):
         override = _int(env.get(k))
@@ -109,7 +118,9 @@ def gather(per_proc_mb):
     if platform.system() == "Darwin":
         cores = _int(_run("sysctl", "-n", "hw.perflevel0.physicalcpu").strip()) \
             or _int(_run("sysctl", "-n", "hw.physicalcpu").strip()) or logical
-        all_cores = _int(_run("sysctl", "-n", "hw.physicalcpu").strip()) or cores
+        all_cores = mac_all_cores(_int(_run("sysctl", "-n", "hw.perflevel0.physicalcpu").strip()),
+                                  _int(_run("sysctl", "-n", "hw.perflevel1.physicalcpu").strip()),
+                                  _int(_run("sysctl", "-n", "hw.physicalcpu").strip()), cores)
         mem_mb = parse_vm_stat(_run("vm_stat"))
         conf_path = os.path.expanduser("~/.config/cpu-budget.conf")
     else:
