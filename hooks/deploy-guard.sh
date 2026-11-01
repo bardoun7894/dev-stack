@@ -109,6 +109,24 @@ set -- $status
 [ "${2:-}" = approved ] || deny "$base (offer $id is ${2:-unknown})"
 proj=${1:-}
 [ -n "$proj" ] && [ "$proj" != "?" ] || deny "$base (offer $id has no project)"
+# Is the script inside project $proj? Yes when under /root/<proj> or $HOME/<proj> (any letter case, because
+# offer ids are lowercase and repos may not be), or in a real git worktree of that repo. Errors mean no.
+in_project() {
+  local f=$1 r d common ok=1
+  shopt -s nocasematch
+  for r in "/root/$proj" "$HOME/$proj"; do
+    case "$f/" in "$r/"*) ok=0 ;; esac
+  done
+  d=${f%/*}
+  if [ $ok != 0 ] && [ -d "$d" ]; then
+    common=$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    for r in "/root/$proj" "$HOME/$proj"; do
+      case "$common" in "$r/.git") ok=0 ;; esac
+    done
+  fi
+  shopt -u nocasematch
+  return $ok
+}
 if [ -n "$proj" ] && [ "$proj" != "?" ]; then
   while IFS= read -r target; do
     [ -n "$target" ] || continue
@@ -120,7 +138,7 @@ if [ -n "$proj" ] && [ "$proj" != "?" ]; then
     case $spath in /*) full=$spath ;; *) full=${base_dir:+$base_dir/}$spath ;; esac
     case $full in /*) ;; *) deny "$base (offer $id is for $proj, cannot tell where $spath runs)" ;; esac
     case $full in */../*|*/..) deny "$base (offer $id is for $proj, command deploys $full)" ;; esac
-    case "$full/" in "/root/$proj/"*|"$HOME/$proj/"*) ;; *) deny "$base (offer $id is for $proj, command deploys $full)" ;; esac
+    in_project "$full" || deny "$base (offer $id is for $proj, command deploys $full)"
   done <<<"$spaths"
 fi
 exit 0

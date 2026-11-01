@@ -81,4 +81,20 @@ check ssh-bash-s-stdin allow Darwin 'ssh MyContabo bash -s < /tmp/deploy-notes.s
 check loop-deploy-ssh deny Darwin 'for d in a b; do ssh MyContabo "bash /root/$d/ops/dev-deploy.sh"; done' A=1
 check loop-deploy-plain deny Linux 'for d in a b; do bash /root/$d/ops/dev-deploy.sh; done' A=1
 check glob-deploy deny Linux 'bash ops/dep*.sh' A=1
+# the project's own repo under a differently cased folder, and its real git worktrees
+R=$(cd "$T" && pwd -P)/paths
+HM="$R/home"; mkdir -p "$HM/PROJ/ops" "$HM/projfoo/ops" "$HM/other/ops" "$R/proj-x/ops"
+git -C "$HM/PROJ" init -q; git -C "$HM/PROJ" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+git -C "$HM/other" init -q; git -C "$HM/other" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+git -C "$HM/PROJ" worktree add -q "$R/wt-real"; mkdir -p "$R/wt-real/ops"
+git -C "$HM/other" worktree add -q "$R/proj-other-wt"; mkdir -p "$R/proj-other-wt/ops"
+S=ops/dep""loy.sh
+check case-main-repo allow Linux "TOKYO_OFFER=ok1 bash $HM/PROJ/$S" HOME="$HM"
+check case-main-repo-cd allow Linux "cd $HM/PROJ && TOKYO_OFFER=ok1 bash $S" HOME="$HM"
+check real-worktree allow Linux "TOKYO_OFFER=ok1 bash $R/wt-real/$S" HOME="$HM"
+check same-prefix-sibling deny Linux "TOKYO_OFFER=ok1 bash $HM/projfoo/$S" HOME="$HM"
+check other-project-repo deny Linux "TOKYO_OFFER=ok1 bash $HM/other/$S" HOME="$HM"
+check other-project-worktree deny Linux "TOKYO_OFFER=ok1 bash $R/proj-other-wt/$S" HOME="$HM"
+check named-like-project-not-worktree deny Linux "TOKYO_OFFER=ok1 bash $R/proj-x/$S" HOME="$HM"
+check missing-directory deny Linux "TOKYO_OFFER=ok1 bash $R/nope/$S" HOME="$HM"
 exit $fails
