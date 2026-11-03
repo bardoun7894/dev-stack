@@ -47,6 +47,7 @@ def build_block():
                   "", text, flags=re.S)
     text = text.replace("Apply to every Claude Code session, every project, every prompt.",
                         "Apply to every agent session, every harness, every project, every prompt.")
+    text = text.replace("@USER.md is", "Read ~/.claude/USER.md: it is")
     text = re.sub(r"^# Global standing rules\n", "", text).strip("\n")
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(SRC)))
     return (f"{BEGIN} (generated from ~/.claude/CLAUDE.md by dev-stack/scripts/sync-rules-harnesses.py, "
