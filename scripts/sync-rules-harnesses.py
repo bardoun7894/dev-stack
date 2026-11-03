@@ -24,7 +24,11 @@ TARGETS = [
     (f"{HOME}/.pi/agent/AGENTS.md", False),
     (f"{HOME}/.hermes/HERMES.md", False),
     (f"{HOME}/.continue/rules/claude-shared-rules.md", True),
+    (f"{HOME}/.grok/AGENTS.md", True),
 ]
+CAPS = {
+    f"{HOME}/.grok/AGENTS.md": 9800,
+}
 
 ADAPTER = """You are not Claude Code, but these are the owner's rules for every agent. Translate as you go:
 - A slash command or skill name (`/kb-query`, `kb-dev`, `where-to-work`, ...) means: read
@@ -55,6 +59,18 @@ def build_block():
             f"{text}\n{END}")
 
 
+def shrink_longest_section(block):
+    body, tail = block.rsplit(f"\n{END}", 1)
+    parts = re.split(r"(?m)^(?=## )", body)
+    if len(parts) <= 1:
+        return block
+    idx = max(range(1, len(parts)), key=lambda i: len(parts[i]))
+    heading = parts[idx].splitlines()[0]
+    name = heading[3:].strip()
+    parts[idx] = f"{heading}\n\nfull text: ~/.claude/CLAUDE.md, section {name}\n\n"
+    return "".join(parts).rstrip("\n") + f"\n{END}" + tail
+
+
 def propose(path, block, create):
     if not os.path.exists(path):
         return (block + "\n") if create and os.path.isdir(os.path.dirname(path)) else None
@@ -76,10 +92,14 @@ def main():
     open(f"{OUT}/block.md", "w").write(block + "\n")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for path, create in TARGETS:
-        new = propose(path, block, create)
+        cap = CAPS.get(path)
+        tblock = shrink_longest_section(block) if cap else block
+        new = propose(path, tblock, create)
         if new is None:
             print(f"skip   {path}")
             continue
+        if cap and max(len(new), len(new.encode("utf-8"))) > cap:
+            print(f"WARN   {path} exceeds cap ({len(new.encode('utf-8'))} > {cap})")
         old = open(path).read() if os.path.exists(path) else ""
         if new == old:
             print(f"ok     {path}")
