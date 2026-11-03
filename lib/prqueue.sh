@@ -87,7 +87,7 @@ prqueue_list_waiting() {
   local repo
   repo=$(prqueue_repo_for "${1:-}") || { echo "[]"; return 0; }
   local raw
-  raw=$(gh pr list -R "$repo" --state open --limit 100 --json number,state,isDraft,autoMergeRequest,headRefName 2>/dev/null) || { echo "[]"; return 0; }
+  raw=$(gh pr list -R "$repo" --state open --limit 100 --json number,state,isDraft,autoMergeRequest,headRefName 2>/dev/null) || return 1
   python3 -c '
 import json, sys
 try:
@@ -102,7 +102,7 @@ print(json.dumps(waiting))
 # Count open PRs waiting on auto-merge for project/repo (R1).
 prqueue_waiting_count() {
   local waiting
-  waiting=$(prqueue_list_waiting "${1:-}")
+  waiting=$(prqueue_list_waiting "${1:-}") || { echo "unknown"; return 0; }
   python3 -c '
 import json, sys
 try:

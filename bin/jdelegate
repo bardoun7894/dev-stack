@@ -393,11 +393,17 @@ if (!opt.resume && !opt.print) {
     const prq = join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh");
     if (existsSync(prq)) {
       const proj = basename(repoOf(opt.cwd)).toLowerCase();
-      const chk = spawnSync("bash", ["-c", `. "${prq}" && prqueue_is_automerge "${proj}" && echo "\${FACTORY_WIP_LIMIT:-3} $(prqueue_waiting_count "${proj}")"`, "--"], { encoding: "utf8", timeout: 8000 }).stdout?.trim() || "";
-      const [lim, cnt] = chk.split(/\s+/).map(Number);
-      if (Number.isFinite(lim) && Number.isFinite(cnt) && cnt >= lim) {
-        console.error(`jdelegate: ${proj} has ${cnt} open PRs waiting on auto-merge (limit ${lim}); wait for merges or set FACTORY_WIP_FORCE=1`);
-        process.exit(2);
+      const chk = spawnSync("bash", ["-c", `. "$1" && if prqueue_is_automerge "$2"; then echo "\${FACTORY_WIP_LIMIT:-3} $(prqueue_waiting_count "$2")"; else echo off; fi`, "--", prq, proj], { encoding: "utf8", timeout: 8000 }).stdout?.trim() || "";
+      if (chk !== "off") {
+        const [lim, cnt] = chk.split(/\s+/).map(Number);
+        if (!Number.isFinite(lim) || !Number.isFinite(cnt)) {
+          console.error(`jdelegate: cannot count open auto-merge PRs for ${proj} (gh failed or timed out); refusing. Retry, or set FACTORY_WIP_FORCE=1`);
+          process.exit(2);
+        }
+        if (cnt >= lim) {
+          console.error(`jdelegate: ${proj} has ${cnt} open PRs waiting on auto-merge (limit ${lim}); wait for merges or set FACTORY_WIP_FORCE=1`);
+          process.exit(2);
+        }
       }
     }
   }
