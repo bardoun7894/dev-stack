@@ -383,6 +383,19 @@ function postComment(repo, n, text) {
   }
 }
 
+// Markers are only trusted from the accounts pr-review posts as: OWNER and the login `gh api user` returns
+// (looked up once per process = once per sweep). Anyone else can write a marker string into a comment.
+let selfLogins = null;
+function trustedLogins() {
+  if (!selfLogins) {
+    selfLogins = new Set([OWNER]);
+    try { const l = gh(["api", "user", "--jq", ".login"]).trim(); if (/^[\w.-]+$/.test(l)) selfLogins.add(l); } catch { /* OWNER only */ }
+  }
+  return selfLogins;
+}
+const isTrusted = (c) => trustedLogins().has(c?.author?.login ?? c?.user?.login);
+const trustedOnly = (list) => (list ?? []).filter(isTrusted);
+
 // The PR-state guards. Returns null when the PR may merge, else "merge-skipped:<reason>".
 function guardCheck(repo, n, sha, dry) {
   const v = JSON.parse(gh(["pr", "view", String(n), "-R", repo, "--json", "isDraft,mergeable,mergeStateStatus,labels,baseRefName,statusCheckRollup,headRefOid,comments"]));
@@ -397,7 +410,7 @@ function guardCheck(repo, n, sha, dry) {
   const file = deployWorkflow(repo, v.baseRefName);
   if (file) {
     const marker = `<!-- haiku-merge-skip sha=${sha} -->`;
-    if (!dry && !(v.comments ?? []).some((c) => (c.body ?? "").includes(marker))) {
+    if (!dry && !trustedOnly(v.comments).some((c) => (c.body ?? "").includes(marker))) {
       postComment(repo, n, `Haiku review passed; not merged automatically: merging into ${v.baseRefName} runs a deploy workflow (${file}). Merge by hand after you approve the deploy.\n\n${marker}`);
     }
     return "merge-skipped:deploy-workflow";
@@ -422,7 +435,7 @@ function e2eCheck(repo, n, sha) {
     v = { comments: [] };
   }
   const marker = `<!-- e2e-pass sha=${sha} -->`;
-  if ((v.comments ?? []).some((c) => (c.body ?? "").includes(marker))) {
+  if (trustedOnly(v.comments).some((c) => (c.body ?? "").includes(marker))) {
     return { status: "pass", source: "comment" };
   }
   try {
@@ -721,7 +734,7 @@ Write a concise summary with four sections:
 
 function needsDescribe(pr) {
   if (String(pr.body ?? "").trim().length >= DESCRIBE_MIN_BODY) return false;
-  return ![...(pr.comments ?? []), ...(pr.reviews ?? [])].some((c) => String(c.body ?? "").includes(DESCRIBE_MARK));
+  return !trustedOnly([...(pr.comments ?? []), ...(pr.reviews ?? [])]).some((c) => String(c.body ?? "").includes(DESCRIBE_MARK));
 }
 
 function maybeDescribe(repo, n, pr, files, diff, injection, dry) {
@@ -751,7 +764,7 @@ function askId(c, q) {
 }
 
 function pendingAsks(comments) {
-  const list = comments ?? [];
+  const list = (comments ?? []).filter((c) => isTrusted(c) || c?.author?.login === OWNER);
   const out = [];
   for (let i = 0; i < list.length; i++) {
     const c = list[i];
@@ -771,8 +784,11 @@ function pendingAsks(comments) {
   return out;
 }
 
+const ASK_GUARDED_FILE = join(STATE_DIR, "ask-guarded.json");
 function maybeAnswerAsks(repo, n, pr, getDiff, dry) {
-  const asks = pendingAsks(pr.comments);
+  const key = `${repo}#${n}`;
+  const guarded = (readJson(ASK_GUARDED_FILE) ?? {})[key] ?? [];
+  const asks = pendingAsks(pr.comments).filter((a) => !guarded.includes(a.id));
   if (!asks.length) return;
   let diff = "";
   try { diff = getDiff() ?? ""; } catch (e) { console.error(`pr-review: ${repo}#${n}: ask diff: ${e.message}`); return; }
@@ -783,7 +799,11 @@ function maybeAnswerAsks(repo, n, pr, getDiff, dry) {
     try { inj = injectionGuard(pr.title, `${pr.body ?? ""}\n\nQuestion:\n${question}`, diff); }
     catch (e) { console.error(`pr-review: ${repo}#${n}: ask guard: ${e.message}`); continue; }
     finally { jevCount = savedJev; }
-    if (typeof inj.max !== "number" || inj.max >= (inj.bar ?? INJECTION_BAR)) continue;
+    if (typeof inj.max !== "number" || inj.max >= (inj.bar ?? INJECTION_BAR)) {
+      // Blocked by the guard: remember it so later sweeps do not re-guard the same question.
+      if (!dry) { const st = readJson(ASK_GUARDED_FILE) ?? {}; st[key] = [...new Set([...(st[key] ?? []), id])]; writeJsonFile(ASK_GUARDED_FILE, st); }
+      continue;
+    }
     try {
       const prompt = `${ASK_PROMPT}\n\n<pr>\nPR title: ${pr.title ?? ""}\nPR description: ${pr.body ?? ""}\n\nQuestion:\n${question}\n\nDiff:\n${diff.slice(0, MAX_DIFF)}\n</pr>\n`;
       const ans = parseClaude(askClaude(prompt)).text.trim();
@@ -843,10 +863,6 @@ function extractSuggestions(text, diffMap) {
         if (buf.length === 1 && quoted && origLine !== undefined && origLine.includes(quoted)) replacement = buf[0];
         i = j;
       }
-    } else {
-      const arrow = note.match(/`([^`]+)`\s*(?:->|=>)\s*`([^`]+)`/);
-      const orig = diffMap.get(file)?.get(line);
-      if (arrow && orig !== undefined && orig.includes(arrow[1])) replacement = orig.replace(arrow[1], () => arrow[2]);
     }
     if (replacement === null) continue;
     if (RISKY_RE.test(file) || FIX_DENY_RE.test(file)) continue;
@@ -863,11 +879,19 @@ function maybePostSuggestions(repo, n, sha, pr, aText, bText, diff, injection, d
   if (dry) return;
   if (!injection || injection.kind === "not-needed" || typeof injection.max !== "number" || injection.max >= (injection.bar ?? INJECTION_BAR)) return;
   const mark = SUGGESTION_MARK(sha);
-  // Inline review comments are not in pr.comments/pr.reviews, so ask the pulls comments API.
-  let inline;
-  try { inline = JSON.parse(gh(["api", `repos/${repo}/pulls/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat(); }
-  catch (e) { console.error(`pr-review: ${repo}#${n}: suggestion dedupe: ${e.message}`); return; }
-  if (inline.some((c) => String(c?.body ?? "").includes(mark))) return;
+  if (trustedOnly([...(pr.comments ?? []), ...(pr.reviews ?? [])]).some((c) => String(c.body ?? "").includes(mark))) return;
+  // Inline review comments are not in `gh pr view --json comments,reviews`; read them from the API.
+  try {
+    const out = gh(["api", `repos/${repo}/pulls/${n}/comments`, "--paginate", "--jq", ".[] | {login: .user.login, body: .body}"]);
+    for (const l of out.split("\n")) {
+      if (!l.trim()) continue;
+      let c; try { c = JSON.parse(l); } catch { continue; }
+      if (trustedLogins().has(c.login) && String(c.body ?? "").includes(mark)) return;
+    }
+  } catch (e) {
+    console.error(`pr-review: ${repo}#${n}: suggestion dedupe lookup: ${e.message}`);
+    return;
+  }
   const diffMap = parseDiffLines(diff);
   const list = extractSuggestions(`${aText ?? ""}\n${bText ?? ""}`, diffMap);
   for (const s of list) {
@@ -889,7 +913,7 @@ function reviewPr(repo, n, dry, merge = true) {
   const info = { sha7: sha.slice(0, 7), sha };
   if (pr.isDraft) return { ...info, action: "skipped-draft" };
   const marker = `<!-- haiku-review sha=${sha} -->`;
-  const allEntries = [...(pr.comments ?? []), ...(pr.reviews ?? [])].filter((x) => x.author?.login === OWNER && (x.body ?? "").includes(marker) && !RETRIGGER_RE.test(x.body ?? ""));
+  const allEntries = trustedOnly([...(pr.comments ?? []), ...(pr.reviews ?? [])]).filter((x) => (x.body ?? "").includes(marker) && !RETRIGGER_RE.test(x.body ?? ""));
   // A real review for this sha wins (preferring one with a resolved second reviewer); old truncated / 300-file notices alone get one fresh review.
   const seenEntry = allEntries.filter((x) => parseSections(x.body ?? "").bModel).pop() ?? allEntries.pop();
   const seen = seenEntry?.body;
@@ -934,6 +958,13 @@ function reviewPr(repo, n, dry, merge = true) {
                 writeFileSync(f, updatedBody);
                 gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${cid}`, "-F", `body=@${f}`]);
               } finally { rmSync(dir, { recursive: true, force: true }); }
+            } else if (seenEntry?.id && !seenEntry?.url?.includes("issuecomment")) {
+              const dir = mkdtempSync(join(tmpdir(), "pr-review-"));
+              try {
+                const f = join(dir, "body.md");
+                writeFileSync(f, updatedBody);
+                gh(["api", "graphql", "-f", "query=mutation($id:ID!,$body:String!){updatePullRequestReview(input:{pullRequestReviewId:$id,body:$body}){pullRequestReview{id}}}", "-f", `id=${seenEntry.id}`, "-F", `body=@${f}`]);
+              } finally { rmSync(dir, { recursive: true, force: true }); }
             } else {
               postComment(repo, n, updatedBody);
             }
@@ -959,6 +990,7 @@ function reviewPr(repo, n, dry, merge = true) {
       if (wantDescribe && got.diff) maybeDescribe(repo, n, pr, files, got.diff, injection, dry);
     }
     maybeAnswerAsks(repo, n, pr, () => (got ?? (got = fetchDiff(repo, n, sha, pr.baseRefName))).diff, dry);
+    if (retriedParts && got?.diff) maybePostSuggestions(repo, n, sha, pr, sec.aText, sec.bText, got.diff, injection, dry);
     return { ...info, action: retriedParts ? "reviewed" : "skipped-seen", comments: pr.comments, files, ...sec, verdict, bVerdict, bUsd, bTokens, injection, parts: retriedParts };
   }
   if (apiFiles.length && apiFiles.every((f) => isDocs(f.path))) return { ...info, action: "skipped-docs" };
@@ -1036,7 +1068,7 @@ function reviewPr(repo, n, dry, merge = true) {
 function fixRound(repo, n, sha, comments) {
   const e = (readJson(FIX_FILE) ?? {})[`${repo}#${n}`];
   const stateShas = e ? (e.shas ?? [e.sha]) : [];
-  const commentShas = (comments ?? []).flatMap((c) => [...String(c.body ?? "").matchAll(/<!-- haiku-autofix sha=([0-9a-f]+)/g)].map((m) => m[1]));
+  const commentShas = trustedOnly(comments).flatMap((c) => [...String(c.body ?? "").matchAll(/<!-- haiku-autofix sha=([0-9a-f]+)/g)].map((m) => m[1]));
   const used = Math.max(e ? (e.rounds ?? 1) : 0, commentShas.length);
   if ([...stateShas, ...commentShas].some((s) => s && sha.startsWith(s))) return { ok: false, reason: "already-tried" };
   if (used >= MAX_FIX_ROUNDS) return { ok: false, reason: "rounds-used" };
@@ -1194,7 +1226,7 @@ const EXHAUSTED_MARK = "<!-- pr-review-exhausted -->";
 function announceExhausted(repo, n, r, reason, flag = "announced") {
   const state = readJson(EXHAUSTED_STATE_FILE) ?? {};
   const key = `${repo}#${n}`;
-  const hasComment = (r.comments ?? []).some((c) => String(c.body ?? "").includes(EXHAUSTED_MARK));
+  const hasComment = trustedOnly(r.comments).some((c) => String(c.body ?? "").includes(EXHAUSTED_MARK));
   const was = state[key]?.[flag];
   if (!was) { state[key] = { ...state[key], [flag]: true }; writeJsonFile(EXHAUSTED_STATE_FILE, state); }
   if (was || (hasComment && flag === "announced")) return false;
