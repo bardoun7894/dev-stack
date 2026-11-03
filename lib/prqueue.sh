@@ -93,7 +93,7 @@ import json, sys
 try:
     prs = json.loads(sys.argv[1])
 except Exception:
-    prs = []
+    sys.exit(1)
 waiting = [p for p in prs if isinstance(p, dict) and not p.get("isDraft") and p.get("autoMergeRequest")]
 print(json.dumps(waiting))
 ' "$raw"
@@ -109,7 +109,7 @@ try:
     prs = json.loads(sys.argv[1])
     print(len(prs) if isinstance(prs, list) else 0)
 except Exception:
-    print(0)
+    print("unknown")
 ' "$waiting"
 }
 
@@ -123,7 +123,7 @@ prqueue_arm_automerge() {
   local pr_num="$ref"
   if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
     local raw
-    raw=$(gh pr list -R "$repo" --head "$ref" --state open --json number,isDraft,autoMergeRequest 2>/dev/null || echo "[]")
+    raw=$(gh pr list -R "$repo" --head "$ref" --state open --json number,isDraft,autoMergeRequest 2>/dev/null) || { echo "prqueue: gh pr list failed for $repo $ref" >&2; return 1; }
     pr_num=$(python3 -c '
 import json, sys
 try:
@@ -136,7 +136,10 @@ except Exception:
     pass
 ' "$raw")
   fi
-  [ -n "$pr_num" ] || return 0
-  gh pr merge "$pr_num" -R "$repo" --auto --squash >/dev/null 2>&1 || return 1
+  [ -n "$pr_num" ] || { echo "prqueue: no open PR found for $repo $ref" >&2; return 1; }
+  # only arm when ci-ok is a required check, else --auto merges immediately
+  gh api "repos/$repo/branches/main/protection/required_status_checks" --jq '.contexts[]?, .checks[]?.context' 2>/dev/null | grep -qx 'ci-ok' \
+    || { echo "prqueue: ci-ok not required on $repo main; not arming" >&2; return 1; }
+  gh pr merge "$pr_num" -R "$repo" --auto --squash >/dev/null || return 1
   return 0
 }

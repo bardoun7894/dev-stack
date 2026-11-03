@@ -391,7 +391,10 @@ if (!opt.resume && !opt.print) {
   // R1 (spec-002-factory-flow): refuse a new build worker when project P has >= N open PRs waiting on auto-merge
   if (!EXEMPT_SPEC && process.env.FACTORY_WIP_FORCE !== "1") {
     const prq = join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh");
-    if (existsSync(prq)) {
+    if (!existsSync(prq)) {
+      console.error(`jdelegate: ${prq} missing; cannot enforce the WIP limit; refusing. Set FACTORY_WIP_FORCE=1 to override`);
+      process.exit(2);
+    } else {
       const proj = basename(repoOf(opt.cwd)).toLowerCase();
       const chk = spawnSync("bash", ["-c", `. "$1" && if prqueue_is_automerge "$2"; then echo "\${FACTORY_WIP_LIMIT:-3} $(prqueue_waiting_count "$2")"; else echo off; fi`, "--", prq, proj], { encoding: "utf8", timeout: 8000 }).stdout?.trim() || "";
       if (chk !== "off") {
@@ -914,7 +917,7 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n# D0: harness logins only; pay-per-token keys never reach the worker (OPENROUTER_API_KEY stays, Jev reads it)\nunset XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY\n${jobId ? `export FACTORY_JOB_ID=${q(jobId)}\n` : ""}` +
     `printf '\\e]2;%s\\a' ${q(label)}\necho ${q(`▶ ${label}  (${attemptTier} ${d.kind}·${d.role})`)}\n` +
     `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\n` +
-    (!EXEMPT_SPEC ? `if [ $RC -eq 0 ] && [ -f ${q(join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh"))} ]; then ( source ${q(join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh"))} && br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) && [ -n "$br" ] && [ "$br" != "main" ] && prqueue_arm_automerge ${q(basename(repoOf(opt.cwd)).toLowerCase())} "$br" ) >/dev/null 2>&1 || true; fi\n` : "") +
+    (!EXEMPT_SPEC ? `if [ $RC -eq 0 ] && [ -f ${q(join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh"))} ]; then ( source ${q(join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh"))} && br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) && [ -n "$br" ] && [ "$br" != "main" ] && prqueue_arm_automerge ${q(basename(repoOf(opt.cwd)).toLowerCase())} "$br" ) >>${q(join(run, "automerge.log"))} 2>&1 || echo "automerge arming failed" >>${q(join(run, "automerge.log"))}; fi\n` : "") +
     `echo $RC > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}\n` +
     `echo; echo "■ done (exit $RC) — result: "${q(run)}\n`, { mode: 0o755 });
   const rec = {
