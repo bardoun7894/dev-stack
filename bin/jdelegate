@@ -388,6 +388,19 @@ if (!opt.resume && !opt.print) {
       process.exit(2);
     }
   }
+  // R1 (spec-002-factory-flow): refuse a new build worker when project P has >= N open PRs waiting on auto-merge
+  if (!EXEMPT_SPEC && process.env.FACTORY_WIP_FORCE !== "1") {
+    const prq = join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh");
+    if (existsSync(prq)) {
+      const proj = basename(repoOf(opt.cwd)).toLowerCase();
+      const chk = spawnSync("bash", ["-c", `. "${prq}" && prqueue_is_automerge "${proj}" && echo "\${FACTORY_WIP_LIMIT:-3} $(prqueue_waiting_count "${proj}")"`, "--"], { encoding: "utf8", timeout: 8000 }).stdout?.trim() || "";
+      const [lim, cnt] = chk.split(/\s+/).map(Number);
+      if (Number.isFinite(lim) && Number.isFinite(cnt) && cnt >= lim) {
+        console.error(`jdelegate: ${proj} has ${cnt} open PRs waiting on auto-merge (limit ${lim}); wait for merges or set FACTORY_WIP_FORCE=1`);
+        process.exit(2);
+      }
+    }
+  }
   const mine = EXEMPT_SPEC ? [] : specsIn(opt.brief);
   if (mine.length) {
     const repo = repoOf(opt.cwd);
@@ -894,7 +907,9 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     `trap 'rc=$?; [ -e ${q(join(run, "exit"))} ] || { echo $rc > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}; }' EXIT\n` +
     `cd ${q(opt.cwd)} || exit 1\nunset CLAUDE_ORCH\n# D0: harness logins only; pay-per-token keys never reach the worker (OPENROUTER_API_KEY stays, Jev reads it)\nunset XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY\n${jobId ? `export FACTORY_JOB_ID=${q(jobId)}\n` : ""}` +
     `printf '\\e]2;%s\\a' ${q(label)}\necho ${q(`▶ ${label}  (${attemptTier} ${d.kind}·${d.role})`)}\n` +
-    `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\necho $RC > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}\n` +
+    `( ${workerScript(attemptP, run, briefFile)} )\nRC=$?\n` +
+    (!EXEMPT_SPEC ? `if [ $RC -eq 0 ] && [ -f ${q(join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh"))} ]; then ( source ${q(join(dirname(realpathSync(process.argv[1])), "..", "lib", "prqueue.sh"))} && br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) && [ -n "$br" ] && [ "$br" != "main" ] && prqueue_arm_automerge ${q(basename(repoOf(opt.cwd)).toLowerCase())} "$br" ) >/dev/null 2>&1 || true; fi\n` : "") +
+    `echo $RC > ${q(join(run, "exit.tmp"))}; mv ${q(join(run, "exit.tmp"))} ${q(join(run, "exit"))}\n` +
     `echo; echo "■ done (exit $RC) — result: "${q(run)}\n`, { mode: 0o755 });
   const rec = {
     name: nameLabel, slug: nameSlug, sessionId: currentSession, cwd: opt.cwd, repo: repoOf(opt.cwd), model: attemptP.ref.split("/").pop(), ref: attemptP.ref,

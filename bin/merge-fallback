@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# bin/merge-fallback — FIFO merge fallback via gate-run <project>-merge for repos without GitHub CI auto-merge (spec-002-factory-flow R2, F16).
+# Usage: merge-fallback <project> [<timeout>] -- <cmd> [args...]
+set -euo pipefail
+
+usage() {
+  echo "usage: merge-fallback <project> [<timeout>] -- <cmd> [args...]" >&2
+  exit 2
+}
+
+[ $# -ge 3 ] || usage
+PROJECT="$1"
+shift
+TIMEOUT="${GATE_MERGE_TIMEOUT:-60m}"
+if [ "$1" != "--" ]; then
+  TIMEOUT="$1"
+  shift
+fi
+[ "${1:-}" = "--" ] || usage
+shift
+[ $# -ge 1 ] || usage
+
+dur2s() {
+  local d="$1" n u
+  n="${d%[smhd]}"
+  u="${d#"$n"}"
+  [[ "$n" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo -1; return; }
+  n="${n%.*}"
+  case "$u" in
+    ""|s) echo "$n" ;;
+    m) echo $((n * 60)) ;;
+    h) echo $((n * 3600)) ;;
+    d) echo $((n * 86400)) ;;
+  esac
+}
+
+MAX_S=$(dur2s "${GATE_MERGE_MAX:-90m}")
+TO_S=$(dur2s "$TIMEOUT")
+if [ "$TO_S" -le 0 ] || [ "$TO_S" -gt "$MAX_S" ]; then
+  echo "merge-fallback: timeout $TIMEOUT exceeds ${GATE_MERGE_MAX:-90m} cap for ${PROJECT}-merge" >&2
+  exit 2
+fi
+
+LOCK_NAME="${PROJECT%-merge}-merge"
+GATE_RUN_BIN=$(command -v gate-run 2>/dev/null || echo "$(cd "$(dirname "$0")/.." && pwd)/scripts/gate/gate-run")
+exec "$GATE_RUN_BIN" "$LOCK_NAME" "$TIMEOUT" -- "$@"
