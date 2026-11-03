@@ -1346,4 +1346,20 @@ test("no duplicate decision log lines when repo#pr@sha+reason is unchanged acros
   assert.equal(c.decisions[1].action, "merged");
 });
 
+test("describe: empty or short (<40 chars) PR body posts one generated summary comment with marker, once per PR", () => {
+  const a = go({ pr: pr({ body: "short" }) });
+  const descA = a.comments.filter((c) => c.bodyFile.includes("<!-- haiku-describe -->"));
+  assert.equal(descA.length, 1, "summary comment posted for short body");
+  assert.match(descA[0].bodyFile, /What changed/i);
+  assert.match(descA[0].bodyFile, /Why/i);
+  assert.match(descA[0].bodyFile, /Risk/i);
+  assert.match(descA[0].bodyFile, /Files/i);
+
+  // Second run with marker comment present -> does not post again.
+  const b = go({ pr: pr({ body: "", comments: [{ body: descA[0].bodyFile }] }) });
+  const descB = b.comments.filter((c) => c.bodyFile.includes("<!-- haiku-describe -->"));
+  assert.equal(descB.length, 0, "describe runs at most once per PR");
+});
+
+
 
