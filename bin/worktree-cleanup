@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""worktree-cleanup: classify every git worktree of one or more repos and (optionally) remove the safe ones.
+
+DRY RUN BY DEFAULT. Nothing is touched unless you pass --apply.
+
+  worktree-cleanup                         scan ~/projects and ~/code (repos that have linked worktrees)
+  worktree-cleanup ~/projects/board ...    only these repos
+  worktree-cleanup --no-size               skip du (fast)
+  worktree-cleanup --tsv out.tsv           also write the full table
+  worktree-cleanup --apply                 `git worktree remove` (never --force) every SAFE worktree,
+                                           then `git worktree prune` for entries whose dir is gone.
+                                           Branches are never deleted.
+  worktree-cleanup --apply --include-squash   also remove SQUASH-MERGED ones (content already in default)
+
+Classes
+  prunable       dir missing; only git metadata left (prune frees ~0 bytes)
+  SAFE           clean (no tracked changes, no untracked files), branch tip is an ancestor of the
+                 default branch (local or origin), not locked, no branch-lock, no process inside,
+                 no git activity in the last --recent-hours (default 6)
+  squash-merged  clean, not an ancestor, but every file the branch changed already has identical
+                 content in the default branch (typical squash/rebase merge) — kept unless --include-squash
+  keep           anything else: dirty, untracked files, unmerged commits, locked, busy, recent, detached-unmerged
+"""
+import argparse, os, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+
+
+def git(repo, *args, check=False):
+    r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+    if check and r.returncode:
+        raise RuntimeError(r.stderr.strip())
+    return r
+
+
+def default_branch(repo):
+    r = git(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip().split("/", 1)[1]
+    for b in ("main", "master", "develop", "dev"):
+        if git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{b}").returncode == 0:
+            return b
+    return None
+
+
+def worktrees(repo):
+    out = git(repo, "worktree", "list", "--porcelain").stdout
+    items, cur = [], {}
+    for line in out.splitlines() + [""]:
+        if not line:
+            if cur:
+                items.append(cur)
+            cur = {}
+            continue
+        k, _, v = line.partition(" ")
+        cur[k] = v if v else True
+    return items
+
+
+def du_kb(path):
+    r = subprocess.run(["du", "-sk", path], capture_output=True, text=True)
+    try:
+        return int(r.stdout.split()[0])
+    except Exception:
+        return 0
+
+
+def busy_paths():
+    """cwd of every running process (one lsof call)."""
+    try:
+        r = subprocess.run(["lsof", "-n", "-w", "-d", "cwd", "-Fn"], capture_output=True, text=True)
+    except FileNotFoundError:
+        print("warning: lsof not found; cannot see processes inside worktrees", file=sys.stderr)
+        return None
+    return {l[1:] for l in r.stdout.splitlines() if l.startswith("n/")}
+
+
+def is_ancestor(repo, a, b):
+    return git(repo, "merge-base", "--is-ancestor", a, b).returncode == 0
+
+
+def content_merged(repo, tip, base_ref):
+    mb = git(repo, "merge-base", tip, base_ref).stdout.strip()
+    if not mb:
+        return False
+    files = [f for f in git(repo, "diff", "--name-only", mb, tip).stdout.splitlines() if f]
+    if not files:
+        return True
+    return git(repo, "diff", "--quiet", base_ref, tip, "--", *files).returncode == 0
+
+
+def last_activity(gitdir):
+    t = 0
+    for f in ("index", "HEAD", "logs/HEAD", "ORIG_HEAD", "FETCH_HEAD"):
+        p = os.path.join(gitdir, f)
+        if os.path.exists(p):
+            t = max(t, os.path.getmtime(p))
+    return t
+
+
+def classify(repo, wt, dflt, busy, recent_s, lockdir):
+    path = wt["worktree"]
+    br = wt.get("branch", "").replace("refs/heads/", "") if isinstance(wt.get("branch"), str) else ""
+    row = {"repo": repo, "path": path, "branch": br or "(detached)", "class": "keep", "why": "", "kb": 0}
+    if wt.get("prunable") or not os.path.isdir(path):
+        row.update({"class": "prunable", "why": "dir missing"})
+        return row
+    if wt.get("locked"):
+        row["why"] = "git worktree locked"
+        return row
+    gd = git(path, "rev-parse", "--absolute-git-dir").stdout.strip()
+    if br and os.path.exists(os.path.join(lockdir, br.replace("/", "__") + ".lock")):
+        row["why"] = "branch-lock held"
+        return row
+    if busy is None:
+        row["why"] = "cannot check processes (no lsof)"
+        return row
+    if any(b == path or b.startswith(path + "/") for b in busy):
+        row["why"] = "process running inside"
+        return row
+    if gd and time.time() - last_activity(gd) < recent_s:
+        row["why"] = "recent git activity"
+        return row
+    st = git(path, "status", "--porcelain", "--untracked-files=normal")
+    if st.returncode:
+        row["why"] = "git status failed"
+        return row
+    if st.stdout.strip():
+        n = len(st.stdout.strip().splitlines())
+        row["why"] = f"dirty/untracked ({n} entries)"
+        return row
+    tip = wt.get("HEAD", "")
+    bases = [b for b in (dflt, f"origin/{dflt}") if dflt and git(repo, "rev-parse", "--verify", "--quiet", b).returncode == 0]
+    if not bases:
+        row["why"] = "no default branch found"
+        return row
+    if any(is_ancestor(repo, tip, b) for b in bases):
+        row.update({"class": "SAFE", "why": f"merged into {dflt}, clean"})
+        return row
+    if any(content_merged(repo, tip, b) for b in bases):
+        row.update({"class": "squash-merged", "why": f"content already in {dflt}, clean"})
+        return row
+    ahead = git(repo, "rev-list", "--count", f"{bases[-1]}..{tip}").stdout.strip()
+    row["why"] = f"unmerged ({ahead} commits not in {dflt})"
+    return row
+
+
+def discover(roots):
+    repos = []
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for name in sorted(os.listdir(root)):
+            p = os.path.join(root, name)
+            if os.path.isdir(os.path.join(p, ".git")) and os.path.isdir(os.path.join(p, ".git", "worktrees")):
+                if os.listdir(os.path.join(p, ".git", "worktrees")):
+                    repos.append(p)
+    return repos
+
+
+def gb(kb):
+    return kb / 1024 / 1024
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("repos", nargs="*")
+    ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--include-squash", action="store_true")
+    ap.add_argument("--no-size", action="store_true")
+    ap.add_argument("--recent-hours", type=float, default=6)
+    ap.add_argument("--tsv")
+    a = ap.parse_args()
+    repos = [os.path.abspath(os.path.expanduser(r)) for r in a.repos] or discover([f"{HOME}/projects", f"{HOME}/code"])
+    busy = busy_paths()
+    rows = []
+    for repo in repos:
+        if git(repo, "rev-parse", "--git-dir").returncode:
+            print(f"skip {repo}: not a git repo", file=sys.stderr)
+            continue
+        common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+        main_wt = os.path.dirname(common) if common.endswith("/.git") else repo
+        dflt = default_branch(repo)
+        lockdir = os.path.join(common, "agent-locks")
+        for wt in worktrees(repo):
+            if wt.get("worktree") == main_wt or wt.get("bare"):
+                continue
+            row = classify(repo, wt, dflt, busy, a.recent_hours * 3600, lockdir)
+            if not a.no_size and row["class"] != "prunable":
+                row["kb"] = du_kb(row["path"])
+            rows.append(row)
+    # report
+    by_repo = {}
+    for r in rows:
+        d = by_repo.setdefault(r["repo"], {"n": 0, "kb": 0, "SAFE": [0, 0], "squash-merged": [0, 0], "prunable": [0, 0], "keep": [0, 0]})
+        d["n"] += 1; d["kb"] += r["kb"]; d[r["class"]][0] += 1; d[r["class"]][1] += r["kb"]
+    for r in rows:
+        print(f'{r["class"]:<13} {gb(r["kb"]):6.2f}G  {r["branch"][:40]:<40} {r["path"]}  — {r["why"]}')
+    print()
+    print(f'{"repo":<34} {"wts":>4} {"total":>8} {"SAFE":>12} {"squash":>12} {"prunable":>8} {"keep":>12}')
+    tot = {"n": 0, "kb": 0, "SAFE": [0, 0], "squash-merged": [0, 0], "prunable": [0, 0], "keep": [0, 0]}
+    for repo, d in by_repo.items():
+        print(f'{os.path.basename(repo)[:34]:<34} {d["n"]:>4} {gb(d["kb"]):7.1f}G {d["SAFE"][0]:>3}/{gb(d["SAFE"][1]):6.1f}G {d["squash-merged"][0]:>3}/{gb(d["squash-merged"][1]):6.1f}G {d["prunable"][0]:>8} {d["keep"][0]:>3}/{gb(d["keep"][1]):6.1f}G')
+        for k in tot:
+            if isinstance(tot[k], list):
+                tot[k][0] += d[k][0]; tot[k][1] += d[k][1]
+            else:
+                tot[k] += d[k]
+    print(f'{"TOTAL":<34} {tot["n"]:>4} {gb(tot["kb"]):7.1f}G {tot["SAFE"][0]:>3}/{gb(tot["SAFE"][1]):6.1f}G {tot["squash-merged"][0]:>3}/{gb(tot["squash-merged"][1]):6.1f}G {tot["prunable"][0]:>8} {tot["keep"][0]:>3}/{gb(tot["keep"][1]):6.1f}G')
+    if a.tsv:
+        with open(a.tsv, "w") as f:
+            f.write("class\tgb\trepo\tbranch\tpath\twhy\n")
+            for r in rows:
+                f.write(f'{r["class"]}\t{gb(r["kb"]):.2f}\t{r["repo"]}\t{r["branch"]}\t{r["path"]}\t{r["why"]}\n')
+    if not a.apply:
+        print("\nDRY RUN — nothing removed. Re-run with --apply to remove SAFE worktrees (branches are kept).")
+        return
+    want = {"SAFE"} | ({"squash-merged"} if a.include_squash else set())
+    busy = busy_paths()  # re-check right before acting
+    if busy is None:
+        sys.exit("refusing to --apply without lsof")
+    for r in rows:
+        if r["class"] not in want:
+            continue
+        if any(b == r["path"] or b.startswith(r["path"] + "/") for b in busy):
+            print(f'skip (now busy) {r["path"]}'); continue
+        if git(r["path"], "status", "--porcelain").stdout.strip():
+            print(f'skip (now dirty) {r["path"]}'); continue
+        res = git(r["repo"], "worktree", "remove", r["path"])
+        print(("removed " if res.returncode == 0 else f"FAILED ({res.stderr.strip()}) ") + r["path"])
+    for repo in by_repo:
+        if by_repo[repo]["prunable"][0]:
+            git(repo, "worktree", "prune")
+            print(f"pruned metadata in {repo}")
+
+
+if __name__ == "__main__":
+    main()

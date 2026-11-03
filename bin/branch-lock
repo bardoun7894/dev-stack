@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# branch-lock: advisory per-branch locks so concurrent agents don't edit/commit/push the same branch.
+#
+# Locks live in the repo's git common dir, so every worktree of a repo sees the same locks:
+#   $(git rev-parse --git-common-dir)/agent-locks/<branch with / as __>.lock
+#
+# Usage (run inside a git repo; <branch> defaults to the current branch):
+#   branch-lock claim   [branch] [--agent NAME] [--ttl SECONDS] [--note TEXT] [--force]
+#   branch-lock release [branch] [--force]
+#   branch-lock status  [branch]          print the holder (exit 0 free/mine, 1 held by another agent)
+#   branch-lock check   [branch]          same as status but silent unless blocked (for hooks)
+#   branch-lock list                      every lock in this repo, with age and stale flag
+#   branch-lock install-hook              add pre-commit + pre-push guards to the active hooks dir
+#                                         (core.hooksPath if set, e.g. global ~/.githooks; else this repo)
+#
+# Identity: --agent NAME, else $BRANCH_LOCK_AGENT, else "<kind>:<worktree path>" where kind is
+# detected from the environment (claude, codex, gemini, opencode, pi, kimi, human).
+# A lock is "mine" when the owner matches, or when kind and worktree both match.
+# Locks older than their TTL (default 7200s = 2h, $BRANCH_LOCK_TTL) are stale and can be taken over.
+# Re-claiming your own lock refreshes it (use it as a heartbeat on long tasks).
+# Emergency bypass for hooks: BRANCH_LOCK_IGNORE=1.
+set -euo pipefail
+
+die() { echo "branch-lock: $*" >&2; exit 2; }
+
+detect_kind() {
+  if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]; then echo claude
+  elif [ -n "${CODEX_SANDBOX:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_MANAGED_BY_NPM:-}" ] || [ -n "${CODEX_HOME:-}" ]; then echo codex
+  elif [ -n "${GEMINI_CLI:-}" ]; then echo gemini
+  elif [ -n "${OPENCODE:-}" ] || [ -n "${OPENCODE_SESSION:-}" ]; then echo opencode
+  elif [ -n "${PI_CODING_AGENT:-}" ] || [ -n "${PI_SESSION_ID:-}" ]; then echo pi
+  elif [ -n "${KIMI_CODE_HOME:-}" ] || [ -n "${KIMI_SESSION_ID:-}" ]; then echo kimi
+  else echo human
+  fi
+}
+
+now() { date +%s; }
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+case "$cmd" in -h|--help|help|"") awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit 0 ;; esac
+
+BRANCH=""; AGENT="${BRANCH_LOCK_AGENT:-}"; TTL="${BRANCH_LOCK_TTL:-7200}"; NOTE=""; FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --agent) AGENT="${2:?}"; shift 2 ;;
+    --ttl) TTL="${2:?}"; shift 2 ;;
+    --note) NOTE="${2:?}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    -*) die "unknown flag $1" ;;
+    *) BRANCH="$1"; shift ;;
+  esac
+done
+case "$TTL" in ''|*[!0-9]*) die "--ttl must be seconds" ;; esac
+
+TOP="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git work tree"
+COMMON="$(git rev-parse --git-common-dir)"; case "$COMMON" in /*) ;; *) COMMON="$(cd "$COMMON" && pwd)" ;; esac
+LOCKDIR="$COMMON/agent-locks"
+KIND="$(detect_kind)"
+OWNER="${AGENT:-$KIND:$TOP}"
+HOST="$(hostname -s 2>/dev/null || hostname)"
+
+if [ -z "$BRANCH" ] && [ "$cmd" != list ] && [ "$cmd" != install-hook ]; then
+  BRANCH="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
+    case "$cmd" in check|status) [ "$cmd" = status ] && echo "detached HEAD: no branch to lock"; exit 0 ;; esac
+    die "detached HEAD: pass a branch name"; }
+fi
+lockfile() { echo "$LOCKDIR/$(printf '%s' "$1" | sed 's#/#__#g').lock"; }
+field() { sed -n "s/^$1=//p" "$2" 2>/dev/null | head -1; }
+
+# state of a lock file: free | mine | stale | held
+state_of() {
+  local f="$1"
+  [ -f "$f" ] || { echo free; return; }
+  local owner kind wt updated ttl age
+  owner="$(field owner "$f")"; kind="$(field kind "$f")"; wt="$(field worktree "$f")"
+  updated="$(field updated "$f")"; ttl="$(field ttl "$f")"
+  case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
+  case "$ttl" in ''|*[!0-9]*) ttl=7200 ;; esac
+  age=$(( $(now) - updated ))
+  if [ "$owner" = "$OWNER" ] || { [ "$kind" = "$KIND" ] && [ "$wt" = "$TOP" ] && [ -z "$AGENT" ]; }; then echo mine
+  elif [ "$age" -gt "$ttl" ]; then echo stale
+  else echo held
+  fi
+}
+describe() {
+  local f="$1" updated age t
+  updated="$(field updated "$f")"; case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
+  t="$(field ttl "$f")"; case "$t" in ''|*[!0-9]*) t=7200 ;; esac
+  age=$(( $(now) - updated ))
+  printf '%s held by %s (kind=%s host=%s pid=%s worktree=%s, %sm ago, ttl %sm)%s\n' \
+    "$(field branch "$f")" "$(field owner "$f")" "$(field kind "$f")" "$(field host "$f")" "$(field pid "$f")" \
+    "$(field worktree "$f")" $(( age / 60 )) $(( t / 60 )) \
+    "$( n="$(field note "$f")"; [ -n "$n" ] && printf ' note: %s' "$n" )"
+}
+write_lock() {
+  local f="$1" created="$2" tmp
+  mkdir -p "$LOCKDIR"
+  tmp="$(mktemp "$LOCKDIR/.tmp.XXXXXX")"
+  {
+    echo "branch=$BRANCH"; echo "owner=$OWNER"; echo "kind=$KIND"; echo "host=$HOST"
+    echo "pid=$PPID"; echo "worktree=$TOP"; echo "created=$created"; echo "updated=$(now)"
+    echo "ttl=$TTL"; echo "note=$NOTE"
+  } > "$tmp"
+  echo "$tmp"
+}
+
+case "$cmd" in
+  claim)
+    f="$(lockfile "$BRANCH")"
+    tmp="$(write_lock "$f" "$(now)")"
+    if ln "$tmp" "$f" 2>/dev/null; then rm -f "$tmp"; echo "claimed $BRANCH as $OWNER (ttl ${TTL}s)"; exit 0; fi
+    st="$(state_of "$f")"
+    case "$st" in
+      mine)  created="$(field created "$f")"; rm -f "$tmp"; tmp="$(write_lock "$f" "${created:-$(now)}")"; mv -f "$tmp" "$f"; echo "refreshed $BRANCH ($OWNER)"; exit 0 ;;
+      stale) echo "taking over stale lock: $(describe "$f")" >&2; mv -f "$tmp" "$f"; echo "claimed $BRANCH as $OWNER"; exit 0 ;;
+      held)
+        if [ "$FORCE" = 1 ]; then echo "FORCED over: $(describe "$f")" >&2; mv -f "$tmp" "$f"; echo "claimed $BRANCH as $OWNER"; exit 0; fi
+        rm -f "$tmp"; echo "branch-lock: BUSY — $(describe "$f")" >&2
+        echo "branch-lock: pick another branch / worktree, wait, or ask the owner. (--force only with the owner's OK)" >&2
+        exit 1 ;;
+      free) mv -f "$tmp" "$f"; echo "claimed $BRANCH as $OWNER"; exit 0 ;;
+    esac ;;
+  release)
+    f="$(lockfile "$BRANCH")"
+    [ -f "$f" ] || { echo "no lock on $BRANCH"; exit 0; }
+    st="$(state_of "$f")"
+    if [ "$st" = mine ] || [ "$st" = stale ] || [ "$FORCE" = 1 ]; then rm -f "$f"; echo "released $BRANCH"; exit 0; fi
+    echo "branch-lock: not yours — $(describe "$f") (use --force only with the owner's OK)" >&2; exit 1 ;;
+  status|check)
+    f="$(lockfile "$BRANCH")"; st="$(state_of "$f")"
+    case "$st" in
+      free)  [ "$cmd" = status ] && echo "$BRANCH: free"; exit 0 ;;
+      mine)  [ "$cmd" = status ] && echo "$BRANCH: mine — $(describe "$f")"; exit 0 ;;
+      stale) [ "$cmd" = status ] && echo "$BRANCH: stale — $(describe "$f")"; exit 0 ;;
+      held)
+        if [ "${BRANCH_LOCK_IGNORE:-0}" = 1 ]; then echo "branch-lock: WARNING (ignored) — $(describe "$f")" >&2; exit 0; fi
+        echo "branch-lock: BLOCKED — $(describe "$f")" >&2; exit 1 ;;
+    esac ;;
+  list)
+    [ -d "$LOCKDIR" ] || { echo "no locks"; exit 0; }
+    found=0
+    for f in "$LOCKDIR"/*.lock; do
+      [ -f "$f" ] || continue; found=1
+      printf '[%s] %s\n' "$(state_of "$f")" "$(describe "$f")"
+    done
+    [ "$found" = 1 ] || echo "no locks" ;;
+  install-hook)
+    # Writes into the ACTIVE hooks dir: core.hooksPath if set (e.g. a global ~/.githooks, which then
+    # covers every repo), else this repo's common hooks dir. Existing hooks get the guard inserted
+    # after the shebang (backup kept). A new pre-push does NOT chain to repo hooks (keeps behaviour).
+    hd="$(git config --get core.hooksPath || true)"
+    case "$hd" in "") hd="$COMMON/hooks" ;; "~"*) hd="$HOME${hd#\~}" ;; /*) ;; *) hd="$TOP/$hd" ;; esac
+    mkdir -p "$hd"
+    line='if command -v branch-lock >/dev/null 2>&1; then branch-lock check; [ $? -eq 1 ] && exit 1; fi  # branch-lock guard (BRANCH_LOCK_IGNORE=1 to bypass)'
+    for h in pre-commit pre-push; do
+      f="$hd/$h"
+      if [ -f "$f" ] && grep -q 'branch-lock guard' "$f"; then echo "ok      $f"; continue; fi
+      if [ -f "$f" ]; then
+        cp -p "$f" "$f.bak-branch-lock-$(date +%Y%m%d%H%M%S)"
+        { head -1 "$f"; echo "$line"; tail -n +2 "$f"; } > "$f.new" && cat "$f.new" > "$f" && rm -f "$f.new"
+      else printf '#!/bin/sh\n%s\nexit 0\n' "$line" > "$f"; fi
+      chmod +x "$f"; echo "added   $f"
+    done ;;
+  *) die "unknown command '$cmd' (claim|release|status|check|list|install-hook)" ;;
+esac
