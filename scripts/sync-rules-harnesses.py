@@ -59,16 +59,29 @@ def build_block():
             f"{text}\n{END}")
 
 
-def shrink_longest_section(block):
+# Shrink order for the capped grok file. Replaced one at a time, in this order, only while still over cap.
+# Never shrunk: COMMUNICATION CONTRACT, TOKEN BUDGET, BRANCH LOCKS, SERVER-FIRST (not in the list).
+SHRINK_ORDER = ["KB + SPEC CHAIN", "Project-level overrides", "Deployment"]
+
+
+def shrink_section(block, prefix):
     body, tail = block.rsplit(f"\n{END}", 1)
     parts = re.split(r"(?m)^(?=##+ )", body)
-    if len(parts) <= 1:
-        return block
-    idx = max(range(1, len(parts)), key=lambda i: len(parts[i]))
-    heading = parts[idx].splitlines()[0]
-    name = re.sub(r"^#+\s*", "", heading).strip()
-    parts[idx] = f"{heading}\n\nfull text: ~/.claude/CLAUDE.md, section {name}\n\n"
-    return "".join(parts).rstrip("\n") + f"\n{END}" + tail
+    for idx in range(1, len(parts)):
+        heading = parts[idx].splitlines()[0]
+        name = re.sub(r"^#+\s*", "", heading).strip()
+        if name.startswith(prefix):
+            parts[idx] = f"{heading}\n\nfull text: ~/.claude/CLAUDE.md, section {name}\n\n"
+            return "".join(parts).rstrip("\n") + f"\n{END}" + tail
+    return block
+
+
+def shrink_to_cap(block, cap):
+    for prefix in SHRINK_ORDER:
+        if len(block) <= cap:
+            break
+        block = shrink_section(block, prefix)
+    return block
 
 
 def propose(path, block, create):
@@ -93,7 +106,7 @@ def main():
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for path, create in TARGETS:
         cap = CAPS.get(path)
-        tblock = shrink_longest_section(block) if cap else block
+        tblock = shrink_to_cap(block, cap) if cap else block
         new = propose(path, tblock, create)
         if new is None:
             print(f"skip   {path}")
