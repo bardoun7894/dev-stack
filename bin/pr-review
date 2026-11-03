@@ -801,16 +801,16 @@ const SUGGESTION_MARK = (sha) => `<!-- haiku-suggestion sha=${sha} -->`;
 
 function parseDiffLines(diff) {
   const map = new Map();
-  let file = null, curLine = null;
+  let file = null, curLine = null, inHunk = false;
   for (const raw of String(diff ?? "").split("\n")) {
     const dm = raw.match(/^diff --git a\/(.+?) b\/(.+)$/);
-    if (dm) { file = dm[2]; curLine = 1; if (!map.has(file)) map.set(file, new Map()); continue; }
-    const pm = raw.match(/^\+\+\+ b\/(.+)$/);
+    if (dm) { file = dm[2]; curLine = 1; inHunk = false; if (!map.has(file)) map.set(file, new Map()); continue; }
+    const pm = !inHunk && raw.match(/^\+\+\+ b\/(.+)$/);
     if (pm) { file = pm[1]; if (!map.has(file)) map.set(file, new Map()); continue; }
     const hm = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (hm) { curLine = Number(hm[1]); continue; }
+    if (hm) { curLine = Number(hm[1]); inHunk = true; continue; }
     if (!file || curLine == null) continue;
-    if (raw.startsWith("---") || raw.startsWith("+++") || raw.startsWith("\\")) continue;
+    if ((!inHunk && (raw.startsWith("---") || raw.startsWith("+++"))) || raw.startsWith("\\")) continue;
     if (raw.startsWith("+") || raw.startsWith(" ")) {
       map.get(file).set(curLine, raw.slice(1));
       curLine++;
@@ -834,14 +834,12 @@ function extractSuggestions(text, diffMap) {
       const buf = [];
       let j = i + 2;
       while (j < lines.length && !lines[j].trim().startsWith("```")) { buf.push(lines[j]); j++; }
-      if (j < lines.length) { replacement = buf.join("\n"); i = j; }
+      // Only single-line blocks: a multi-line block would insert extra lines when applied to one target line.
+      if (j < lines.length) { if (buf.length === 1) replacement = buf[0]; i = j; }
     } else {
       const arrow = note.match(/`([^`]+)`\s*(?:->|=>)\s*`([^`]+)`/);
-      const single = !arrow && note.match(/(?:suggestion|replace with|->|=>)\s*:?\s*`([^`]+)`/i);
       const orig = diffMap.get(file)?.get(line);
       if (arrow && orig !== undefined && orig.includes(arrow[1])) replacement = orig.replace(arrow[1], arrow[2]);
-      else if (arrow) replacement = arrow[2];
-      else if (single) replacement = single[1];
     }
     if (replacement === null) continue;
     if (RISKY_RE.test(file) || FIX_DENY_RE.test(file)) continue;
@@ -858,7 +856,11 @@ function maybePostSuggestions(repo, n, sha, pr, aText, bText, diff, injection, d
   if (dry) return;
   if (!injection || typeof injection.max !== "number" || injection.max >= (injection.bar ?? INJECTION_BAR)) return;
   const mark = SUGGESTION_MARK(sha);
-  if ([...(pr.comments ?? []), ...(pr.reviews ?? [])].some((c) => String(c.body ?? "").includes(mark))) return;
+  // Inline review comments are not in pr.comments/pr.reviews, so ask the pulls comments API.
+  let inline;
+  try { inline = JSON.parse(gh(["api", `repos/${repo}/pulls/${n}/comments?per_page=100`])); }
+  catch (e) { console.error(`pr-review: ${repo}#${n}: suggestion dedupe: ${e.message}`); return; }
+  if (inline.some((c) => String(c?.body ?? "").includes(mark))) return;
   const diffMap = parseDiffLines(diff);
   const list = extractSuggestions(`${aText ?? ""}\n${bText ?? ""}`, diffMap);
   for (const s of list) {
