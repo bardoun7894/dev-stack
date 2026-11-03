@@ -24,7 +24,11 @@ TARGETS = [
     (f"{HOME}/.pi/agent/AGENTS.md", False),
     (f"{HOME}/.hermes/HERMES.md", False),
     (f"{HOME}/.continue/rules/claude-shared-rules.md", True),
+    (f"{HOME}/.grok/AGENTS.md", True),
 ]
+CAPS = {
+    f"{HOME}/.grok/AGENTS.md": 9800,
+}
 
 ADAPTER = """You are not Claude Code, but these are the owner's rules for every agent. Translate as you go:
 - A slash command or skill name (`/kb-query`, `kb-dev`, `where-to-work`, ...) means: read
@@ -47,11 +51,37 @@ def build_block():
                   "", text, flags=re.S)
     text = text.replace("Apply to every Claude Code session, every project, every prompt.",
                         "Apply to every agent session, every harness, every project, every prompt.")
+    text = text.replace("@USER.md is", "Read ~/.claude/USER.md: it is")
     text = re.sub(r"^# Global standing rules\n", "", text).strip("\n")
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(SRC)))
     return (f"{BEGIN} (generated from ~/.claude/CLAUDE.md by dev-stack/scripts/sync-rules-harnesses.py, "
             f"{stamp}; edit CLAUDE.md, never this block) -->\n# Global standing rules\n\n{ADAPTER}\n\n"
             f"{text}\n{END}")
+
+
+# Shrink order for the capped grok file. Replaced one at a time, in this order, only while still over cap.
+# Never shrunk: COMMUNICATION CONTRACT, TOKEN BUDGET, BRANCH LOCKS, SERVER-FIRST (not in the list).
+SHRINK_ORDER = ["KB + SPEC CHAIN", "Project-level overrides", "Deployment"]
+
+
+def shrink_section(block, prefix):
+    body, tail = block.rsplit(f"\n{END}", 1)
+    parts = re.split(r"(?m)^(?=##+ )", body)
+    for idx in range(1, len(parts)):
+        heading = parts[idx].splitlines()[0]
+        name = re.sub(r"^#+\s*", "", heading).strip()
+        if name.startswith(prefix):
+            parts[idx] = f"{heading}\n\nfull text: ~/.claude/CLAUDE.md, section {name}\n\n"
+            return "".join(parts).rstrip("\n") + f"\n{END}" + tail
+    return block
+
+
+def shrink_to_cap(block, cap):
+    for prefix in SHRINK_ORDER:
+        if len(block) <= cap:
+            break
+        block = shrink_section(block, prefix)
+    return block
 
 
 def propose(path, block, create):
@@ -75,10 +105,14 @@ def main():
     open(f"{OUT}/block.md", "w").write(block + "\n")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for path, create in TARGETS:
-        new = propose(path, block, create)
+        cap = CAPS.get(path)
+        tblock = shrink_to_cap(block, cap) if cap else block
+        new = propose(path, tblock, create)
         if new is None:
             print(f"skip   {path}")
             continue
+        if cap and max(len(new), len(new.encode("utf-8"))) > cap:
+            print(f"WARN   {path} exceeds cap ({len(new.encode('utf-8'))} > {cap})")
         old = open(path).read() if os.path.exists(path) else ""
         if new == old:
             print(f"ok     {path}")
