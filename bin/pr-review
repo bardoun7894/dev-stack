@@ -64,8 +64,9 @@ const EXHAUSTED_STATE_FILE = join(STATE_DIR, "exhausted-notified.json");
 const REVIEW_FAIL_FILE = join(STATE_DIR, "review-failures.json");
 const SECOND_RETRY_FILE = join(STATE_DIR, "second-review-retries.json");
 const LAST_DECISION_FILE = join(STATE_DIR, "last-decisions.json");
-const MAX_B_RETRIES = Number(process.env.PR_REVIEW_B_RETRIES) || 3;
-const B_BACKOFF_MS = process.env.PR_REVIEW_B_BACKOFF_MS !== undefined ? Number(process.env.PR_REVIEW_B_BACKOFF_MS) : (RUNNER ? 0 : 5 * 60 * 1000);
+const envNum = (v, d) => (v !== undefined && v !== "" && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : d);
+const MAX_B_RETRIES = envNum(process.env.PR_REVIEW_B_RETRIES, 3);
+const B_BACKOFF_MS = envNum(process.env.PR_REVIEW_B_BACKOFF_MS, RUNNER ? 0 : 5 * 60 * 1000);
 const WORK_DIR = process.env.PR_REVIEW_WORK || join(STATE_DIR, "work");
 // Owner 2026-10-22: no OpenAI. Second reviewer = Opus 5.5 xhigh, then Gemini 4 Argon, Grok 4.7, then cheap non-OpenAI fallbacks.
 const B_CHAIN = [
@@ -331,7 +332,7 @@ function secondReview(prompt) {
         if (r.text) return { model, out: r.text, usd: r.usd, tokens: r.tokens };
         console.error(`pr-review: second-review ${tool} ${model} failed: empty output`);
       } catch (e) {
-        const why = String(e.output ?? e.message ?? e).trim().replace(/\s+/g, " ").slice(0, 200);
+        const why = String(e.stderr || e.message || e).trim().replace(/\s+/g, " ").slice(0, 200);
         console.error(`pr-review: second-review ${tool} ${model} failed (exit ${e.status ?? "err"}): ${why}`);
       }
     }
@@ -725,7 +726,7 @@ function needsDescribe(pr) {
 
 function maybeDescribe(repo, n, pr, files, diff, injection, dry) {
   if (!needsDescribe(pr)) return;
-  if (!injection || typeof injection.max !== "number" || injection.max >= (injection.bar ?? INJECTION_BAR)) return;
+  if (!injection || injection.kind === "not-needed" || typeof injection.max !== "number" || injection.max >= (injection.bar ?? INJECTION_BAR)) return;
   try {
     const fileList = (files ?? []).map((f) => `${f.path} (+${f.additions ?? 0}/-${f.deletions ?? 0})`).join("\n");
     const prompt = `${DESCRIBE_PROMPT}\n<pr>\nPR title: ${pr.title ?? ""}\nPR description: ${pr.body ?? ""}\nChanged files:\n${fileList}\n\nDiff:\n${String(diff ?? "").slice(0, MAX_DIFF)}\n</pr>\n`;
@@ -761,9 +762,9 @@ function pendingAsks(comments) {
     if (!m || !m[1].trim()) continue;
     const q = m[1].trim();
     const id = askId(c, q);
-    const answered = list.some((x, j) => {
+    const answered = list.some((x) => {
       const b = String(x?.body ?? "");
-      return b.includes(`<!-- haiku-ask id=${id} -->`) || (j > i && b.includes("<!-- haiku-ask -->"));
+      return b.includes(`<!-- haiku-ask id=${id} -->`);
     });
     if (!answered) out.push({ id, question: q });
   }
@@ -835,11 +836,17 @@ function extractSuggestions(text, diffMap) {
       let j = i + 2;
       while (j < lines.length && !lines[j].trim().startsWith("```")) { buf.push(lines[j]); j++; }
       // Only single-line blocks: a multi-line block would insert extra lines when applied to one target line.
-      if (j < lines.length) { if (buf.length === 1) replacement = buf[0]; i = j; }
+      if (j < lines.length) {
+        // The finding must quote the original line so a wrong line number cannot overwrite an unrelated line.
+        const quoted = note.match(/`([^`]+)`/)?.[1];
+        const origLine = diffMap.get(file)?.get(line);
+        if (buf.length === 1 && quoted && origLine !== undefined && origLine.includes(quoted)) replacement = buf[0];
+        i = j;
+      }
     } else {
       const arrow = note.match(/`([^`]+)`\s*(?:->|=>)\s*`([^`]+)`/);
       const orig = diffMap.get(file)?.get(line);
-      if (arrow && orig !== undefined && orig.includes(arrow[1])) replacement = orig.replace(arrow[1], arrow[2]);
+      if (arrow && orig !== undefined && orig.includes(arrow[1])) replacement = orig.replace(arrow[1], () => arrow[2]);
     }
     if (replacement === null) continue;
     if (RISKY_RE.test(file) || FIX_DENY_RE.test(file)) continue;
@@ -854,11 +861,11 @@ function extractSuggestions(text, diffMap) {
 
 function maybePostSuggestions(repo, n, sha, pr, aText, bText, diff, injection, dry) {
   if (dry) return;
-  if (!injection || typeof injection.max !== "number" || injection.max >= (injection.bar ?? INJECTION_BAR)) return;
+  if (!injection || injection.kind === "not-needed" || typeof injection.max !== "number" || injection.max >= (injection.bar ?? INJECTION_BAR)) return;
   const mark = SUGGESTION_MARK(sha);
   // Inline review comments are not in pr.comments/pr.reviews, so ask the pulls comments API.
   let inline;
-  try { inline = JSON.parse(gh(["api", `repos/${repo}/pulls/${n}/comments?per_page=100`])); }
+  try { inline = JSON.parse(gh(["api", `repos/${repo}/pulls/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat(); }
   catch (e) { console.error(`pr-review: ${repo}#${n}: suggestion dedupe: ${e.message}`); return; }
   if (inline.some((c) => String(c?.body ?? "").includes(mark))) return;
   const diffMap = parseDiffLines(diff);
@@ -882,7 +889,7 @@ function reviewPr(repo, n, dry, merge = true) {
   const info = { sha7: sha.slice(0, 7), sha };
   if (pr.isDraft) return { ...info, action: "skipped-draft" };
   const marker = `<!-- haiku-review sha=${sha} -->`;
-  const allEntries = [...(pr.comments ?? []), ...(pr.reviews ?? [])].filter((x) => (x.body ?? "").includes(marker) && !RETRIGGER_RE.test(x.body ?? ""));
+  const allEntries = [...(pr.comments ?? []), ...(pr.reviews ?? [])].filter((x) => x.author?.login === OWNER && (x.body ?? "").includes(marker) && !RETRIGGER_RE.test(x.body ?? ""));
   // A real review for this sha wins (preferring one with a resolved second reviewer); old truncated / 300-file notices alone get one fresh review.
   const seenEntry = allEntries.filter((x) => parseSections(x.body ?? "").bModel).pop() ?? allEntries.pop();
   const seen = seenEntry?.body;
@@ -894,7 +901,11 @@ function reviewPr(repo, n, dry, merge = true) {
     if (sec.bUnavailable && !sec.truncated && canRetrySecond(repo, n, sha)) {
       noteSecondRetry(repo, n, sha);
       try { got = fetchDiff(repo, n, sha, pr.baseRefName); } catch (e) { console.error(`pr-review: ${repo}#${n}: diff: ${e.message}`); }
+      let retryInj = null;
       if (got?.diff?.trim()) {
+        try { retryInj = guardCached(repo, n, sha, pr.title, pr.body, got.diff); } catch (e) { console.error(`pr-review: ${repo}#${n}: retry guard: ${e.message}`); }
+      }
+      if (retryInj && typeof retryInj.max === "number" && retryInj.max < (retryInj.bar ?? INJECTION_BAR) && got?.diff?.trim()) {
         const parts = splitDiff(got.diff, MAX_DIFF);
         const N = parts.length;
         const head = `PR title: ${pr.title}\n\nPR description:\n${pr.body ?? ""}\n\n`;
