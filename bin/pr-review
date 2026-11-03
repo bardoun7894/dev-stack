@@ -795,6 +795,81 @@ function maybeAnswerAsks(repo, n, pr, getDiff, dry) {
     }
   }
 }
+
+const MAX_SUGGESTIONS = 10;
+const SUGGESTION_MARK = (sha) => `<!-- haiku-suggestion sha=${sha} -->`;
+
+function parseDiffLines(diff) {
+  const map = new Map();
+  let file = null, curLine = null;
+  for (const raw of String(diff ?? "").split("\n")) {
+    const dm = raw.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (dm) { file = dm[2]; curLine = 1; if (!map.has(file)) map.set(file, new Map()); continue; }
+    const pm = raw.match(/^\+\+\+ b\/(.+)$/);
+    if (pm) { file = pm[1]; if (!map.has(file)) map.set(file, new Map()); continue; }
+    const hm = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hm) { curLine = Number(hm[1]); continue; }
+    if (!file || curLine == null) continue;
+    if (raw.startsWith("---") || raw.startsWith("+++") || raw.startsWith("\\")) continue;
+    if (raw.startsWith("+") || raw.startsWith(" ")) {
+      map.get(file).set(curLine, raw.slice(1));
+      curLine++;
+    }
+  }
+  return map;
+}
+
+function extractSuggestions(text, diffMap) {
+  const lines = String(text ?? "").split("\n");
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < lines.length && out.length < MAX_SUGGESTIONS; i++) {
+    const m = lines[i].trim().match(/^(?:[-*]\s+|\d+\.\s+)?\**(P[01])\**[:\s]+([^\s:]+):(\d+)\b\s*(.*)$/);
+    if (!m) continue;
+    const [, sev, rawFile, lineStr, note] = m;
+    const file = rawFile.replace(/^[`"']+|[`"']+$/g, "").replace(/^[ab]\//, "");
+    const line = Number(lineStr);
+    let replacement = null;
+    if (lines[i + 1]?.trim().startsWith("```suggestion")) {
+      const buf = [];
+      let j = i + 2;
+      while (j < lines.length && !lines[j].trim().startsWith("```")) { buf.push(lines[j]); j++; }
+      if (j < lines.length) { replacement = buf.join("\n"); i = j; }
+    } else {
+      const arrow = note.match(/`([^`]+)`\s*(?:->|=>)\s*`([^`]+)`/);
+      const single = !arrow && note.match(/(?:suggestion|replace with|->|=>)\s*:?\s*`([^`]+)`/i);
+      const orig = diffMap.get(file)?.get(line);
+      if (arrow && orig !== undefined && orig.includes(arrow[1])) replacement = orig.replace(arrow[1], arrow[2]);
+      else if (arrow) replacement = arrow[2];
+      else if (single) replacement = single[1];
+    }
+    if (replacement === null) continue;
+    if (RISKY_RE.test(file) || FIX_DENY_RE.test(file)) continue;
+    if (!diffMap.get(file)?.has(line)) continue;
+    const key = `${file}:${line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ sev, file, line, note: note.trim(), replacement });
+  }
+  return out;
+}
+
+function maybePostSuggestions(repo, n, sha, pr, aText, bText, diff, injection, dry) {
+  if (dry) return;
+  if (!injection || typeof injection.max !== "number" || injection.max >= (injection.bar ?? INJECTION_BAR)) return;
+  const mark = SUGGESTION_MARK(sha);
+  if ([...(pr.comments ?? []), ...(pr.reviews ?? [])].some((c) => String(c.body ?? "").includes(mark))) return;
+  const diffMap = parseDiffLines(diff);
+  const list = extractSuggestions(`${aText ?? ""}\n${bText ?? ""}`, diffMap);
+  for (const s of list) {
+    const body = `**${s.sev}**: ${s.note}\n\`\`\`suggestion\n${s.replacement}\n\`\`\`\n${mark}`;
+    try {
+      gh(["api", `repos/${repo}/pulls/${n}/comments`, "-f", `commit_id=${sha}`, "-f", `path=${s.file}`, "-F", `line=${s.line}`, "-f", "side=RIGHT", "-f", `body=${body}`]);
+    } catch (e) {
+      console.error(`pr-review: ${repo}#${n}: suggestion ${s.file}:${s.line}: ${e.message}`);
+    }
+  }
+}
 let reviewingSha = null;
 
 // Returns the action; throws on error.
@@ -936,6 +1011,7 @@ function reviewPr(repo, n, dry, merge = true) {
   }
   maybeDescribe(repo, n, pr, files, got.diff, injection, dry);
   maybeAnswerAsks(repo, n, pr, () => got.diff, dry);
+  maybePostSuggestions(repo, n, sha, pr, aText, bText, got.diff, injection, dry);
   return {
     ...info, action: "reviewed", files, verdict: parseVerdict(aText), bVerdict: bMissing ? "BLOCK" : parseVerdict(bText),
     bModel, haikuUsd, haikuTokens, bUsd, bTokens, aText, bText, truncated: false, injection, parts: N,

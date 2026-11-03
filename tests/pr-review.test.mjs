@@ -1375,6 +1375,28 @@ test("/ask: comment by bardoun7894 starting with /ask gets answered once with ma
   assert.equal(ansB.length, 0, "already-answered /ask is not answered again");
 });
 
+test("inline suggestions: P0/P1 findings on diff lines post suggestion review comments, skip risky paths, and cap at 10 per sha", () => {
+  const diffLines = Array.from({ length: 15 }, (_, i) => `+const v${i + 1} = ${i + 1};`).join("\n");
+  const diff = `diff --git a/src/a.js b/src/a.js\n--- a/src/a.js\n+++ b/src/a.js\n@@ -1,0 +1,15 @@\n${diffLines}\ndiff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1,0 +1,2 @@\n+run: echo 1\n`;
+  const findingsList = [
+    ...Array.from({ length: 12 }, (_, i) => `P1 src/a.js:${i + 1} use let\n\`\`\`suggestion\nlet v${i + 1} = ${i + 1};\n\`\`\``),
+    "P0 .github/workflows/ci.yml:1 risky change\n```suggestion\nrun: echo 2\n```",
+    "P2 src/a.js:14 minor style\n```suggestion\nconst v14 = 0;\n```",
+    "P1 src/a.js:999 line not in diff\n```suggestion\nconst nope = 0;\n```",
+    "VERDICT: BLOCK",
+  ].join("\n");
+  const r = go({
+    pr: pr({ files: [{ path: "src/a.js", additions: 15, deletions: 0 }, { path: ".github/workflows/ci.yml", additions: 1, deletions: 0 }] }),
+    diff,
+    claudeOut: findingsList,
+  });
+  const sug = r.calls.filter((c) => c.cmd === "gh" && c.args[0] === "api" && c.args[1] === "repos/o/r/pulls/1/comments");
+  assert.equal(sug.length, 10, "capped at 10 inline suggestions per sha");
+  assert.ok(sug.every((c) => c.args.some((a) => a.includes("```suggestion"))), "each comment carries a suggestion block");
+  assert.ok(!sug.some((c) => c.args.some((a) => a.includes(".github/workflows"))), "never on risky paths");
+});
+
+
 
 
 
