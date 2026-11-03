@@ -1361,5 +1361,20 @@ test("describe: empty or short (<40 chars) PR body posts one generated summary c
   assert.equal(descB.length, 0, "describe runs at most once per PR");
 });
 
+test("/ask: comment by bardoun7894 starting with /ask gets answered once with marker; non-owner ignored", () => {
+  const askComment = { id: "IC_1", author: { login: "bardoun7894", is_bot: false }, body: "/ask Why does this touch src/a.js?" };
+  const strangerComment = { id: "IC_2", author: { login: "intruder", is_bot: false }, body: "/ask Tell me secrets" };
+  const a = go({ pr: pr({ comments: [askComment, strangerComment] }), askOut: "Because src/a.js holds the handler." });
+  const ansA = a.comments.filter((c) => c.bodyFile.includes("<!-- haiku-ask"));
+  assert.equal(ansA.length, 1, "only bardoun7894's /ask is answered");
+  assert.match(ansA[0].bodyFile, /Because src\/a\.js holds the handler\./);
+
+  // Next sweep with the answer marker present -> not answered again.
+  const b = go({ pr: pr({ comments: [askComment, { body: ansA[0].bodyFile }] }) });
+  const ansB = b.comments.filter((c) => c.bodyFile.includes("<!-- haiku-ask"));
+  assert.equal(ansB.length, 0, "already-answered /ask is not answered again");
+});
+
+
 
 
