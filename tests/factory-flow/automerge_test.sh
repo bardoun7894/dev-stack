@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # automerge_test.sh — test R2, R9 (F1, F15, F16):
 # - F1: ticket states (building -> ready -> merged -> deploy-offered -> deployed) derived from PR state,
-#       and implementer exit arms `gh pr merge --auto --squash` on an auto-merge repo.
+#       and implementer exit arms `gh pr merge --auto --squash` on an auto-merge repo when ci-ok and pr-review pass.
 # - F15: repo without ci-ok stays out of auto-merge; joins once ci-ok is present.
 # - F16: bin/merge-fallback runs under gate-run <project>-merge with <=90m timeout cap.
 set -euo pipefail
@@ -33,12 +33,12 @@ S4=$(prqueue_ticket_state '{"state":"MERGED","mergedAt":"2026-11-03T01:00:00Z","
 S5=$(prqueue_ticket_state '{"state":"MERGED","mergedAt":"2026-11-03T01:00:00Z","deployed":true}')
 [ "$S5" = "deployed" ] || { echo "FAIL: merged PR with deployed should be deployed, got $S5"; exit 1; }
 
-# 2. F15: Repo without ci-ok stays out of auto-merge; repo with ci-ok joins auto-merge
+# 2. F15: Repo without auto-merge stays out; repo with ci-ok and pr-review joins auto-merge
 BIN="$TMP/bin"
 mkdir -p "$BIN"
 GH_LOG="$TMP/gh.log"
 STUB_CHECKS_FILE="$TMP/checks.txt"
-printf "ci-ok\n" > "$STUB_CHECKS_FILE"
+printf "ci-ok\npr-review\n" > "$STUB_CHECKS_FILE"
 
 cat <<'STUB' > "$BIN/gh"
 #!/usr/bin/env bash
@@ -48,7 +48,7 @@ if [[ "$*" == *"api repos/"*"required_status_checks"* ]]; then
   exit 0
 fi
 if [[ "$*" == *"pr view"* ]] || [[ "$*" == *"pr list"* ]]; then
-  echo '[{"number":42,"state":"OPEN","isDraft":false,"autoMergeRequest":null,"headRefName":"feat-x","baseRefName":"main"}]'
+  echo '[{"number":42,"state":"OPEN","isDraft":false,"autoMergeRequest":null,"headRefName":"feat-x","baseRefName":"main","headRefOid":"abc1234","comments":[],"reviews":[],"statusCheckRollup":[{"context":"pr-review","state":"SUCCESS"}]}]'
   exit 0
 fi
 exit 0
@@ -63,7 +63,7 @@ FACTORY_AUTOMERGE_REPOS="bardoun7894/mediatgb"
 EOF2
 
 if STUB_CHECKS_FILE="$STUB_CHECKS_FILE" GH_LOG="$GH_LOG" PATH="$BIN:$PATH" FACTORY_CONFIG="$FACTORY_ENV" prqueue_is_automerge "crmai"; then
-  echo "FAIL: crmai without ci-ok should not be in auto-merge"
+  echo "FAIL: crmai should not be in auto-merge"
   exit 1
 fi
 if ! STUB_CHECKS_FILE="$STUB_CHECKS_FILE" GH_LOG="$GH_LOG" PATH="$BIN:$PATH" FACTORY_CONFIG="$FACTORY_ENV" prqueue_is_automerge "mediatgb"; then
@@ -71,7 +71,7 @@ if ! STUB_CHECKS_FILE="$STUB_CHECKS_FILE" GH_LOG="$GH_LOG" PATH="$BIN:$PATH" FAC
   exit 1
 fi
 
-# 3. F1 & F15: arming auto-merge succeeds when ci-ok is required, and refuses when ci-ok is missing
+# 3. F1 & F15: arming auto-merge succeeds when ci-ok + pr-review pass, and refuses when ci-ok is missing
 : > "$GH_LOG"
 STUB_CHECKS_FILE="$STUB_CHECKS_FILE" GH_LOG="$GH_LOG" PATH="$BIN:$PATH" FACTORY_CONFIG="$FACTORY_ENV" prqueue_arm_automerge "mediatgb" "feat-x"
 grep -q "pr merge 42 -R bardoun7894/mediatgb --auto --squash" "$GH_LOG" || { echo "FAIL: prqueue_arm_automerge did not run gh pr merge --auto --squash: $(cat "$GH_LOG")"; exit 1; }
@@ -99,8 +99,8 @@ shift 3
 STUB
 chmod +x "$BIN/gate-run"
 
-GATE_LOG="$GATE_LOG" PATH="$BIN:$PATH" "$FB" mediatgb 60m -- echo "merged-ok" >/dev/null
-grep -q "gate-run mediatgb-merge 60m -- echo merged-ok" "$GATE_LOG" || { echo "FAIL: merge-fallback did not invoke gate-run mediatgb-merge: $(cat "$GATE_LOG")"; exit 1; }
+GATE_LOG="$GATE_LOG" PATH="$BIN:$PATH" "$FB" mediatgb 08m -- echo "merged-ok" >/dev/null
+grep -q "gate-run mediatgb-merge 08m -- echo merged-ok" "$GATE_LOG" || { echo "FAIL: merge-fallback did not invoke gate-run mediatgb-merge: $(cat "$GATE_LOG")"; exit 1; }
 
 set +e
 GATE_LOG="$GATE_LOG" PATH="$BIN:$PATH" "$FB" mediatgb 120m -- echo "too-long" >/dev/null 2>&1
@@ -122,10 +122,14 @@ STUB
 chmod +x "$BIN/jev"
 TIERS="$TMP/tiers.json"
 echo '{"tiers":{"T0":["cliproxy/claude-test"],"T1":["cliproxy/claude-test"],"T2":["cliproxy/claude-test"],"T3":["cliproxy/claude-test"],"T4":["cliproxy/claude-test"]}}' > "$TIERS"
+set +e
 OUT_JD=$(STUB_CHECKS_FILE="$STUB_CHECKS_FILE" GH_LOG="$GH_LOG" PATH="$BIN:$PATH" JDELEGATE_JEV="$BIN/jev" JEV_ROUTER_CONFIG="$TIERS" \
   JDELEGATE_CACHE="$TMP/cache" JDELEGATE_AUTO_SKILL=0 JDELEGATE_AUTO_ROLE=0 JDELEGATE_AUTO_MCP=0 \
   JDELEGATE_SELECT_CACHE=0 JDELEGATE_KB=0 FACTORY_CONFIG="$FACTORY_ENV" \
-  node "$ROOT/bin/jdelegate" --dry-run --harness claude --cwd "$REPO" --name build-arm "implement feature Y" 2>&1 || true)
+  node "$ROOT/bin/jdelegate" --dry-run --harness claude --cwd "$REPO" --name build-arm "implement feature Y" 2>&1)
+RC_JD=$?
+set -e
+[ "$RC_JD" -eq 0 ] || { echo "FAIL: jdelegate dry-run failed (rc=$RC_JD): $OUT_JD"; exit 1; }
 echo "$OUT_JD" | grep -q "prqueue_arm_automerge" || { echo "FAIL: jdelegate run.sh missing prqueue_arm_automerge: $OUT_JD"; exit 1; }
 
 echo "PASS: automerge_test.sh"

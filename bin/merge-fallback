@@ -26,14 +26,18 @@ dur2s() {
   u="${d#"$n"}"
   [[ "$n" =~ ^[0-9]+$ ]] || { echo -1; return; }
   case "$u" in
-    ""|s) echo "$n" ;;
-    m) echo $((n * 60)) ;;
-    h) echo $((n * 3600)) ;;
-    d) echo $((n * 86400)) ;;
+    ""|s) echo $((10#$n)) ;;
+    m) echo $((10#$n * 60)) ;;
+    h) echo $((10#$n * 3600)) ;;
+    d) echo $((10#$n * 86400)) ;;
   esac
 }
 
 MAX_S=$(dur2s "${GATE_MERGE_MAX:-90m}")
+if [ "$MAX_S" -le 0 ]; then
+  echo "merge-fallback: invalid GATE_MERGE_MAX '${GATE_MERGE_MAX:-90m}'" >&2
+  exit 2
+fi
 TO_S=$(dur2s "$TIMEOUT")
 if [ "$TO_S" -le 0 ]; then
   echo "merge-fallback: invalid timeout '$TIMEOUT' (expected positive integer with s/m/h/d)" >&2
