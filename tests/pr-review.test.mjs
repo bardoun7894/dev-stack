@@ -54,7 +54,9 @@ else if (cmd === "jev") {
 else if (cmd === "claude") {
   if (sc.claudeFail) { process.stderr.write("boom"); process.exit(1); }
   const role = stdin.startsWith("You are a security filter") ? "guard" : stdin.startsWith("You are a merge judge") ? "judge"
-    : stdin.startsWith("You are fixing a pull request") ? "fix" : "review";
+    : stdin.startsWith("You are fixing a pull request") ? "fix"
+    : stdin.startsWith("You are describing a pull request") ? "describe"
+    : stdin.startsWith("You are answering a question about a pull request") ? "ask" : "review";
   if (role === "review" && sc.reviewSleep) await new Promise((r) => setTimeout(r, sc.reviewSleep * 1000));
   if (role === "fix" && sc.fixSleep) await new Promise((r) => setTimeout(r, sc.fixSleep * 1000));
   if (role === "fix" && sc.fixFail) { process.stderr.write("fixer died"); process.exit(1); }
@@ -62,7 +64,9 @@ else if (cmd === "claude") {
   let partText;
   for (const [k, v] of Object.entries(sc.partOut ?? {})) if (stdin.includes("(part " + k + "/")) partText = v;
   if (role === "review" && partText !== undefined) { out(JSON.stringify({ type: "result", result: partText, total_cost_usd: 0.001, usage: { input_tokens: 1, output_tokens: 1 } })); process.exit(0); }
-  const special = role === "guard" ? sc.haikuGuard : role === "judge" ? sc.haikuJudge : role === "fix" ? (sc.fixOut ?? "Fixed.") : undefined;
+  const special = role === "guard" ? sc.haikuGuard : role === "judge" ? sc.haikuJudge : role === "fix" ? (sc.fixOut ?? "Fixed.")
+    : role === "describe" ? (sc.describeOut ?? "**What changed**: updated src/a.js\\n**Why**: fix bug\\n**Risk**: low\\n**Files**: src/a.js")
+    : role === "ask" ? (sc.askOut ?? "It updates src/a.js to fix the bug.") : undefined;
   if (special !== undefined) out(JSON.stringify({ type: "result", result: typeof special === "string" ? special : JSON.stringify(special), total_cost_usd: 0.001, usage: { input_tokens: 1, output_tokens: 1 } }));
   else if (sc.claudeRaw !== undefined) out(sc.claudeRaw);
   else out(JSON.stringify({ type: "result", result: sc.claudeOut ?? "No blocking issues", total_cost_usd: sc.claudeCost ?? 0.0123, usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 30, output_tokens: 50 } }));
@@ -137,7 +141,7 @@ function run(argv, scenario, extraEnv = {}) {
 }
 
 const pr = (over = {}) => ({
-  headRefOid: SHA, title: "t", body: "b", isDraft: false, comments: [], reviews: [],
+  headRefOid: SHA, title: "t", body: "Default PR description with enough characters to skip auto-describe.", isDraft: false, comments: [], reviews: [],
   files: [{ path: "src/a.js", additions: 5, deletions: 5 }], ...over,
 });
 
@@ -1293,3 +1297,53 @@ test("P3: fix-pushed, then the next sweep reviews the new head and queues auto-m
   for (const f of ["--auto", "--squash", "--match-head-commit"]) assert.ok(m[0].args.includes(f), f);
   assert.equal(m[0].args[m[0].args.indexOf("--match-head-commit") + 1], NEW);
 });
+
+// ---- Stuck second reviewer retry, decision log dedup, secondReview stderr, describe, /ask, inline suggestions ----
+test("stuck-unavailable second review retries only secondReview on next sweep, updates comment, and merges (caps at max retries)", () => {
+  const { env } = shared3();
+  // Sweep 1: all second reviewers exhausted -> unavailable comment posted, no merge.
+  const s1 = go({ files: { "exhausted.json": { cliproxy: future, commandcode: future, "opencode-go": future } }, bFail: ["cliproxy/claude-opus-5-5:xhigh"] }, [], env);
+  assert.equal(merges(s1).length, 0);
+  assert.equal(s1.decisions[0].reason, "no-second-reviewer");
+  const unavailBody = s1.posts[0].bodyFile;
+  assert.match(unavailBody, /\*\*Second review \(unavailable\)\*\*/);
+
+  // Sweep 2: quota restored -> re-runs only secondReview (no new Haiku review call), updates comment, and merges.
+  const s2 = run(["o/r", "1"], { pr: pr({ comments: [{ body: unavailBody }] }), prMerge: green() }, env);
+  const reviewClaudes = s2.claudes.filter((c) => c.stdin.startsWith("You are reviewing"));
+  assert.equal(reviewClaudes.length, 0, "Haiku review is not re-run");
+  assert.equal(piCalls(s2).length, 1, "second reviewer is retried");
+  assert.equal(merges(s2).length, 1, "PR merges after second review succeeds");
+  assert.equal(s2.decisions.at(-1).action, "merged");
+  assert.equal(s2.decisions.at(-1).b_model, "cliproxy/claude-opus-5-5:xhigh");
+
+  // Also verify max retries cap + stderr logging on model failure:
+  const { env: env2 } = shared3();
+  const failSc = {
+    pr: pr({ comments: [{ body: unavailBody }] }), prMerge: green(),
+    bFail: ["cliproxy/claude-opus-5-5:xhigh", "commandcode/google/gemini-4-argon", "opencode-go/grok-4.7", "commandcode/deepseek/deepseek-v4.1-flash", "opencode-go/deepseek-v4.1-flash", "opencode-go/glm-5.3-flash"],
+  };
+  const r1 = run(["o/r", "1"], failSc, { ...env2, PR_REVIEW_B_RETRIES: "2" });
+  assert.match(r1.stderr, /cliproxy\/claude-opus-5-5:xhigh.*quota/);
+  assert.ok(piCalls(r1).length > 0);
+  const r2 = run(["o/r", "1"], failSc, { ...env2, PR_REVIEW_B_RETRIES: "2" });
+  assert.ok(piCalls(r2).length > 0);
+  const r3 = run(["o/r", "1"], failSc, { ...env2, PR_REVIEW_B_RETRIES: "2" });
+  assert.equal(piCalls(r3).length, 0, "stops retrying after max retries per sha");
+});
+
+test("no duplicate decision log lines when repo#pr@sha+reason is unchanged across sweeps", () => {
+  const { env } = shared3();
+  const seenPass = `**Haiku 5.5 review**\n\nok\nVERDICT: PASS\n\n**Second review (cliproxy/claude-opus-5-5:xhigh)**\n\nok\nVERDICT: PASS\n\n<!-- haiku-review sha=${SHA} -->`;
+  const pending = green({ statusCheckRollup: [{ __typename: "CheckRun", status: "IN_PROGRESS", conclusion: "" }] });
+  const a = run(["o/r", "1"], { pr: pr({ comments: [{ body: seenPass }] }), prMerge: pending }, env);
+  assert.equal(a.decisions.length, 1);
+  assert.equal(a.decisions[0].reason, "checks-not-green");
+  const b = run(["o/r", "1"], { pr: pr({ comments: [{ body: seenPass }] }), prMerge: pending }, env);
+  assert.equal(b.decisions.length, 1, "identical repo#pr@sha+reason is not appended again");
+  const c = run(["o/r", "1"], { pr: pr({ comments: [{ body: seenPass }] }), prMerge: green() }, env);
+  assert.equal(c.decisions.length, 2, "new decision logged once reason/action changes");
+  assert.equal(c.decisions[1].action, "merged");
+});
+
+

@@ -62,6 +62,10 @@ const FIX_FILE = join(STATE_DIR, "fix-attempts.json");
 const GUARD_CACHE_FILE = join(STATE_DIR, "guard-cache.json");
 const EXHAUSTED_STATE_FILE = join(STATE_DIR, "exhausted-notified.json");
 const REVIEW_FAIL_FILE = join(STATE_DIR, "review-failures.json");
+const SECOND_RETRY_FILE = join(STATE_DIR, "second-review-retries.json");
+const LAST_DECISION_FILE = join(STATE_DIR, "last-decisions.json");
+const MAX_B_RETRIES = Number(process.env.PR_REVIEW_B_RETRIES) || 3;
+const B_BACKOFF_MS = process.env.PR_REVIEW_B_BACKOFF_MS !== undefined ? Number(process.env.PR_REVIEW_B_BACKOFF_MS) : (RUNNER ? 0 : 5 * 60 * 1000);
 const WORK_DIR = process.env.PR_REVIEW_WORK || join(STATE_DIR, "work");
 // Owner 2026-10-22: no OpenAI. Second reviewer = Opus 5.5 xhigh, then Gemini 4 Argon, Grok 4.7, then cheap non-OpenAI fallbacks.
 const B_CHAIN = [
@@ -325,7 +329,11 @@ function secondReview(prompt) {
         const raw = exec(tool, args, { input: "", cwd: dir, timeout: B_TIMEOUT_MS });
         const r = tool === "pi" ? parsePi(raw) : { text: raw.trim(), usd: null, tokens: null };
         if (r.text) return { model, out: r.text, usd: r.usd, tokens: r.tokens };
-      } catch { /* try the next model */ }
+        console.error(`pr-review: second-review ${tool} ${model} failed: empty output`);
+      } catch (e) {
+        const why = String(e.output ?? e.message ?? e).trim().replace(/\s+/g, " ").slice(0, 200);
+        console.error(`pr-review: second-review ${tool} ${model} failed (exit ${e.status ?? "err"}): ${why}`);
+      }
     }
     return null;
   } finally {
@@ -339,7 +347,7 @@ function parseSections(body) {
   const a = bi >= 0 ? body.slice(0, bi) : body;
   const b = bi >= 0 ? body.slice(bi) : "";
   const model = b.match(/^\*\*Second review \(([^)\n]+)\)\*\*/)?.[1];
-  return { aText: a, bText: b, bModel: model && model !== "unavailable" ? model : null, truncated: /Diff truncated|Too large for automatic review|Too large to review even in parts/.test(a) };
+  return { aText: a, bText: b, bModel: model && model !== "unavailable" ? model : null, bUnavailable: model === "unavailable", truncated: /Diff truncated|Too large for automatic review|Too large to review even in parts/.test(a) };
 }
 
 const DEPLOY_RE = /deploy|release|production|prod\b/i;
@@ -563,10 +571,28 @@ function worldTrack(kind, repo, n, decision) {
   } catch { /* the world feed never affects a review */ }
 }
 
+function decisionSig(r) {
+  return `${r.sha}|${r.action ?? ""}|${r.reason ?? ""}|${r.b_model ?? ""}|${r.fix?.status ?? ""}|${r.fix?.reason ?? ""}`;
+}
 function logDecision(rec) {
   try {
+    const key = `${rec.repo}#${rec.pr}`;
+    const sig = decisionSig(rec);
+    const state = readJson(LAST_DECISION_FILE) ?? {};
+    if (state[key] === undefined && existsSync(LOG_FILE)) {
+      try {
+        const lines = readFileSync(LOG_FILE, "utf8").trim().split("\n").filter(Boolean);
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const prev = JSON.parse(lines[i]);
+          if (`${prev.repo}#${prev.pr}` === key) { state[key] = decisionSig(prev); break; }
+        }
+      } catch { /* ignore */ }
+    }
+    if (state[key] === sig) return;
     mkdirSync(dirname(LOG_FILE), { recursive: true });
     appendFileSync(LOG_FILE, `${JSON.stringify(rec)}\n`);
+    state[key] = sig;
+    writeJsonFile(LAST_DECISION_FILE, state);
   } catch (e) { console.error(`pr-review: decision log: ${e.message}`); }
 }
 
@@ -663,6 +689,24 @@ function noteReviewFailure(repo, n, sha) {
   writeJsonFile(REVIEW_FAIL_FILE, state);
   return count;
 }
+function bRetryState(repo, n, sha) {
+  const e = (readJson(SECOND_RETRY_FILE) ?? {})[`${repo}#${n}`];
+  return e && e.sha === sha ? e : { sha, count: 0, nextAt: null };
+}
+function canRetrySecond(repo, n, sha) {
+  const e = bRetryState(repo, n, sha);
+  if (e.count >= MAX_B_RETRIES) return false;
+  if (e.nextAt && Date.now() < Date.parse(e.nextAt)) return false;
+  return true;
+}
+function noteSecondRetry(repo, n, sha) {
+  const state = readJson(SECOND_RETRY_FILE) ?? {};
+  const count = bRetryState(repo, n, sha).count + 1;
+  const delay = B_BACKOFF_MS * (2 ** (count - 1));
+  state[`${repo}#${n}`] = { sha, count, at: new Date().toISOString(), nextAt: new Date(Date.now() + delay).toISOString() };
+  writeJsonFile(SECOND_RETRY_FILE, state);
+  return count;
+}
 let reviewingSha = null;
 
 // Returns the action; throws on error.
@@ -673,24 +717,70 @@ function reviewPr(repo, n, dry, merge = true) {
   const info = { sha7: sha.slice(0, 7), sha };
   if (pr.isDraft) return { ...info, action: "skipped-draft" };
   const marker = `<!-- haiku-review sha=${sha} -->`;
-  const bodies = [...(pr.comments ?? []), ...(pr.reviews ?? [])].map((x) => x.body ?? "").filter((b) => b.includes(marker));
-  // A real review for this sha wins; old truncated / 300-file notices alone get one fresh review.
-  const seen = bodies.filter((b) => !RETRIGGER_RE.test(b)).pop();
+  const allEntries = [...(pr.comments ?? []), ...(pr.reviews ?? [])].filter((x) => (x.body ?? "").includes(marker) && !RETRIGGER_RE.test(x.body ?? ""));
+  // A real review for this sha wins (preferring one with a resolved second reviewer); old truncated / 300-file notices alone get one fresh review.
+  const seenEntry = allEntries.filter((x) => parseSections(x.body ?? "").bModel).pop() ?? allEntries.pop();
+  const seen = seenEntry?.body;
   const apiFiles = prFiles(repo, n);
   if (seen) {
-    const sec = parseSections(seen);
-    const verdict = parseVerdict(sec.aText), bVerdict = sec.bText ? parseVerdict(sec.bText) : "BLOCK";
+    let sec = parseSections(seen);
+    let got = null, bUsd = null, bTokens = null, retriedParts = 0;
+    const add = (x, y) => (y == null ? x : (x ?? 0) + y);
+    if (sec.bUnavailable && !sec.truncated && canRetrySecond(repo, n, sha)) {
+      noteSecondRetry(repo, n, sha);
+      try { got = fetchDiff(repo, n, sha, pr.baseRefName); } catch (e) { console.error(`pr-review: ${repo}#${n}: diff: ${e.message}`); }
+      if (got?.diff?.trim()) {
+        const parts = splitDiff(got.diff, MAX_DIFF);
+        const N = parts.length;
+        const head = `PR title: ${pr.title}\n\nPR description:\n${pr.body ?? ""}\n\n`;
+        const bOuts = [], bModels = [];
+        let bMissing = false;
+        for (let i = 0; i < N; i++) {
+          const intro = N > 1 ? `This is part ${i + 1} of ${N} of one pull request; the other parts are reviewed separately. Review only this part.\n\n` : "";
+          const prompt = `${PROMPT}${intro}${head}Diff${N > 1 ? ` (part ${i + 1}/${N})` : ""}:\n${parts[i]}\n`;
+          const second = secondReview(prompt);
+          if (!second) { bMissing = true; break; }
+          bOuts.push(second.out);
+          if (!bModels.includes(second.model)) bModels.push(second.model);
+          bUsd = add(bUsd, second.usd); bTokens = add(bTokens, second.tokens);
+        }
+        if (!bMissing && bOuts.length) {
+          const bText = N > 1 ? joinParts(bOuts, N) : bOuts[0];
+          const bModel = bModels.join(", ");
+          const updatedBody = `${sec.aText.trimEnd()}\n\n**Second review (${bModel})**\n\n${bText}\n\n${marker}`;
+          if (dry) process.stdout.write(`${updatedBody}\n`);
+          else {
+            const cid = seenEntry?.url?.match(/issuecomment-(\d+)$/)?.[1];
+            if (cid) {
+              const dir = mkdtempSync(join(tmpdir(), "pr-review-"));
+              try {
+                const f = join(dir, "body.md");
+                writeFileSync(f, updatedBody);
+                gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${cid}`, "-F", `body=@${f}`]);
+              } finally { rmSync(dir, { recursive: true, force: true }); }
+            } else {
+              postComment(repo, n, updatedBody);
+            }
+          }
+          sec = { ...sec, bText: `**Second review (${bModel})**\n\n${bText}\n\n${marker}`, bModel, bUnavailable: false };
+          retriedParts = N;
+        }
+      }
+    }
+    const verdict = parseVerdict(sec.aText), bVerdict = sec.bText && !sec.bUnavailable ? parseVerdict(sec.bText) : "BLOCK";
     // The guard only matters when the PR could merge or could get its fix round; it is cached per sha either way.
     const need = !sec.truncated && ((verdict === "PASS" && bVerdict === "PASS") || (merge && !dry && fixRound(repo, n, sha, pr.comments).ok));
     let injection = { max: 0, kind: "not-needed", engine: null };
     let files = apiFiles;
     if (need) {
-      let got = { diff: "", files: null };
-      try { got = fetchDiff(repo, n, sha, pr.baseRefName); } catch (e) { console.error(`pr-review: ${repo}#${n}: diff: ${e.message}`); }
+      if (!got) {
+        got = { diff: "", files: null };
+        try { got = fetchDiff(repo, n, sha, pr.baseRefName); } catch (e) { console.error(`pr-review: ${repo}#${n}: diff: ${e.message}`); }
+      }
       files = unionFiles(apiFiles, got.files);
       injection = got.diff ? guardCached(repo, n, sha, pr.title, pr.body, got.diff) : { max: null, kind: "no-diff", engine: null };
     }
-    return { ...info, action: "skipped-seen", comments: pr.comments, files, ...sec, verdict, bVerdict, injection, parts: 0 };
+    return { ...info, action: retriedParts ? "reviewed" : "skipped-seen", comments: pr.comments, files, ...sec, verdict, bVerdict, bUsd, bTokens, injection, parts: retriedParts };
   }
   if (apiFiles.length && apiFiles.every((f) => isDocs(f.path))) return { ...info, action: "skipped-docs" };
   // A head whose review failed MAX_TIMEOUT_RETRIES + 1 times is given up on (the exhaustion notice went out then).
