@@ -1384,7 +1384,7 @@ test("inline suggestions: P0/P1 findings on diff lines post suggestion review co
   const diffLines = Array.from({ length: 15 }, (_, i) => `+const v${i + 1} = ${i + 1};`).join("\n");
   const diff = `diff --git a/src/a.js b/src/a.js\n--- a/src/a.js\n+++ b/src/a.js\n@@ -1,0 +1,15 @@\n${diffLines}\ndiff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n--- a/.github/workflows/ci.yml\n+++ b/.github/workflows/ci.yml\n@@ -1,0 +1,2 @@\n+run: echo 1\n`;
   const findingsList = [
-    ...Array.from({ length: 12 }, (_, i) => `P1 src/a.js:${i + 1} use let for `const v${i + 1}`\n\`\`\`suggestion\nlet v${i + 1} = ${i + 1};\n\`\`\``),
+    ...Array.from({ length: 12 }, (_, i) => `P1 src/a.js:${i + 1} use let for \`const v${i + 1}\`\n\`\`\`suggestion\nlet v${i + 1} = ${i + 1};\n\`\`\``),
     "P0 .github/workflows/ci.yml:1 risky change `run: echo 1`\n```suggestion\nrun: echo 2\n```",
     "P2 src/a.js:14 minor style `const v14`\n```suggestion\nconst v14 = 0;\n```",
     "P1 src/a.js:999 line not in diff `const`\n```suggestion\nconst nope = 0;\n```",
@@ -1468,7 +1468,7 @@ test("F4: a suggestion marker already present in inline pull comments (trusted a
 
 test("F4: suggestions are posted after a successful second-review retry", () => {
   const { env } = shared3();
-  const first = `**Haiku 5.5 review**\n\nP1 src/a.js:1 use let for `const a`\n\`\`\`suggestion\nlet a = 1;\n\`\`\`\nVERDICT: BLOCK\n\n**Second review (unavailable)**\n\nsecond reviewer unavailable (no quota)\n\n<!-- haiku-review sha=${SHA} -->`;
+  const first = `**Haiku 5.5 review**\n\nP1 src/a.js:1 use let for \`const a\`\n\`\`\`suggestion\nlet a = 1;\n\`\`\`\nVERDICT: BLOCK\n\n**Second review (unavailable)**\n\nsecond reviewer unavailable (no quota)\n\n<!-- haiku-review sha=${SHA} -->`;
   const r = run(["o/r", "1"], { diff: SUG_DIFF, pr: pr({ files: [{ path: "src/a.js", additions: 1, deletions: 0 }], comments: [{ body: first, url: "https://x/issuecomment-9" }] }), prMerge: green() }, env);
   assert.equal(sugPosts(r).length, 1);
 });
