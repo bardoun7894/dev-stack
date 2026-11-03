@@ -61,12 +61,12 @@ def build_block():
 
 def shrink_longest_section(block):
     body, tail = block.rsplit(f"\n{END}", 1)
-    parts = re.split(r"(?m)^(?=## )", body)
+    parts = re.split(r"(?m)^(?=##+ )", body)
     if len(parts) <= 1:
         return block
     idx = max(range(1, len(parts)), key=lambda i: len(parts[i]))
     heading = parts[idx].splitlines()[0]
-    name = heading[3:].strip()
+    name = re.sub(r"^#+\s*", "", heading).strip()
     parts[idx] = f"{heading}\n\nfull text: ~/.claude/CLAUDE.md, section {name}\n\n"
     return "".join(parts).rstrip("\n") + f"\n{END}" + tail
 
