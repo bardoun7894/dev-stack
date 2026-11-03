@@ -5,7 +5,7 @@
 **Merged**: TBD  
 **Created**: 2026-10-30  
 **Status**: Draft (revised 2026-10-30 after owner answers, GitHub-first)  
-**Input**: The agent software factory (jdelegate workers -> PR review bot -> merge -> deploy via tokyo-deploy) piles up because work enters faster than the test gate finishes it. Owner update 2026-10-30: GitHub Pro, mediatgb auto-merge enabled, sharded GitHub Actions CI with one required check `ci-ok` in progress, branch protection on main (require ci-ok, admins exempt) to follow once CI is green. Spec only, no code in this PR.
+**Input**: The agent software factory (jdelegate workers -> PR review bot -> merge -> deploy via tokyo-deploy) piles up because work enters faster than the test gate finishes it. Owner update 2026-10-30: GitHub Pro, mediatgb auto-merge enabled, sharded GitHub Actions CI with one required check `ci-ok` in progress, branch protection on main (require ci-ok, admins exempt) to follow once CI is green. Includes spec and Phase 1 implementation (WIP limit, prqueue, auto-merge arming and merge-fallback).
 
 ## User Scenarios & Testing
 

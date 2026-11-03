@@ -10,7 +10,7 @@ PRQ="$ROOT/lib/prqueue.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-REPO="$TMP/mediatgb"
+REPO="$TMP/mediatgb-wt-feature"
 mkdir -p "$REPO"
 git -C "$REPO" init -q
 git -C "$REPO" remote add github https://github.com/bardoun7894/mediatgb.git
@@ -64,19 +64,18 @@ JSON
 [ -f "$PRQ" ] || { echo "FAIL: $PRQ missing"; exit 1; }
 # shellcheck disable=SC1090
 source "$PRQ"
-CNT=$(PR_STATE_FILE="$PR_STATE_FILE" PATH="$BIN:$PATH" FACTORY_CONFIG="$FACTORY_ENV" prqueue_waiting_count "mediatgb")
+CNT=$(PR_STATE_FILE="$PR_STATE_FILE" PATH="$BIN:$PATH" FACTORY_CONFIG="$FACTORY_ENV" prqueue_waiting_count "$REPO")
 [ "$CNT" = "3" ] || { echo "FAIL: expected waiting count 3, got $CNT"; exit 1; }
 
 set +e
 OUT=$(run_jd --name build-w1)
 RC=$?
+OUT_REV=$(run_jd --name review-w1 --role reviewer)
+RC_REV=$?
 set -e
 [ "$RC" -ne 0 ] || { echo "FAIL: expected jdelegate to refuse at N=3, but exited 0"; exit 1; }
 echo "$OUT" | grep -qE "3.*auto-merge|waiting on auto-merge" || { echo "FAIL: refusal message did not name the count: $OUT"; exit 1; }
-
-# Reviewer is exempt even at N=3
-OUT_REV=$(run_jd --name review-w1 --role reviewer)
-echo "$OUT_REV" | grep -q "dry-run" || { echo "FAIL: reviewer should not be refused by WIP limit: $OUT_REV"; exit 1; }
+[ "$RC_REV" -eq 0 ] && echo "$OUT_REV" | grep -q "dry-run" || { echo "FAIL: reviewer should not be refused by WIP limit (rc=$RC_REV): $OUT_REV"; exit 1; }
 
 # 2. Drop to 2 PRs waiting on auto-merge (one has autoMergeRequest: null) -> accepted
 cat <<'JSON' > "$PR_STATE_FILE"
@@ -87,10 +86,13 @@ cat <<'JSON' > "$PR_STATE_FILE"
 ]
 JSON
 
-CNT2=$(PR_STATE_FILE="$PR_STATE_FILE" PATH="$BIN:$PATH" FACTORY_CONFIG="$FACTORY_ENV" prqueue_waiting_count "mediatgb")
+CNT2=$(PR_STATE_FILE="$PR_STATE_FILE" PATH="$BIN:$PATH" FACTORY_CONFIG="$FACTORY_ENV" prqueue_waiting_count "$REPO")
 [ "$CNT2" = "2" ] || { echo "FAIL: expected waiting count 2, got $CNT2"; exit 1; }
 
+set +e
 OUT2=$(run_jd --name build-w2)
-echo "$OUT2" | grep -q "dry-run" || { echo "FAIL: expected jdelegate to accept at count=2: $OUT2"; exit 1; }
+RC2=$?
+set -e
+[ "$RC2" -eq 0 ] && echo "$OUT2" | grep -q "dry-run" || { echo "FAIL: expected jdelegate to accept at count=2 (rc=$RC2): $OUT2"; exit 1; }
 
 echo "PASS: wip_limit_test.sh"

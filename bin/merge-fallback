@@ -24,8 +24,7 @@ dur2s() {
   local d="$1" n u
   n="${d%[smhd]}"
   u="${d#"$n"}"
-  [[ "$n" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo -1; return; }
-  n="${n%.*}"
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -1; return; }
   case "$u" in
     ""|s) echo "$n" ;;
     m) echo $((n * 60)) ;;
@@ -36,7 +35,11 @@ dur2s() {
 
 MAX_S=$(dur2s "${GATE_MERGE_MAX:-90m}")
 TO_S=$(dur2s "$TIMEOUT")
-if [ "$TO_S" -le 0 ] || [ "$TO_S" -gt "$MAX_S" ]; then
+if [ "$TO_S" -le 0 ]; then
+  echo "merge-fallback: invalid timeout '$TIMEOUT' (expected positive integer with s/m/h/d)" >&2
+  exit 2
+fi
+if [ "$TO_S" -gt "$MAX_S" ]; then
   echo "merge-fallback: timeout $TIMEOUT exceeds ${GATE_MERGE_MAX:-90m} cap for ${PROJECT}-merge" >&2
   exit 2
 fi

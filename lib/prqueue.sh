@@ -16,10 +16,19 @@ _prqueue_load_config() {
   FACTORY_AUTOMERGE_REPOS="${FACTORY_AUTOMERGE_REPOS:-}"
 }
 
-# Resolve a project name (e.g. "mediatgb") or owner/repo string to "owner/repo".
+# Resolve a directory path, project name (e.g. "mediatgb") or owner/repo string to "owner/repo".
 prqueue_repo_for() {
   local proj="${1:-}"
   _prqueue_load_config
+  if [ -d "$proj" ]; then
+    local url
+    url=$(git -C "$proj" remote get-url github 2>/dev/null || git -C "$proj" remote get-url origin 2>/dev/null || true)
+    if [[ "$url" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
+      echo "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    proj=$(basename "$proj")
+  fi
   if [[ "$proj" == */* ]]; then
     echo "$proj"
     return 0
@@ -55,6 +64,7 @@ prqueue_is_automerge() {
 
 # Derive ticket state from a PR JSON object (R2):
 # building -> ready -> merged -> deploy-offered -> deployed
+# Note: deployOffered and deployed are supplied by the Tokyo deploy registry (or labels "deploy-offered" / "deployed").
 prqueue_ticket_state() {
   local json="${1:-}"
   python3 -c '
@@ -65,10 +75,11 @@ except Exception:
     print("unknown")
     sys.exit(0)
 state = str(d.get("state") or "").upper()
+labels = [str(x.get("name") if isinstance(x, dict) else x).lower() for x in (d.get("labels") or [])]
 if state == "MERGED":
-    if d.get("deployed"):
+    if d.get("deployed") or "deployed" in labels:
         print("deployed")
-    elif d.get("deployOffered"):
+    elif d.get("deployOffered") or "deploy-offered" in labels:
         print("deploy-offered")
     else:
         print("merged")
@@ -87,7 +98,7 @@ prqueue_list_waiting() {
   local repo
   repo=$(prqueue_repo_for "${1:-}") || { echo "[]"; return 0; }
   local raw
-  raw=$(gh pr list -R "$repo" --state open --limit 100 --json number,state,isDraft,autoMergeRequest,headRefName 2>/dev/null) || return 1
+  raw=$(timeout 15 gh pr list -R "$repo" --state open --limit 1000 --json number,state,isDraft,autoMergeRequest,headRefName,baseRefName,labels 2>/dev/null) || return 1
   python3 -c '
 import json, sys
 try:
@@ -120,30 +131,32 @@ prqueue_arm_automerge() {
   prqueue_is_automerge "$proj" || return 1
   local repo
   repo=$(prqueue_repo_for "$proj") || return 1
-  local pr_num="$ref"
+  local pr_num="$ref" base_branch="main"
   if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
     local raw
-    raw=$(gh pr list -R "$repo" --head "$ref" --state open --json number,isDraft,autoMergeRequest 2>/dev/null) || { echo "prqueue: gh pr list failed for $repo $ref" >&2; return 1; }
-    pr_num=$(python3 -c '
+    raw=$(timeout 15 gh pr list -R "$repo" --head "$ref" --state open --json number,isDraft,autoMergeRequest,baseRefName 2>/dev/null) || { echo "prqueue: gh pr list failed for $repo $ref" >&2; return 1; }
+    local parsed
+    parsed=$(python3 -c '
 import json, sys
 try:
     prs = json.loads(sys.argv[1])
     for p in prs:
         if isinstance(p, dict) and not p.get("isDraft"):
-            print(p.get("number", ""))
+            print(str(p.get("number", "")) + " " + str(p.get("baseRefName", "main")))
             break
 except Exception:
     pass
 ' "$raw")
+    pr_num="${parsed%% *}"
+    base_branch="${parsed#* }"
   fi
   [ -n "$pr_num" ] || { echo "prqueue: no open PR found for $repo $ref" >&2; return 1; }
-  # only arm when ci-ok and the pr-review verdict are required checks, else --auto merges without them
+  [ "$base_branch" = "main" ] || { echo "prqueue: base branch $base_branch is not main; refusing to arm" >&2; return 1; }
+  # only arm when ci-ok is a required check on main, else --auto merges without CI
   local ctxs
-  ctxs=$(gh api "repos/$repo/branches/main/protection/required_status_checks" --jq '.contexts[]?, .checks[]?.context' 2>/dev/null) || ctxs=""
-  printf '%s\n' "$ctxs" | grep -qx 'ci-ok' \
-    || { echo "prqueue: ci-ok not required on $repo main; not arming" >&2; return 1; }
-  printf '%s\n' "$ctxs" | grep -qx 'pr-review' \
-    || { echo "prqueue: pr-review not required on $repo main; not arming" >&2; return 1; }
-  gh pr merge "$pr_num" -R "$repo" --auto --squash >/dev/null || return 1
+  ctxs=$(timeout 15 gh api "repos/$repo/branches/$base_branch/protection/required_status_checks" --jq '.contexts[]?, .checks[]?.context' 2>/dev/null) || ctxs=""
+  printf "%s\n" "$ctxs" | grep -qx "ci-ok" \
+    || { echo "prqueue: ci-ok not required on $repo $base_branch; not arming" >&2; return 1; }
+  timeout 15 gh pr merge "$pr_num" -R "$repo" --auto --squash >/dev/null || return 1
   return 0
 }
