@@ -137,9 +137,13 @@ except Exception:
 ' "$raw")
   fi
   [ -n "$pr_num" ] || { echo "prqueue: no open PR found for $repo $ref" >&2; return 1; }
-  # only arm when ci-ok is a required check, else --auto merges immediately
-  gh api "repos/$repo/branches/main/protection/required_status_checks" --jq '.contexts[]?, .checks[]?.context' 2>/dev/null | grep -qx 'ci-ok' \
+  # only arm when ci-ok and the pr-review verdict are required checks, else --auto merges without them
+  local ctxs
+  ctxs=$(gh api "repos/$repo/branches/main/protection/required_status_checks" --jq '.contexts[]?, .checks[]?.context' 2>/dev/null) || ctxs=""
+  printf '%s\n' "$ctxs" | grep -qx 'ci-ok' \
     || { echo "prqueue: ci-ok not required on $repo main; not arming" >&2; return 1; }
+  printf '%s\n' "$ctxs" | grep -qx 'pr-review' \
+    || { echo "prqueue: pr-review not required on $repo main; not arming" >&2; return 1; }
   gh pr merge "$pr_num" -R "$repo" --auto --squash >/dev/null || return 1
   return 0
 }

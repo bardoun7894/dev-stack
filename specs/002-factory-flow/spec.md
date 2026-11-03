@@ -116,7 +116,7 @@ User-flow matrix. Each row is tested on a fixture repo with CI unless noted.
 ## Success Criteria
 
 - **SC-001**: Median time from PR open to merge < 1h with green CI at default N.
-- **SC-002**: Live build workers per project never exceed the jdelegate limit.
+- **SC-002**: Open PRs waiting on auto-merge per project never exceed the R1 limit N when a new build worker is started.
 - **SC-003**: Open PRs blocked by the review bot > 48h: 0 after the first sweep.
 - **SC-004**: Zero Tokyo deploy runs fail for user or host mismatch.
 - **SC-005**: Zero jdelegate gate-waits poll the wrong host.

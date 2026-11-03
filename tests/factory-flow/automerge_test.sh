@@ -41,6 +41,10 @@ GH_LOG="$TMP/gh.log"
 cat <<'STUB' > "$BIN/gh"
 #!/usr/bin/env bash
 echo "gh $*" >> "$GH_LOG"
+if [[ "$*" == *"api repos/"*"required_status_checks"* ]]; then
+  printf 'ci-ok\npr-review\n'
+  exit 0
+fi
 if [[ "$*" == *"pr view"* ]] || [[ "$*" == *"pr list"* ]]; then
   echo '[{"number":42,"state":"OPEN","isDraft":false,"autoMergeRequest":null,"headRefName":"feat-x"}]'
   exit 0
