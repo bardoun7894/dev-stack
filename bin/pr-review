@@ -326,7 +326,7 @@ function secondReview(prompt) {
         ? ["--mode", "json", "-p", "--no-extensions", "--no-context-files", "--no-skills", "--no-tools", "--no-session", "--model", model,
            `@${file}`, "Follow the instructions in the attached file. Reply with the review only."]
         // opencode: prompt via -f, never as argv (a big diff in argv fails with E2BIG).
-        : ["run", "-m", model, "-f", file, "Follow the instructions in the attached file. Reply with the review only."];
+        : ["run", "-m", model, "Follow the instructions in the attached file. Reply with the review only.", "-f", file];
       try {
         const raw = exec(tool, args, { input: "", cwd: dir, timeout: B_TIMEOUT_MS });
         const r = tool === "pi" ? parsePi(raw) : { text: raw.trim(), usd: null, tokens: null };
