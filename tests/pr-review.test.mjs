@@ -356,6 +356,22 @@ test("second reviewer: first model, pi invocation, one comment with both section
   assert.match(r.posts[0].bodyFile, /\*\*Haiku 5\.5 review\*\*[\s\S]*\*\*Second review \(cliproxy\/claude-opus-5-5:xhigh\)\*\*[\s\S]*<!-- haiku-review sha=/);
 });
 
+test("second reviewer: opencode gets the prompt via -f <file>, never as argv (big diff, no E2BIG)", () => {
+  // pi missing -> chain falls to opencode grok-4.7; the 110k-char diff would put the prompt over a single argv string.
+  const r = run(["o/r", "1"], { pr: pr(), prMerge: green(), claudeOut: PASS, noTools: ["pi"], diff: "x".repeat(110000) });
+  const oc = r.calls.filter((c) => c.cmd === "opencode" && !c.args.includes("--version"));
+  assert.equal(oc.length, 1);
+  const a = oc[0].args;
+  assert.equal(a[0], "run");
+  assert.equal(a[a.indexOf("-m") + 1], "opencode-go/grok-4.7");
+  const fi = a.indexOf("-f");
+  assert.ok(fi >= 0, "opencode call must pass -f <file>");
+  assert.match(a[fi + 1], /review-input\.md$/);
+  assert.ok(a.every((x) => x.length < 100000), "no single argv may carry the prompt");
+  assert.equal(r.posts.length, 1);
+  assert.match(r.posts[0].bodyFile, /\*\*Second review \(opencode-go\/grok-4\.7\)\*\*/);
+});
+
 test("second reviewer: skips exhausted provider and dead model, falls through to next", () => {
   const r = go({ files: { "exhausted.json": { cliproxy: future, commandcode: future, "opencode-go/grok-4.7": future }, "dead.json": { "opencode-go/deepseek-v4.1-flash": future } } });
   assert.deepEqual(piCalls(r).map((c) => c.cmd + ":" + c.args[c.args.indexOf(c.cmd === "pi" ? "--model" : "-m") + 1]), ["opencode:opencode-go/glm-5.3-flash"]);
