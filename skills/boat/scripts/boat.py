@@ -212,7 +212,15 @@ def cmd_ls(a):
 
 def cmd_new(a):
     sid = create_sandbox(a.size, a.ttl)
-    state = wait_ready(sid)
+    try:
+        state = wait_ready(sid)
+    except BaseException:
+        # A VM that never became ready is still billed until its TTL.
+        try:
+            delete_sandbox(sid, wait=False)
+        except Exception:
+            pass
+        raise
     out(a, {"id": sid, "state": state}, sid)
     return 0
 

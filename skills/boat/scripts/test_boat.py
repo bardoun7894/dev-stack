@@ -129,6 +129,18 @@ class TestRun(Base):
         self.assertIn(("DELETE", "/sandboxes/bx_1"), f.paths())
         self.assertNotIn(SENTINEL, e)
 
+    def test_new_deletes_when_never_ready(self):
+        class F(Fake):
+            def __call__(self, req, timeout):
+                if req.get_method() == "GET" and req.full_url.endswith("/sandboxes/bx_1"):
+                    self.calls.append(("GET", "/sandboxes/bx_1", None, {}))
+                    raise KeyboardInterrupt
+                return super().__call__(req, timeout)
+        f = F()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_main(f, ["new"])
+        self.assertIn(("DELETE", "/sandboxes/bx_1"), f.paths())
+
     def test_create_sends_ttl_and_idempotency(self):
         f = Fake()
         self.run_main(f, ["run", "--size", "small", "--", "true"])
