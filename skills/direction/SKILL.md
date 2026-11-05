@@ -24,13 +24,18 @@ Agents make building cheap, so every idea becomes a feature. Volume of work says
    The check match is a keyword heuristic over candidate files only: tests, CI workflows, lint/analyzer configs and hooks. Docs, `*.md`, `ai-knowledge-base/`, `okf/`, `reports/`, `specs/` and `node_modules/`/`vendor/` never count as a check.
 2. ONE judge pass over the `UNMAPPED` commits only (not the mapped ones). Read the commit subject and file list, and the spec titles. Label each: `in plan` (covered by a spec, just not referenced), `out of plan`, or `unclear`. Do not read whole diffs unless a label is truly unclear.
    Also open each HAS-CHECK file named in the non-negotiables table and confirm it actually enforces that rule. If it only mentions the keywords, report that rule as WEAK-CHECK, not HAS-CHECK.
-3. Scorecard:
+3. **Spec-to-code symbol & contract drift pass (EGM drift check)**:
+   For active `specs/*/` (and any folder `README.md` / `EGM.md` contracts with `Interface`/`Invariants` sections):
+   - Read the spec (`spec.md`, `plan.md`, `system-design.md`) and list specific routes, models/fields, invariants, and files promised.
+   - Verify the actual source files (like `/egm:egm-drift-report`): flag **Missing Features** (described in spec, absent in code), **Incomplete Models** (missing fields), **Logic Shortcuts** (hardcoded values or missing invariants like deletion guards on sold items), and **Architectural Divergence**. Report only discrepancies.
+4. Scorecard:
    - on-plan % = (mapped + `in plan`) / (total commits - housekeeping)
    - unmapped work: count of `out of plan` and `unclear`
+   - spec-to-code divergences: count of missing features / invariants / model fields found in step 3
    - NO-CHECK non-negotiables: list them
    - WEAK-CHECK non-negotiables: list them, with the file that only mentions the rule
-4. Actions, per `out of plan` item: keep and update the spec (name the spec and the line to add), or revert (name the commits). Per NO-CHECK rule: propose the cheapest enforcing check (test, lint rule, hook, CI step).
-5. Save the full report (script output + judgement + scorecard + actions) to `specs/_direction/<YYYY-MM-DD>.md` in the target repo.
+5. Actions, per `out of plan` item or spec-to-code divergence: keep and update the spec (name the spec and the line to add), or fix/revert code (name the file:line or commits). Per NO-CHECK rule: propose the cheapest enforcing check (test, lint rule, hook, CI step).
+6. Save the full report (script output + judgement + symbol/invariant drift + scorecard + actions) to `specs/_direction/<YYYY-MM-DD>.md` in the target repo.
 
 ## Rules
 

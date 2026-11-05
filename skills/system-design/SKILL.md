@@ -48,6 +48,7 @@ Unsure: FULL. Say which size you picked and why in the first line of the file.
 4. **One second opinion**, load-bearing decisions only (hosting, datastore, sync vs async, tenancy):
    `fusion --mode json -p '/opinion <question>' </dev/null`
    Run it once, not in a loop. Record the verdict under the affected D-code.
+   For high-risk or multi-service specs, optionally run a Goldfish Comprehension & Critic pass (`/egm:egm-review specs/NNN/system-design.md` or `egm-comprehension` subagent with `omitClaudeMd: true`): a zero-context reader paraphrases "What this proposes" and "How the existing system works, per this document" before flagging undefined terms or unstated assumptions.
 5. **Gate**: `bash ~/.claude/skills/system-design/scripts/check.sh specs/NNN/system-design.md --lite|--full`
    and walk `references/checklist.md`. Fix and re-run until exit 0.
 6. **HARD STOP.** Show the owner the D-codes (decisions, with the recommended option) and the Q-codes (open questions). Wait for explicit approval. Answers to Q-codes go back into the file as decisions. Do not start step 7 on silence.

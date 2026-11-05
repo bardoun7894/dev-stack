@@ -15,7 +15,8 @@ Run before the hard stop. One line per check.
 - [ ] Secrets location, tenant isolation, PII handling and rate limits stated.
 - [ ] Deploy script path, health check, rollback and Telegram/Tokyo alert present.
 - [ ] Each D-code has options, choice, why and reversible yes/no.
-- [ ] Load-bearing D-codes carry the one fusion /opinion verdict.
+- [ ] Load-bearing D-codes carry the one fusion /opinion verdict (and Goldfish paraphrase check on high-risk/multi-service designs).
+- [ ] Self-contained for a zero-context Goldfish reader: project-specific terms and components are defined inline or linked.
 - [ ] No product/UX design, no library list, no field-level schema (those live elsewhere).
 - [ ] Q-codes are answerable by the owner in one line each.
 - [ ] `scripts/check.sh` exits 0.

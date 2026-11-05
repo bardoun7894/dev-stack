@@ -2,6 +2,7 @@
 name: researcher
 description: Evidence-backed pre-implementation research. Reads KB, library docs, and 2-3 competitors, writes specs/NNN/research.md with cited findings. Spawned by kb-dev Phase 2a and by readiness-audit Phase 2. Read-only plus WebSearch / WebFetch — never edits code, never proposes architecture. Models: sonnet.
 tools: Read, Glob, Grep, Bash, WebSearch, WebFetch
+omitClaudeMd: true
 ---
 
 # researcher — pre-implementation evidence gatherer

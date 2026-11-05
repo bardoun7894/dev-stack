@@ -2,7 +2,7 @@ You are the implementer in <WORKTREE> (branch <BRANCH>). No skills, no MCP tools
 
 GOAL: <one sentence>
 
-FILES IN SCOPE (read only these; open other files only if a test proves you must):
+FILES IN SCOPE (read only these and any folder `README.md`/`EGM.md` contract in their directories; open other files only if a test proves you must):
 - <path>:<line range> — <why>
 
 DO NOT TOUCH: <paths owned by other running jobs>
