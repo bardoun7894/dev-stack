@@ -662,7 +662,8 @@ function workerScript(p, run, briefFile) {
   // Owner 2026-10-22: tiers.json kind_effort pins the claude effort per kind (review / frontend -> xhigh).
   const effortClaude = (typeof CONFIG.kind_effort?.[p.kind === "review_language" ? "review" : p.kind] === "string" ? CONFIG.kind_effort[p.kind === "review_language" ? "review" : p.kind].replace(/[^a-z]/g, "") : "") || { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   const sessionFlag = resumeSession ? `--resume ${q(resumeSession)}` : `--session-id ${q(currentSession)}`;
-  const effortCodex = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
+  const kindEffort = CONFIG.kind_effort?.[p.kind === "review_language" ? "review" : p.kind];
+  const effortCodex = (p.kind.startsWith("review") && ["low", "medium", "high"].includes(kindEffort) ? kindEffort : undefined) ?? { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   switch (p.harness) {
     case "claude":
       if (!isLean())
@@ -832,6 +833,7 @@ if (opt.role === "reviewer" && CONFIG.kinds?.review) {
   const arabic = d.kind === "language" || /[\u0600-\u06FF]/.test(opt.brief);
   d.kind = arabic && CONFIG.kinds?.review_language ? "review_language" : "review";
   if (opt.deep) d.tier = "T4";
+  if (["T0", "T1", "T2"].includes(d.tier)) d.tier = "T3";  // a reviewer is never a cheap-tier model
 }
 if (CONFIG.kinds?.test && !d.kind.startsWith("review") && isTestWork(opt.brief, opt.role)) d.kind = "test";
 const p = opt.model

@@ -1483,6 +1483,8 @@ test('RR a normal reviewer takes the first review.T3 model; --deep and T4 take r
   assert.match(rrRun('--print', ['--role', 'reviewer']).stdout, /claude · cliproxy\/claude-opus-5-5 .*review·T3/);
   assert.match(rrRun('--print', ['--role', 'reviewer', '--deep']).stdout, /codex · openai-codex\/gpt-5\.6-sol .*review·T4/);
   assert.match(rrRun('--print', ['--role', 'reviewer'], 'review the diff', { TIER_ANSWER: 'T4' }).stdout, /review·T4/);
+  // a trivial-looking review brief (Jev T1) still gets the T3 reviewer, never the cheap tier chain
+  assert.match(rrRun('--print', ['--role', 'reviewer'], 'review the diff', { TIER_ANSWER: 'T1' }).stdout, /claude · cliproxy\/claude-opus-5-5 .*review·T3/);
 });
 
 test('RR an Arabic brief (or kind language) for a reviewer routes to review_language', () => {
@@ -1513,6 +1515,7 @@ test('RR a codex reviewer runs in a git-archive export under the run dir: no .en
   assert.doesNotMatch(script, new RegExp(`codex exec[^\\n]*-C '${rr}'`));
   assert.match(script, /git -C '[^']*rr-repo' archive 'HEAD' \| tar -x -C/);
   assert.match(script, /unset .*OPENAI_API_KEY/);
+  assert.match(script, /model_reasoning_effort='"medium"'/);
   const out = spawnSync('bash', [join(run, 'run.sh')], { encoding: 'utf8', env: rrEnv() }).stdout;
   assert.match(out, /CWD=.*\/export/);
   assert.match(out, /a\.txt/);
