@@ -577,7 +577,7 @@ function pick(d, { noAgy = false } = {}) {
   const ref = ranked[0];
   if (!ref) return undefined;
   const agyNote = agyUntil ? `agy quota exhausted until ${new Date(agyUntil).toISOString()} → claude; ` : "";
-  return { harness: harnessFor(ref), ref, thinking, kind, why: `${agyNote}${kind}·${d.tier} chain, first live${demoted.length ? `; quota: ${demoted.join("; ")}` : ""}` };
+  return { harness: harnessFor(ref), ref, thinking, kind, deep: kind.startsWith("review") && d.tier === "T4", why: `${agyNote}${kind}·${d.tier} chain, first live${demoted.length ? `; quota: ${demoted.join("; ")}` : ""}` };
 }
 
 // ── 3. worker command ───────────────────────────────────────────────────
@@ -657,9 +657,11 @@ const resumeSession = opt.resumeRec?.sessionId ?? "";
 function workerScript(p, run, briefFile) {
   const id = p.ref.slice(p.ref.indexOf("/") + 1);
   // Owner 2026-10-22: tiers.json kind_effort pins the claude effort per kind (review / frontend -> xhigh).
-  const effortClaude = (typeof CONFIG.kind_effort?.[p.kind === "review_language" ? "review" : p.kind] === "string" ? CONFIG.kind_effort[p.kind === "review_language" ? "review" : p.kind].replace(/[^a-z]/g, "") : "") || { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
+  // Owner 2026-11-06: normal review medium, deep review (--deep / T4) high via kind_effort.review_deep.
+  const effortKey = p.kind === "review_language" ? "review" : p.deep && typeof CONFIG.kind_effort?.review_deep === "string" ? "review_deep" : p.kind;
+  const effortClaude = (typeof CONFIG.kind_effort?.[effortKey] === "string" ? CONFIG.kind_effort[effortKey].replace(/[^a-z]/g, "") : "") || { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   const sessionFlag = resumeSession ? `--resume ${q(resumeSession)}` : `--session-id ${q(currentSession)}`;
-  const kindEffort = CONFIG.kind_effort?.[p.kind === "review_language" ? "review" : p.kind];
+  const kindEffort = CONFIG.kind_effort?.[effortKey];
   const effortCodex = (p.kind.startsWith("review") && ["low", "medium", "high"].includes(kindEffort) ? kindEffort : undefined) ?? { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   switch (p.harness) {
     case "claude":
@@ -981,6 +983,16 @@ function markCodexExhausted(attemptP, run) {
   return true;
 }
 
+/** A worker that died at start because the provider does not serve the model (codex model_not_found on a ChatGPT plan): mark the ref dead for this process so pick() takes the next chain entry. */
+function markModelError(attemptP, result) {
+  if (result.rc === 0 || attemptP.harness === "agy") return false;
+  let text = "";
+  try { text = readFileSync(join(result.run, "out.log"), "utf8"); } catch { return false; }
+  if (!/model_not_found|not supported when using Codex with a ChatGPT account|model .{0,80}(does not exist|not found)/i.test(text)) return false;
+  DEAD[attemptP.ref] = Date.now() + 3600e3;
+  return true;
+}
+
 async function execute(attemptBrief, attemptP, attemptTier) {
   const { run, label, rec } = makeRun(attemptBrief, attemptP, attemptTier);
   const started = Date.now();
@@ -1141,6 +1153,12 @@ await gateCycle(result, currentP);
 if (!opt.model && markCodexExhausted(currentP, result.run)) {
   const next = pick({ ...d, tier });
   if (next) { currentP = next; result = await execute(brief, currentP, tier); }
+}
+// A model error at start (model_not_found): fall to the next chain entry, up to 3 times.
+for (let i = 0; i < 3 && !opt.model && markModelError(currentP, result); i++) {
+  const next = pick({ ...d, tier });
+  if (!next) break;
+  currentP = next; result = await execute(brief, currentP, tier);
 }
 // agy out of quota: record it and retry once on the claude chain at the same tier (never escalate to agy T4 for this).
 if (!opt.model && markAgyExhausted(currentP, result.run)) {
