@@ -200,7 +200,7 @@ fs.appendFileSync(\`${'$'}{e.JEV_LOG}\`, (a[0] === 'raw' ? 'raw ' + input.replac
 setTimeout(() => {
   if (a[0] !== 'raw' || e.RAW_FAIL) process.exit(3);
   const qs = JSON.parse(input).questions; const answers = {};
-  if (qs.tier) Object.assign(answers, { tier: { choice: 'T3', confidence: 0.9 }, kind: { choice: e.KIND_ANSWER || 'code', confidence: 0.9 }, role: { choice: 'doer', confidence: 0.9 }, arabic: { noul: Number(e.ARABIC || 0.01) }, ui: { noul: Number(e.UI_ANSWER || 0.02) } });
+  if (qs.tier) Object.assign(answers, { tier: { choice: e.TIER_ANSWER || 'T3', confidence: 0.9 }, kind: { choice: e.KIND_ANSWER || 'code', confidence: 0.9 }, role: { choice: 'doer', confidence: 0.9 }, arabic: { noul: Number(e.ARABIC || 0.01) }, ui: { noul: Number(e.UI_ANSWER || 0.02) } });
   else for (const k of Object.keys(qs)) {
     const kv = (e.MCP_SCORES || '').split(',').find((x) => k === 'mcp:' + x.split('=')[0]);
     answers[k] = e.RAW_BAD === k ? { oops: 1 } : k === 'role' ? { choice: e.ROLE_ANSWER || 'none', confidence: Number(e.ROLE_CONF || 0.9) } : { noul: kv ? Number(kv.split('=')[1]) : 0.1 };
@@ -850,6 +850,9 @@ test('W8 agy relay runs headless with --dangerously-skip-permissions by default'
   assert.match(readFileSync(agyLog, 'utf8'), /--dangerously-skip-permissions/);
 });
 
+const cRepo = join(tmp, 'committed-repo');
+write(join(cRepo, 'a.txt'), 'x\n');
+sh('git init -q && git add . && git -c user.email=a@b -c user.name=t commit -qm i', cRepo);
 test('W8 a codex usage limit marks codex exhausted until the printed reset and the run falls back to the next tier', () => {
   const ex = join(tmp, 'exhausted.json');
   const cache = join(tmp, 'cx-cache');
@@ -860,7 +863,7 @@ test('W8 a codex usage limit marks codex exhausted until the printed reset and t
     kinds: { review: { T3: ['openai-codex/gpt-6.1-sol', 'cliproxy/claude-opus-5-5'] } },
   }));
   jevStub();
-  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--role', 'reviewer', '--cwd', repo, 'review it'], { encoding: 'utf8', timeout: 30000,
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--role', 'reviewer', '--cwd', cRepo, 'review it'], { encoding: 'utf8', timeout: 30000,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: join(tmp, 'cx-tiers.json'), JEV_EXHAUSTED_FILE: ex, JDELEGATE_CACHE: cache,
       JDELEGATE_AGENT_DIRS: `${agents}:${agentsParked}`, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_AUTO_ROLE: '0' } });
   assert.match(r.stdout, /FALLBACK-CLAUDE-RAN/, r.stdout + r.stderr);
@@ -1448,4 +1451,70 @@ test('D4 at most 3 gate cycles, then the last answer is reported with exit 4', (
   assert.equal(r.status, 4, r.stdout + r.stderr);
   assert.match(r.stdout + r.stderr, /gate wait limit/i);
   assert.match(r.stdout, /WAITING-GATE tk-C/);
+});
+
+// ── Owner 2026-11-06: review routing (one reviewer; GPT review-only; --deep -> T4; Arabic -> review_language; medium effort) ──
+const rrTiers = join(tmp, 'rr-tiers.json');
+write(rrTiers, JSON.stringify({
+  tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test']])),
+  kinds: {
+    code: { T3: ['cliproxy/claude-sonnet-5-5'] },
+    review: { T3: ['cliproxy/claude-opus-5-5', 'openai-codex/gpt-5.6-sol'], T4: ['openai-codex/gpt-5.6-sol', 'cliproxy/claude-opus-5-5'] },
+    review_language: { T3: ['agy/gemini-4-argon-high', 'cliproxy/claude-opus-5-5'], T4: ['agy/gemini-4-argon-high', 'cliproxy/claude-opus-5-5'] },
+  },
+  kind_effort: { review: 'medium', frontend: 'xhigh' },
+}));
+const rrEnv = (extra = {}) => ({ ...process.env, PATH: `${bin}:${process.env.PATH}`, JDELEGATE_JEV: join(bin, 'jev'), JEV_ROUTER_CONFIG: rrTiers,
+  JDELEGATE_CACHE: join(tmp, 'cache-rr'), JDELEGATE_AGENT_DIRS: `${agents}:${agentsParked}`, JDELEGATE_SELECT_CACHE: '0', JDELEGATE_REVIEW_FORCE: '1', JDELEGATE_MAX_LIVE: '99', JDELEGATE_AGY_EXHAUSTED_FILE: join(tmp, 'no-agy-exhausted.json'), ...extra });
+const rrRun = (mode, args, brief = 'review the diff', extra = {}) => { jevStub(); return spawnSync(process.execPath, [JD, mode, '--cwd', repo, ...args, brief], { encoding: 'utf8', env: rrEnv(extra) }); };
+
+test('RR reviewer + openai-codex model is allowed; every other role is refused (exit 2)', () => {
+  const ok = rrRun('--print', ['--role', 'reviewer', '--model', 'openai-codex/gpt-5.6-sol']);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /codex · openai-codex\/gpt-5\.6-sol/);
+  for (const role of [[], ['--role', 'debugger']]) {
+    const r = rrRun('--print', [...role, '--model', 'openai-codex/gpt-5.6-sol']);
+    assert.equal(r.status, 2, r.stdout);
+    assert.match(r.stderr, /refused/);
+  }
+});
+
+test('RR a normal reviewer takes the first review.T3 model; --deep and T4 take review.T4 (GPT first)', () => {
+  assert.match(rrRun('--print', ['--role', 'reviewer']).stdout, /claude · cliproxy\/claude-opus-5-5 .*review·T3/);
+  assert.match(rrRun('--print', ['--role', 'reviewer', '--deep']).stdout, /codex · openai-codex\/gpt-5\.6-sol .*review·T4/);
+  assert.match(rrRun('--print', ['--role', 'reviewer'], 'review the diff', { TIER_ANSWER: 'T4' }).stdout, /review·T4/);
+});
+
+test('RR an Arabic brief (or kind language) for a reviewer routes to review_language', () => {
+  assert.match(rrRun('--print', ['--role', 'reviewer'], 'راجع نصوص الواجهة العربية').stdout, /agy · agy\/gemini-4-argon-high .*review_language·T3/);
+  assert.match(rrRun('--print', ['--role', 'reviewer'], 'review the copy', { KIND_ANSWER: 'language' }).stdout, /review_language·T3/);
+  assert.match(rrRun('--print', ['--role', 'reviewer', '--deep'], 'راجع النصوص').stdout, /agy\/gemini-4-argon-high .*review_language·T4/);
+});
+
+test('RR review effort is medium; frontend stays xhigh', () => {
+  const r = rrRun('--dry-run', ['--harness', 'claude', '--role', 'reviewer']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /claude -p --model 'claude-opus-5-5' --effort medium/);
+});
+
+test('RR a codex reviewer runs in a git-archive export under the run dir: no .env, not the live worktree', () => {
+  const rr = join(tmp, 'rr-repo');
+  write(join(rr, '.gitignore'), '.env\n');
+  write(join(rr, '.env'), 'SECRET=1\n');
+  write(join(rr, 'a.txt'), 'x\n');
+  sh('git init -q && git add . && git -c user.email=a@b -c user.name=t commit -qm i', rr);
+  stub('codex', 'while [ $# -gt 0 ]; do if [ "$1" = -C ]; then echo "CWD=$2"; ls -A "$2"; fi; shift; done');
+  jevStub();
+  const r = spawnSync(process.execPath, [JD, '--dry-run', '--cwd', rr, '--role', 'reviewer', '--deep', 'review the diff'], { encoding: 'utf8', env: rrEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  const run = r.stdout.match(/dry-run (\S+)/)[1];
+  const script = readFileSync(join(run, 'run.sh'), 'utf8');
+  assert.match(script, /codex exec -m 'gpt-5\.6-sol' -C '[^']*\/export'/);
+  assert.doesNotMatch(script, new RegExp(`codex exec[^\\n]*-C '${rr}'`));
+  assert.match(script, /git -C '[^']*rr-repo' archive 'HEAD' \| tar -x -C/);
+  assert.match(script, /unset .*OPENAI_API_KEY/);
+  const out = spawnSync('bash', [join(run, 'run.sh')], { encoding: 'utf8', env: rrEnv() }).stdout;
+  assert.match(out, /CWD=.*\/export/);
+  assert.match(out, /a\.txt/);
+  assert.doesNotMatch(out, /\.env/);
 });
