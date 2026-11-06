@@ -24,3 +24,14 @@
 | 10b. Drift check           | `/direction` (`skills/direction`): report only, owner decides keep+update spec or revert. Run before phase 11 | inline |
 | 11. Finish branch          | `finishing-a-development-branch` (obra) — **always ends in a PR** — optional: `using-git-worktrees` | inline |
 | 12. Capture knowledge      | `/kb-spec post` → `/kb-docs-sync` → `/kb-compile` → `/kb-lint`                         | inline         |
+
+## EGM doc review (optional, between spec/design and `/kb-spec plan`; owner-approved 2026-11-06)
+
+- When: only high-risk specs (auth, money, multi-service, new apps), after spec.md (and system-design.md for new apps), before `/kb-spec plan`. Also allowed for big features in existing apps, not only 2c. Never on FAST LANE or ordinary features.
+- How: `/egm:egm-review specs/NNN/spec.md`, preset "Feature spec only"; for plan.md, preset "Implementation plan only". Never "Consolidated report" or the uninterrupted full flow. Put `EGM artifact directory: specs/NNN/egm` in the prompt.
+- Cap: ONE review round. At every egm-review-loop checkpoint stop after round 1 (TOKEN BUDGET rule 6: max 1 review + 1 fix round). Reviewers run on the session model (Opus), so cost is real.
+- Fixes: the main session (Elephant) checks every Goldfish PROPOSE FIX against owner rules before applying (Goldfish run with omitClaudeMd and do not know them). Then the owner approves D/Q codes as usual.
+- Isolation is context-only: give Goldfish only spec/design file paths, never repo roots or .env.
+- Do not use egm-brainstorm or egm-draft (brainstorming, `/kb-spec`, speckit and system-design cover them) or egm-drift-report (use `direction`). egm-bootstrap only on explicit owner request: filename EGM.md, one subtree, own branch.
+- `reviewer` on the diff is unchanged; EGM reviews docs before code, not code.
+- The plugin exists on the Mac and MyContabo only; on other hosts skip the EGM step and say so in one line.
