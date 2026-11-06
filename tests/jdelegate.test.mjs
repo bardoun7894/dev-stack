@@ -1521,3 +1521,26 @@ test('RR a codex reviewer runs in a git-archive export under the run dir: no .en
   assert.match(out, /a\.txt/);
   assert.doesNotMatch(out, /\.env/);
 });
+
+// ── Owner 2026-11-06 (later): GPT Sol unavailable on the ChatGPT login -> deep review = Opus high; model error at start falls to the next entry ──
+const rr2Tiers = join(tmp, 'rr2-tiers.json');
+write(rr2Tiers, JSON.stringify({
+  tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test']])),
+  kinds: { review: { T3: ['cliproxy/claude-opus-5-5', 'agy/gemini-4-argon-high', 'cliproxy/claude-sonnet-5-5'], T4: ['cliproxy/claude-opus-5-5', 'agy/gemini-4-argon-high', 'cliproxy/claude-sonnet-5-5'] } },
+  kind_effort: { review: 'medium', review_deep: 'high', frontend: 'xhigh' },
+}));
+test('RR2 --deep review runs Opus at high effort; normal review stays medium', () => {
+  const deep = rrRun('--dry-run', ['--harness', 'claude', '--role', 'reviewer', '--deep'], 'review the diff', { JEV_ROUTER_CONFIG: rr2Tiers });
+  assert.match(deep.stdout, /review·T4/);
+  assert.match(deep.stdout, /claude -p --model 'claude-opus-5-5' --effort high/);
+  const norm = rrRun('--dry-run', ['--harness', 'claude', '--role', 'reviewer'], 'review the diff', { JEV_ROUTER_CONFIG: rr2Tiers });
+  assert.match(norm.stdout, /claude -p --model 'claude-opus-5-5' --effort medium/);
+});
+test('RR2 a codex model_not_found at start falls to the next chain entry', () => {
+  stub('codex', 'echo "ERROR: {\\"error\\":{\\"code\\":\\"model_not_found\\"}} not supported when using Codex with a ChatGPT account"; exit 1');
+  stub('claude', 'echo FALLBACK-OPUS-RAN');
+  jevStub();
+  const r = spawnSync(process.execPath, [JD, '--no-tab', '--no-escalate', '--role', 'reviewer', '--deep', '--cwd', cRepo, 'review it'], { encoding: 'utf8', timeout: 60000,
+    env: rrEnv({ JDELEGATE_CACHE: join(tmp, 'cache-rr2'), JEV_EXHAUSTED_FILE: join(tmp, 'rr2-ex.json'), JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_AUTO_ROLE: '0' }) });
+  assert.match(r.stdout, /FALLBACK-OPUS-RAN/, r.stdout + r.stderr);
+});
