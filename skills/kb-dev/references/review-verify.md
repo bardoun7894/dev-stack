@@ -2,7 +2,7 @@
 
 ## Review (fresh reviewer, spec + diff only)
 - Diff against the PR's own base branch, not main (stacked PRs).
-- Reviewer: Opus xhigh via `jdelegate --role reviewer` or `/code-review`; second opinion Gemini 4 Argon only for high-risk diffs.
+- Reviewer: via `jdelegate --role reviewer` (`--deep` for high-risk) or `/code-review`. One reviewer per review (owner 2026-11-06): the first model with quota in jdelegate's chain, no second reviewer. Code review: Opus 5.5 at medium. Deep review (auth, money, migrations, security, T4, or `--deep`): GPT `openai-codex/gpt-5.6-sol` via codex, run in a git-archive export (never the live worktree: codex reads .env). Arabic-language review: Gemini 4 Argon (`agy/gemini-4-argon-high`). GPT is review-only: never an implementer or orchestrator.
 - Fix confirmed/must-fix (P1) findings: send to the SAME implementer session. Carry maybes (P2) to the final report.
 - A finding that asks for new code must name the path into that state (click, route, API call); otherwise carry it.
 - Contradicting reviewers: give the implementer both, it decides. Findings with one root cause get one design.

@@ -88,8 +88,8 @@ const THINK = ["off", "minimal", "low", "medium", "high"];
 
 // ── args ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
-const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--model REF] [--retry] [--dry-run] [--print] "<brief>"\n       jdelegate --resume NAME "<message>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor only on a retry (--retry or FACTORY_RETRY=1; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  --model REF (provider/model) pins the model and skips routing; a provider outside the owner rule D0 exits 2.\n  XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY are unset for the worker (OPENROUTER_API_KEY stays: Jev reads it).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --resume NAME relaunches that named claude worker\'s session (same model, cwd, role) in a new tab with the message and prints the result. A non-claude worker or an unknown name exits 2. A new run whose --name is a live worker in the same cwd is refused (use --resume NAME); so is a second worker on a specs/NNN-dir another live worker already has (reviewer/verify exempt).\n  --dry-run writes the run dir and prints run.sh without launching.';
-const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", model: undefined, retry: process.env.FACTORY_RETRY === "1", dryRun: false, gc: false, older: 60, brief: "", resume: "" };
+const USAGE = 'usage: jdelegate [--cwd DIR] [--name LABEL] [--harness claude|codex|opencode|pi|agy] [--timeout MIN] [--no-tab] [--keep-tab] [--full] [--mcp NAME]... [--skill NAME]... [--no-auto-skill] [--role NAME] [--no-auto-role] [--no-auto-mcp] [--model REF] [--retry] [--deep] [--dry-run] [--print] "<brief>"\n       jdelegate --resume NAME "<message>"\n  claude workers are lean by default: no hooks, no auto-memory, no ~/.claude/CLAUDE.md, no MCP servers, 6 core tools + Skill (~10k vs ~43k first-turn tokens).\n  Sonnet/Haiku claude workers get the Opus advisor only on a retry (--retry or FACTORY_RETRY=1; JDELEGATE_ADVISOR=0 turns it off, JDELEGATE_ADVISOR=<model> picks another).\n  --model REF (provider/model) pins the model and skips routing; a provider outside the owner rule D0 exits 2 (openai-codex is allowed for --role reviewer only).\n  --deep (with --role reviewer) picks the deep-review chain kinds.review.T4 (GPT via codex first); a codex reviewer runs in a git-archive export of HEAD (JDELEGATE_REVIEW_REF overrides), never in the live worktree.\n  XAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY are unset for the worker (OPENROUTER_API_KEY stays: Jev reads it).\n  They get <run>/worker-prompt.md instead: a worker contract + the repo\'s own CLAUDE.md/AGENTS.md + inlined skills.\n  --full or JDELEGATE_FULL=1 restores the plain claude; --mcp NAME loads just that one MCP server.\n  --skill NAME inlines that skill (~/.claude/skills or skills-parked; unknown name exits 2). With no --skill, Jev may pick one from config/worker-skills.json; --no-auto-skill or JDELEGATE_AUTO_SKILL=0 turns that off.\n  --role NAME inlines that agent definition (~/.claude/agents or agents-parked; unknown name exits 2). With no --role, Jev may pick one from config/worker-roles.json or none; --no-auto-role or JDELEGATE_AUTO_ROLE=0 turns that off.\n  With no --mcp, Jev judges each configured MCP server (~/.claude.json, project entry, <cwd>/.mcp.json) against the brief and loads at most 2; --no-auto-mcp or JDELEGATE_AUTO_MCP=0 turns that off.\n  Lean workers also have commit/PR attribution switched off.\n  --resume NAME relaunches that named claude worker\'s session (same model, cwd, role) in a new tab with the message and prints the result. A non-claude worker or an unknown name exits 2. A new run whose --name is a live worker in the same cwd is refused (use --resume NAME); so is a second worker on a specs/NNN-dir another live worker already has (reviewer/verify exempt).\n  --dry-run writes the run dir and prints run.sh without launching.';
+const opt = { cwd: process.cwd(), name: "", harness: "", timeout: 30, tab: true, print: false, noEscalate: false, keepTab: false, full: process.env.JDELEGATE_FULL === "1", mcp: [], skills: [], autoSkill: process.env.JDELEGATE_AUTO_SKILL !== "0", role: "", autoRole: process.env.JDELEGATE_AUTO_ROLE !== "0", autoMcp: process.env.JDELEGATE_AUTO_MCP !== "0", model: undefined, retry: process.env.FACTORY_RETRY === "1", deep: false, dryRun: false, gc: false, older: 60, brief: "", resume: "" };
 // JDELEGATE_TIMEOUT_MS overrides --timeout for tests (and fine-grained timeouts in general). opt.timeout stays in minutes for the help text.
 const TIMEOUT_OVERRIDE_MS = process.env.JDELEGATE_TIMEOUT_MS ? Number(process.env.JDELEGATE_TIMEOUT_MS) : undefined;
 const timeoutMs = () => TIMEOUT_OVERRIDE_MS ?? Math.max(1, opt.timeout) * 60_000;
@@ -111,6 +111,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--no-auto-mcp") opt.autoMcp = false;
   else if (a === "--model") opt.model = argv[++i] ?? "";
   else if (a === "--retry") opt.retry = true;
+  else if (a === "--deep") opt.deep = true;
   else if (a === "--dry-run") opt.dryRun = true;
   else if (a === "--no-escalate") opt.noEscalate = true;
   else if (a === "--gc") opt.gc = true;
@@ -120,11 +121,18 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "--brief-file") opt.brief = readFileSync(argv[++i], "utf8");
   else opt.brief = opt.brief ? `${opt.brief} ${a}` : a;
 }
-// Owner rule D0 (2026-10-24): only providers with a quota subscription. No openrouter, no openai/openai-codex.
+// Owner rule D0 (2026-10-24): only providers with a quota subscription. No openrouter, no openai.
+// Owner 2026-11-06: openai-codex (ChatGPT login via the codex harness) is allowed for role reviewer ONLY; GPT never implements or orchestrates.
 const D0_PROVIDERS = new Set(["cliproxy", "xai", "opencode-go", "agy", "gemini", "commandcode"]);
-if (opt.model !== undefined && !(/^[\w-]+\/\S+$/.test(opt.model) && D0_PROVIDERS.has(opt.model.slice(0, opt.model.indexOf("/"))))) {
-  console.error(`jdelegate: --model "${opt.model}" refused: pick provider/model with a provider from D0 (${[...D0_PROVIDERS].join(", ")}); no openrouter, no openai/openai-codex`);
-  process.exit(2);
+const REVIEW_ONLY_PROVIDERS = new Set(["openai-codex"]);
+const isReviewerRole = String(opt.role ?? "").trim().toLowerCase() === "reviewer";
+if (opt.model !== undefined) {
+  const prov = opt.model.slice(0, Math.max(0, opt.model.indexOf("/")));
+  const allowed = D0_PROVIDERS.has(prov) || (isReviewerRole && REVIEW_ONLY_PROVIDERS.has(prov));
+  if (!(/^[\w-]+\/\S+$/.test(opt.model) && allowed)) {
+    console.error(`jdelegate: --model "${opt.model}" refused: pick provider/model with a provider from D0 (${[...D0_PROVIDERS].join(", ")}${isReviewerRole ? ", " + [...REVIEW_ONLY_PROVIDERS].join(", ") : ""}); no openrouter, no openai; openai-codex only with --role reviewer`);
+    process.exit(2);
+  }
 }
 if (argv[0] === "wait") {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -485,11 +493,13 @@ function windowsOf(quota, prov) {
   const w = Object.keys(WINDOW_LABEL).filter((k) => typeof e[k] === "number").map((k) => [k, e[k]]);
   return w.length ? w : undefined;
 }
+/** Static provider rank. Owner 2026-11-06: review chains are ordered by the owner (Opus, GPT, Gemini), so unknown quota keeps the chain order there. */
+const staticBucket = (prov, kind) => (String(kind ?? "").startsWith("review") ? 0 : (PRIORITY[prov] ?? 2));
 function bucketOf(ref, quota, kind) {
   const prov = provider(ref);
   if (METERED.has(prov)) return { bucket: 9 };
   const w = windowsOf(quota, prov);
-  if (!w) return { bucket: PRIORITY[prov] ?? 2 };
+  if (!w) return { bucket: staticBucket(prov, kind) };
   const top = Math.max(...w.map(([, f]) => f));
   // quota_policy.exempt.<kind>: providers never demoted for that kind (language stays on Claude at any usage).
   const exempt = POLICY.exempt?.[kind]?.includes(prov);
@@ -544,7 +554,7 @@ function pick(d, { noAgy = false } = {}) {
   }
   const kind = frontend ? "frontend" : d.kind;
   // Owner 2026-10-24: kind language is Claude only, so its chain never falls through to tiers.* (Arabic stays on Claude).
-  const kindOnly = kind === "language" && !!CONFIG.kinds?.language;
+  const kindOnly = (kind === "language" && !!CONFIG.kinds?.language) || kind === "review_language";
   const full = [...new Set([...(CONFIG.kinds?.[kind]?.[d.tier] ?? []), ...(kindOnly ? [] : CONFIG.tiers?.[d.tier] ?? [])])].filter(alive);
   // Providers without a jdelegate harness would fall to pi and fail (or bill); server-agent.sh launches them (same refusal as the --model pin).
   const noHarness = full.filter((ref) => harnessFor(ref) === "pi");
@@ -558,7 +568,7 @@ function pick(d, { noAgy = false } = {}) {
   const scored = chain
     .map((ref, i) => quota
       ? { ref, i, ...bucketOf(ref, quota, kind) }
-      : { ref, i, bucket: METERED.has(provider(ref)) ? 3 : (PRIORITY[provider(ref)] ?? 2) })
+      : { ref, i, bucket: METERED.has(provider(ref)) ? 3 : staticBucket(provider(ref), kind) })
     .sort((x, y) => x.bucket - y.bucket || x.i - y.i)
     .filter((x) => noAgy || !opt.harness || harnessFor(x.ref) === opt.harness)
     .filter((x) => !(needsShell(opt.brief) && harnessFor(x.ref) === "opencode"));
@@ -647,7 +657,7 @@ const resumeSession = opt.resumeRec?.sessionId ?? "";
 function workerScript(p, run, briefFile) {
   const id = p.ref.slice(p.ref.indexOf("/") + 1);
   // Owner 2026-10-22: tiers.json kind_effort pins the claude effort per kind (review / frontend -> xhigh).
-  const effortClaude = (typeof CONFIG.kind_effort?.[p.kind] === "string" ? CONFIG.kind_effort[p.kind].replace(/[^a-z]/g, "") : "") || { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
+  const effortClaude = (typeof CONFIG.kind_effort?.[p.kind === "review_language" ? "review" : p.kind] === "string" ? CONFIG.kind_effort[p.kind === "review_language" ? "review" : p.kind].replace(/[^a-z]/g, "") : "") || { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   const sessionFlag = resumeSession ? `--resume ${q(resumeSession)}` : `--session-id ${q(currentSession)}`;
   const effortCodex = { off: "low", minimal: "low", low: "low", medium: "medium", high: "high" }[p.thinking];
   switch (p.harness) {
@@ -659,8 +669,16 @@ function workerScript(p, run, briefFile) {
       // Skill tool on: the repo's own .claude/skills (project settings) stay reachable; slash commands stay off.
       // disableBundledSkills: with the Skill tool on, ~19 bundled Claude Code skills added ~3k first-turn tokens.
       return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} ${sessionFlag} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"disableBundledSkills":true}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
-    case "codex":
-      return `codex exec -m ${q(id)} -C ${q(opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+    case "codex": {
+      // Owner 2026-11-06: a codex reviewer reads .env even in its read-only sandbox, so it runs in a git-archive export (tracked files only) under the run dir, never in the live worktree.
+      const reviewer = opt.role === "reviewer";
+      const exp = join(run, "export");
+      const ref = (process.env.JDELEGATE_REVIEW_REF || "HEAD").replace(/[^\w./@^~-]/g, "");
+      const prep = reviewer
+        ? `mkdir -p ${q(exp)} && git -C ${q(opt.cwd)} archive ${q(ref)} | tar -x -C ${q(exp)} || exit 1\n(git -C ${q(opt.cwd)} diff origin/main...${q(ref)} > ${q(join(exp, "REVIEW.diff"))} 2>/dev/null || rm -f ${q(join(exp, "REVIEW.diff"))})\n`
+        : "";
+      return `${prep}codex exec -m ${q(id)} -C ${q(reviewer ? exp : opt.cwd)} --skip-git-repo-check -s workspace-write -c model_reasoning_effort=${q(`"${effortCodex}"`)} -o ${q(join(run, "final.txt"))} "$(cat ${q(briefFile)})" </dev/null 2>&1 | tee ${q(join(run, "out.log"))}`;
+    }
     case "agy":
       return `node ${q(AGY_RELAY)} --brief ${q(briefFile)} --cd ${q(opt.cwd)} --model ${q(id)} --dangerously-skip-permissions --out-dir ${q(join(run, "agy"))} 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "opencode": {
@@ -806,8 +824,13 @@ const d = opt.model
   ? { tier: "T3", kind: "code", role: "doer", conf: 1, ui: 0, ms: 0, failed: false, id: undefined }
   : await routeDecision();
 // Owner rule 2026-10-03, revised 2026-10-22: a reviewer worker runs on the review chain (Opus 5.5 xhigh first, Argon then Grok; no OpenAI), whatever kind the brief routed to.
-if (opt.role === "reviewer" && CONFIG.kinds?.review) d.kind = "review";
-if (CONFIG.kinds?.test && d.kind !== "review" && isTestWork(opt.brief, opt.role)) d.kind = "test";
+// Owner 2026-11-06: one reviewer, the first live model of the chain. --deep or T4 -> kinds.review.T4 (GPT via codex first); an Arabic-script brief or kind language -> kinds.review_language (Gemini first).
+if (opt.role === "reviewer" && CONFIG.kinds?.review) {
+  const arabic = d.kind === "language" || /[\u0600-\u06FF]/.test(opt.brief);
+  d.kind = arabic && CONFIG.kinds?.review_language ? "review_language" : "review";
+  if (opt.deep) d.tier = "T4";
+}
+if (CONFIG.kinds?.test && !d.kind.startsWith("review") && isTestWork(opt.brief, opt.role)) d.kind = "test";
 const p = opt.model
   ? { harness: opt.harness || harnessFor(opt.model), ref: opt.model, thinking: CONFIG.thinking?.[d.tier] ?? "medium", kind: d.kind, why: "pinned by --model" }
   : pick(d);
