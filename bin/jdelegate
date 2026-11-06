@@ -44,7 +44,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 const HOME = homedir();
@@ -581,6 +581,9 @@ function pick(d, { noAgy = false } = {}) {
 }
 
 // ── 3. worker command ───────────────────────────────────────────────────
+/** Lean claude --settings (Q8, 2026-10-29): no user hooks, EXCEPT the gate guard so typecheck/test/build run through gate-run. Absolute path resolved here. */
+const LEAN_SETTINGS = JSON.stringify({ autoMemoryEnabled: false, includeCoAuthoredBy: false, attribution: { commit: "", pr: "" }, disableBundledSkills: true,
+  hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: join(homedir(), ".claude", "hooks", "gate-run-guard.sh") }] }] } });
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 /** Every MCP server the worker could load: ~/.claude.json, this cwd's project entry, <cwd>/.mcp.json (on a name clash ~/.claude.json wins). */
 function configuredMcp() {
@@ -671,7 +674,7 @@ function workerScript(p, run, briefFile) {
       // settings, no hooks, no auto-memory; the worker's context is <run>/worker-prompt.md. (--bare would break OAuth login.)
       // Skill tool on: the repo's own .claude/skills (project settings) stay reachable; slash commands stay off.
       // disableBundledSkills: with the Skill tool on, ~19 bundled Claude Code skills added ~3k first-turn tokens.
-      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} ${sessionFlag} --dangerously-skip-permissions --setting-sources project,local --settings ${q('{"disableAllHooks":true,"autoMemoryEnabled":false,"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""},"disableBundledSkills":true}')} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
+      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} ${sessionFlag} --dangerously-skip-permissions --setting-sources project,local --settings ${q(LEAN_SETTINGS)} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "codex": {
       // Owner 2026-11-06: a codex reviewer reads .env even in its read-only sandbox, so it runs in a git-archive export (tracked files only) under the run dir, never in the live worktree.
       const reviewer = opt.role === "reviewer";
@@ -685,12 +688,12 @@ function workerScript(p, run, briefFile) {
     case "agy":
       return `node ${q(AGY_RELAY)} --brief ${q(briefFile)} --cd ${q(opt.cwd)} --model ${q(id)} --dangerously-skip-permissions --out-dir ${q(join(run, "agy"))} 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "opencode": {
-      // JSON events to a file for the answer; a readable stream in the tab.
+      // JSON events to a file for the answer; a readable stream in the tab. opencode run has no --dir; run.sh cds into opt.cwd first.
       const show =
         'if .type == "text" then "🤖 " + (.part.text // "") ' +
         'elif .type == "tool_use" then "🔧 " + (.part.tool // "tool") + " " + ((.part.state.input // {}) | tostring | .[0:140]) ' +
         'elif .type == "error" then "✗ " + (.error | tostring | .[0:200]) else empty end';
-      return `opencode run -m ${q(p.ref)} --dir ${q(opt.cwd)} --auto --format json "$(cat ${q(briefFile)})" </dev/null 2>${q(join(run, "err.log"))} | tee ${q(join(run, "out.jsonl"))} | jq --unbuffered -rR ${q(`fromjson? | ${show}`)} | tee ${q(join(run, "out.log"))}`;
+      return `opencode run -m ${q(p.ref)} --auto --format json "$(cat ${q(briefFile)})" </dev/null 2>${q(join(run, "err.log"))} | tee ${q(join(run, "out.jsonl"))} | jq --unbuffered -rR ${q(`fromjson? | ${show}`)} | tee ${q(join(run, "out.log"))}`;
     }
     default: {
       // Bare pi, like software-factory's lib/agent.py: with extensions loaded the
@@ -877,6 +880,44 @@ function worldTrack(args) {
   } catch { /* the world feed never affects a worker */ }
 }
 
+/**
+ * Server registry (F5, 2026-10-29): the job, the run start and the run end live in the SERVER registry, reached over ssh
+ * (`ssh MyContabo factory|frun ...`; JDELEGATE_REG_HOST / JDELEGATE_REG_SSH override host and ssh binary, tests use a fake).
+ * FACTORY_BIN set (tests, a local factory) keeps the old local call for submit and skips the run events.
+ * A run end that cannot reach the server goes to $CACHE/reg-spool.jsonl and is replayed on the next jdelegate launch.
+ */
+const REG_HOST = process.env.JDELEGATE_REG_HOST || "MyContabo";
+const REG_SPOOL = join(CACHE, "reg-spool.jsonl");
+const regOn = () => !process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH;
+/** Run `tool ...args` on the server, 25 s cap (measured 2026-10-29: bare ssh 3 s, frun 5 s, factory submit 9 s; a 6 s cap lost events). Returns the spawnSync result. */
+function regSsh(tool, args, input, timeout = 25000) {
+  const remote = [tool, ...args.map((a) => (/^[A-Za-z0-9._:\/=@-]+$/.test(a) ? a : q(a)))].join(" ");
+  const r = spawnSync(process.env.JDELEGATE_REG_SSH || "ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/jdreg-%C", "-o", "ControlPersist=120", REG_HOST, remote],
+    { encoding: "utf8", timeout, input: input ?? "" });
+  if (r.status !== 0) {  // evidence for a lost event: what failed, when, and how long it took
+    try { writeFileSync(join(CACHE, "reg-errors.log"), `${new Date().toISOString()} ${remote.slice(0, 200)} -> status=${r.status} signal=${r.signal} err=${r.error?.code || ""} stderr=${(r.stderr || "").trim().slice(0, 300)}\n`, { flag: "a" }); } catch { /* diagnostics only */ }
+  }
+  return r;
+}
+let spoolReplayed = false;
+function replayRegSpool() {
+  if (spoolReplayed) return;
+  spoolReplayed = true;
+  let lines;
+  try { lines = readFileSync(REG_SPOOL, "utf8").split("\n").filter((l) => l.trim()); } catch { return; }
+  const keep = [];
+  for (const [i, l] of lines.entries()) {
+    try {
+      const ev = JSON.parse(l);
+      if (i >= 20 || regSsh("frun", ev.args).status !== 0) keep.push(l);
+    } catch { /* a corrupt line is dropped */ }
+  }
+  try { writeFileSync(REG_SPOOL, keep.map((l) => l + "\n").join("")); } catch { /* the spool is best effort */ }
+}
+function spoolReg(args) {
+  try { mkdirSync(CACHE, { recursive: true }); writeFileSync(REG_SPOOL, JSON.stringify({ args }) + "\n", { flag: "a" }); } catch { /* nothing more to try */ }
+}
+
 /** Register the job with `factory submit` once per process (retries reuse the id). Returns the job id or "". Exit 97 = project halted: exit 97, nothing launched. Any other failure only warns. */
 let factoryJobId;
 function submitJob(briefFile) {
@@ -885,7 +926,13 @@ function submitJob(briefFile) {
   const top = spawnSync("git", ["-C", opt.cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 5000 }).stdout?.trim();
   const project = slug(basename(top || opt.cwd));
   const owner = slug(workerRole?.name || opt.role || "jdelegate");
-  const r = spawnSync(process.env.FACTORY_BIN || "factory", ["submit", project, "--brief", briefFile, "--owner", owner], { encoding: "utf8", timeout: 4000 });
+  let r;
+  if (process.env.FACTORY_BIN && !process.env.JDELEGATE_REG_SSH) {
+    r = spawnSync(process.env.FACTORY_BIN, ["submit", project, "--brief", briefFile, "--owner", owner], { encoding: "utf8", timeout: 4000 });
+  } else {
+    replayRegSpool();
+    r = regSsh("factory", ["submit", project, "--brief", "-", "--owner", owner], readFileSync(briefFile));
+  }
   if (r.status === 97) {
     console.error(`jdelegate: project ${project} is halted (factoryctl): ${(r.stderr || "").split("\n")[0].trim()}`);
     process.exit(97);
@@ -894,6 +941,20 @@ function submitJob(briefFile) {
   if (factoryJobId) process.env.FACTORY_JOB_ID = factoryJobId;
   else console.error(`jdelegate: warning: factory submit did not register the job (${r.error?.code || r.signal || `exit ${r.status}`}); launching unregistered`);
   return factoryJobId;
+}
+/** `frun start` on the server for a launched worker. Returns the run id or "". The label carries `timeout=SECS` for the reaper. */
+function regStart({ rec, label, pane }) {
+  if (!regOn()) return "";
+  const args = ["start", "--source", "jdelegate", "--project", basename(opt.cwd).toLowerCase().replace(/[^a-z0-9._-]/g, "-"),
+    "--name", nameLabel, "--label", `timeout=${Math.round(timeoutMs() / 1000)} ${label}`, "--host", hostname(), "--pid", String(rec.pid),
+    "--model", rec.model, ...(pane ? ["--pane", pane] : []), ...(rec.role ? ["--role", rec.role] : []), ...(factoryJobId ? ["--job", factoryJobId] : [])];
+  const r = regSsh("frun", args);
+  return r.status === 0 ? (r.stdout || "").trim().split("\n")[0].replace(/[^A-Za-z0-9._:-]/g, "") : "";
+}
+function regEnd(runId, rc, reason) {
+  if (!runId) return;
+  const args = ["finish", runId, String(rc), ...(reason ? ["--reason", reason] : [])];
+  if (regSsh("frun", args).status !== 0) spoolReg(args);
 }
 
 function makeRun(attemptBrief, attemptP, attemptTier) {
@@ -927,6 +988,7 @@ function makeRun(attemptBrief, attemptP, attemptTier) {
     name: nameLabel, slug: nameSlug, sessionId: currentSession, cwd: opt.cwd, repo: repoOf(opt.cwd), model: attemptP.ref.split("/").pop(), ref: attemptP.ref,
     harness: attemptP.harness, full: !isLean(), role: workerRole?.name || opt.role || "", skills: workerSkills.filter((x) => !x.auto).map((x) => x.name),
     mcp: attemptP.harness === "claude" && isLean() ? mcpNames : [], specs: EXEMPT_SPEC ? [] : opt.resumeRec ? (opt.resumeRec.specs ?? []) : specsIn(opt.brief), run, pid: 0, at: new Date().toISOString(),
+    ...(opt.resumeRec?.gateHost ? { gateHost: opt.resumeRec.gateHost } : {}),   // a resumed worker keeps the host its gate ran on
   };
   saveRecord(rec);
   return { run, label, rec };
@@ -1025,6 +1087,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     try { rec.pid = Number(readFileSync(join(run, "pid"), "utf8").trim()) || 0; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
   if (rec.pid) saveRecord(rec);
+  const regRun = rec.pid ? regStart({ rec, label, pane: process.env.HERDR_PANE_ID || "" }) : "";
   // The timeout we enforce here, in ms. JDELEGATE_TIMEOUT_MS overrides --timeout for tests.
   const limitMs = timeoutMs();
   while (!existsSync(join(run, "exit"))) {
@@ -1033,6 +1096,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
       // The user-facing value, in minutes. Use the original --timeout number (so the message matches what was passed
       // on the command line, even when JDELEGATE_TIMEOUT_MS overrides the wall-clock value for tests).
       worldEvent("failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
+      regEnd(regRun, 124, `timeout: jdelegate killed the worker after ${opt.timeout} min`);
       const minutesText = `${opt.timeout} min`;
       console.log(`${head}\n[jdelegate] timed out after ${minutesText} in ${where}; worker tree killed, result will be in ${run}`);
       process.exit(124);
@@ -1040,6 +1104,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     await new Promise((r) => setTimeout(r, 500));
   }
   const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
+  regEnd(regRun, rc);
   worldEvent(rc === 0 ? "done" : "failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
   const answer = finalAnswer(attemptP, run);
   const tabFile = join(run, "tab");
@@ -1105,15 +1170,29 @@ async function killWorkerTree({ run, inlinePid, where, tab }) {
 // the record goes `waiting-gate` (not live), a bash+ssh `gate-wait <id>` blocks for the result, and the same session is resumed
 // (--resume NAME, a child jdelegate) with it. At most GATE_CYCLES waits per worker; the count rides in JDELEGATE_GATE_CYCLE.
 const GATE_CYCLES = 3;
-const GATE_HOST = process.env.JDELEGATE_GATE_HOST || "MyContabo";
+// Gate hosts differ per project (mediatgb gates run on MediaContabo), so a ticket's host is resolved per wait: the worker record or
+// the brief names it, else the first of JDELEGATE_GATE_HOST, then JDELEGATE_GATE_HOSTS that has the ticket file. The answer is kept in the record.
+const GATE_HOSTS = (process.env.JDELEGATE_GATE_HOSTS || "MyContabo,MediaContabo").split(",").map((h) => h.trim()).filter(Boolean);
+function resolveGateHost(id, rec) {
+  const named = rec?.gateHost || String(opt.brief).match(/\bgate[ _-]?host\s*[:=]\s*([A-Za-z0-9._@-]+)/i)?.[1];
+  if (named) return named;
+  const cands = [...new Set([process.env.JDELEGATE_GATE_HOST, ...GATE_HOSTS].filter(Boolean))];
+  if (cands.length > 1) {
+    for (const h of cands) {
+      const r = spawnSync("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", h, "test", "-e", `/root/.gate/tickets/${id}.cmd`], { timeout: 5000, stdio: "ignore" });
+      if (r.status === 0) return h;
+    }
+  }
+  return cands[0] || "MyContabo";   // nobody has it (or one candidate): the first host answers with its own "no ticket"
+}
 const waitingGate = (answer) => String(answer).split("\n").map((l) => l.trim()).filter(Boolean).pop()?.match(/^WAITING-GATE ([A-Za-z0-9._-]+)$/)?.[1] ?? "";
 /** `ssh HOST gate-wait ID MAX` in bash; an ssh drop (255) is retried, gate-wait is idempotent. Resolves { rc, out }. */
-async function sshGateWait(id) {
+async function sshGateWait(id, host) {
   const max = String(Number(process.env.JDELEGATE_GATE_MAX_S) || 15000);   // 75 min lock wait + 150 min run, as gate-run allows
   for (let attempt = 0; ; attempt++) {
     const r = await new Promise((res) => {
       let out = "";
-      const c = spawn("bash", ["-c", 'ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=5 "$0" gate-wait "$1" "$2"', GATE_HOST, id, max], { stdio: ["ignore", "pipe", "inherit"] });
+      const c = spawn("bash", ["-c", 'ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=5 "$0" gate-wait "$1" "$2"', host, id, max], { stdio: ["ignore", "pipe", "inherit"] });
       c.stdout.on("data", (b) => { out += b; });
       c.on("close", (code) => res({ rc: code ?? 255, out }));
       c.on("error", () => res({ rc: 255, out }));
@@ -1132,9 +1211,10 @@ async function gateCycle(result, attemptP) {
   }
   const rec = readRecord(nameLabel);
   if (!rec?.sessionId) return;   // nothing to resume: report the answer as it is
-  saveRecord({ ...rec, state: "waiting-gate", gate: id, gateAt: new Date().toISOString() });
+  const gateHost = resolveGateHost(id, rec);
+  saveRecord({ ...rec, state: "waiting-gate", gate: id, gateHost, gateAt: new Date().toISOString() });
   console.error(`[jdelegate] "${nameLabel}" waits for gate ${id} (wait ${cycle + 1}/${GATE_CYCLES}); no model session is alive meanwhile`);
-  const { rc, out } = await sshGateWait(id);
+  const { rc, out } = await sshGateWait(id, gateHost);
   const [first = "", ...rest] = out.split("\n");
   const tail = rest.join("\n").trim();
   // gate-wait's exit code is the gate's own rc, so 3 and 4 (still running / runner died) are ambiguous: the verdict is its first line.

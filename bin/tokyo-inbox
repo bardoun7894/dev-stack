@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""tokyo-inbox [--days N] [--json]: who is waiting on me, from the Tokyo server (read-only).
+
+Sources, read over ssh MyContabo with a script sent on stdin (nothing is written there):
+  /root/tokyo/logs/biz-inbound.jsonl, biz-site-inbound.jsonl, and promises in life.db
+  (sqlite3 -readonly). /root/tokyo/.env is never touched.
+
+Outbound source: crmAi postgres (container crmai-postgres-1), table messages joined to
+conversations/contacts; sender in ('owner','assistant') is a message from our side
+(owner from the phone, assistant = auto-reply), created_at is naive UTC. Read-only SELECT.
+
+Rule for "waiting on me": per sender (phone digits), waiting = last inbound newer than
+last outbound. Answered senders are dropped from the list (flag replied=true, listed
+under "answered" in --json). Entries the bot itself muted, deduplicated or could not
+handle (muted/dup/unsupported/capped/skipped) are not counted as waiting.
+"""
+import argparse, json, subprocess, sys
+from datetime import datetime, timedelta, timezone
+
+MAX_LINES = 30
+IGNORED = {"muted", "dup", "unsupported", "capped", "skipped"}
+
+REMOTE = r"""
+echo ===BIZ===
+tail -n 4000 /root/tokyo/logs/biz-inbound.jsonl 2>/dev/null
+echo ===SITE===
+tail -n 500 /root/tokyo/logs/biz-site-inbound.jsonl 2>/dev/null
+echo ===OUT===
+docker exec crmai-postgres-1 sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB -At -F "|" -c "select c.phone, to_char(max(m.created_at),\$\$YYYY-MM-DD\"T\"HH24:MI:SS\$\$) from messages m join conversations v on v.id=m.conversation_id join contacts c on c.id=v.contact_id where m.sender in (\$\$owner\$\$,\$\$assistant\$\$) and m.created_at > now() - interval \$\$40 days\$\$ group by c.phone"' 2>/dev/null
+echo ===PROMISES===
+sqlite3 -readonly -json /root/tokyo/life.db "select id,content,made_to,due_date,status from promises where status in ('pending','due_soon','overdue') and due_date is not null and due_date <> '' order by due_date" 2>/dev/null || echo '[]'
+"""
+
+
+def fetch():
+    r = subprocess.run(["ssh", "-o", "ConnectTimeout=8", "MyContabo", "bash -s"],
+                       input=REMOTE, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit("tokyo-inbox: ssh failed: " + r.stderr.strip()[:200])
+    return r.stdout
+
+
+def split(out):
+    parts, cur = {}, None
+    for line in out.splitlines():
+        if line in ("===BIZ===", "===SITE===", "===OUT===", "===PROMISES==="):
+            cur = line.strip("="); parts[cur] = []
+        elif cur:
+            parts[cur].append(line)
+    return parts
+
+
+def parse_ts(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def digits(s):
+    return "".join(ch for ch in (s or "").split("@")[0] if ch.isdigit())
+
+
+def outbound(parts):
+    out = {}
+    for line in parts.get("OUT", []):
+        ph, _, ts = line.partition("|")
+        try:
+            out[digits(ph)] = parse_ts(ts + "+00:00")
+        except ValueError:
+            continue
+    return out
+
+
+def waiting(parts, days, now):
+    """All senders in the window, each with a replied flag (later outbound exists)."""
+    out = outbound(parts)
+    cutoff = now - timedelta(days=days)
+    senders = {}
+    for src in ("BIZ", "SITE"):
+        for line in parts.get(src, []):
+            try:
+                d = json.loads(line)
+                ts = parse_ts(d["ts"])
+            except (ValueError, KeyError):
+                continue
+            if ts < cutoff or d.get("action") in IGNORED:
+                continue
+            key = d.get("phone") or d.get("jid") or d.get("pushName")
+            e = senders.setdefault(key, {"name": d.get("pushName") or "?", "phone": d.get("phone", "").split("@")[0],
+                                         "src": "site" if src == "SITE" else "biz", "n": 0, "ts": ts, "text": ""})
+            e["n"] += 1
+            if ts >= e["ts"]:
+                e["ts"], e["text"] = ts, (d.get("text") or "").replace("\n", " ")
+    res = sorted(senders.values(), key=lambda e: e["ts"], reverse=True)
+    for e in res:
+        last_out = out.get(digits(e["phone"]))
+        e["replied"] = bool(last_out and last_out > e["ts"])
+        e["age_h"] = round((now - e["ts"]).total_seconds() / 3600, 1)
+        e["ts"] = e["ts"].isoformat()
+    return res
+
+
+def promises(parts, today):
+    try:
+        rows = json.loads("".join(parts.get("PROMISES", [])) or "[]")
+    except ValueError:
+        return []
+    limit = (today + timedelta(days=7)).isoformat()
+    return [p for p in rows if p.get("due_date") and p["due_date"][:10] <= limit]
+
+
+def age(h):
+    return f"{h:.0f}h" if h < 48 else f"{h / 24:.0f}d"
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="tokyo-inbox")
+    ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    now = datetime.now(timezone.utc)
+    parts = split(fetch())
+    allw, p = waiting(parts, a.days, now), promises(parts, now.astimezone().date())
+    w = [e for e in allw if not e["replied"]]
+    if a.json:
+        print(json.dumps({"waiting": w, "answered": [e for e in allw if e["replied"]], "promises": p}, ensure_ascii=False, indent=1))
+        return
+    pshow = p[:10]
+    room = MAX_LINES - 2 - len(pshow) - (1 if len(p) > len(pshow) else 0)
+    wshow = w[:room - (1 if len(w) > room else 0)]
+    print(f"Waiting on me (last {a.days}d, {len(w)} of {len(allw)} senders unanswered)")
+    for e in wshow:
+        tail = e["phone"][-3:] if e["phone"] else ""
+        who = f"{e['name']} ..{tail}" if tail else e["name"]
+        print(f"- {who} ({e['n']}) {age(e['age_h'])} ago [{e['src']}] {e['text'][:60]}")
+    if len(w) > len(wshow):
+        print(f"  ... {len(w) - len(wshow)} more (use --json)")
+    print(f"Promises due (<= today+7, {len(p)})")
+    for x in pshow:
+        print(f"- {x['due_date'][:10]} [{x['status']}] {x['content'][:70]}" + (f" -> {x['made_to']}" if x.get("made_to") else ""))
+    if len(p) > len(pshow):
+        print(f"  ... {len(p) - len(pshow)} more")
+
+
+main()

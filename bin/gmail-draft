@@ -1,0 +1,133 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["google-api-python-client", "google-auth-oauthlib"]
+# ///
+"""gmail-draft: read Gmail and create drafts. There is deliberately no way to deliver mail:
+only login/list/read/draft exist, and the scopes are gmail.readonly + gmail.compose."""
+import argparse, base64, os, sys
+from email.message import EmailMessage
+from pathlib import Path
+
+CFG = Path.home() / ".config" / "gmail-draft"
+SECRET, TOKEN = CFG / "client_secret.json", CFG / "token.json"
+SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose"]
+
+SETUP = f"""gmail-draft: no OAuth client found at {SECRET}
+Setup:
+  1. Google Cloud console -> APIs & Services -> enable the Gmail API, configure the consent screen
+  2. Credentials -> Create credentials -> OAuth client ID -> Application type "Desktop app"
+  3. Download the JSON and save it to {SECRET}
+  4. Run: gmail-draft login
+"""
+
+
+def need_secret():
+    if not SECRET.exists():
+        sys.stderr.write(SETUP)
+        sys.exit(2)
+
+
+def creds():
+    need_secret()
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    if not TOKEN.exists():
+        sys.exit("gmail-draft: not logged in, run: gmail-draft login")
+    c = Credentials.from_authorized_user_file(str(TOKEN), SCOPES)
+    if not c.valid and c.refresh_token:
+        c.refresh(Request())
+        save(c)
+    return c
+
+
+def save(c):
+    CFG.mkdir(parents=True, exist_ok=True)
+    TOKEN.write_text(c.to_json())
+    os.chmod(TOKEN, 0o600)
+
+
+def svc():
+    from googleapiclient.discovery import build
+    return build("gmail", "v1", credentials=creds(), cache_discovery=False)
+
+
+def hdr(msg, name):
+    for h in msg.get("payload", {}).get("headers", []):
+        if h["name"].lower() == name.lower():
+            return h["value"]
+    return ""
+
+
+def body_text(part):
+    if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
+        return base64.urlsafe_b64decode(part["body"]["data"]).decode("utf-8", "replace")
+    for p in part.get("parts", []) or []:
+        t = body_text(p)
+        if t:
+            return t
+    return ""
+
+
+def cmd_login(a):
+    need_secret()
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    c = InstalledAppFlow.from_client_secrets_file(str(SECRET), SCOPES).run_local_server(port=0)
+    save(c)
+    print(f"logged in, token saved to {TOKEN}")
+
+
+def cmd_list(a):
+    s = svc()
+    q = f"newer_than:{a.days}d" + (" is:unread" if a.unread else "")
+    r = s.users().messages().list(userId="me", q=q, maxResults=a.max).execute()
+    for m in r.get("messages", []):
+        d = s.users().messages().get(userId="me", id=m["id"], format="metadata",
+                                     metadataHeaders=["From", "Subject", "Date"]).execute()
+        print(f"{hdr(d, 'From')} | {hdr(d, 'Subject')} | {hdr(d, 'Date')} | {m['id']} | {d.get('snippet', '')[:100]}")
+
+
+def cmd_read(a):
+    d = svc().users().messages().get(userId="me", id=a.id, format="full").execute()
+    for h in ("From", "To", "Cc", "Subject", "Date", "Message-ID"):
+        print(f"{h}: {hdr(d, h)}")
+    print()
+    print(body_text(d["payload"]) or d.get("snippet", ""))
+
+
+def cmd_draft(a):
+    s = svc()
+    m = EmailMessage()
+    m["To"], m["Subject"] = a.to, a.subject
+    m.set_content(Path(a.body_file).read_text())
+    body = {}
+    if a.reply_to:
+        r = s.users().messages().list(userId="me", q=f"rfc822msgid:{a.reply_to.strip('<>')}", maxResults=1).execute()
+        found = r.get("messages", [])
+        if found:
+            body["threadId"] = found[0]["threadId"]
+        m["In-Reply-To"] = m["References"] = a.reply_to if a.reply_to.startswith("<") else f"<{a.reply_to}>"
+    body["message"] = {"raw": base64.urlsafe_b64encode(m.as_bytes()).decode(), **({"threadId": body["threadId"]} if "threadId" in body else {})}
+    body.pop("threadId", None)
+    d = s.users().drafts().create(userId="me", body=body).execute()
+    print(f"draft id: {d['id']} (not sent)")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="gmail-draft", description="Gmail read + draft (never sends)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("login").set_defaults(f=cmd_login)
+    p = sub.add_parser("list"); p.set_defaults(f=cmd_list)
+    p.add_argument("--unread", action="store_true"); p.add_argument("--days", type=int, default=7)
+    p.add_argument("--max", type=int, default=20)
+    p = sub.add_parser("read"); p.set_defaults(f=cmd_read); p.add_argument("id")
+    p = sub.add_parser("draft"); p.set_defaults(f=cmd_draft)
+    p.add_argument("--to", required=True); p.add_argument("--subject", required=True)
+    p.add_argument("--body-file", required=True); p.add_argument("--reply-to")
+    a = ap.parse_args()
+    if a.cmd in ("list", "read", "draft"):
+        need_secret()
+    a.f(a)
+
+
+main()

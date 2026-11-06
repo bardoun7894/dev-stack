@@ -8,6 +8,11 @@
 - Contradicting reviewers: give the implementer both, it decides. Findings with one root cause get one design.
 - The defect is proven; the suggested fix is a guess.
 - Max 1 review + 1 fix round; docs-only diffs get no review.
+- Reviewer reads `REVIEW.md` at the repo root if present (template: `references/REVIEW.md.template`); it wins over generic checks.
+- Tag every finding Important / Nit / Pre-existing. Pre-existing = present before this diff; reported, never blocks.
+- The fix round's re-review covers the fix diff only, never re-posts earlier findings, and names the bug CLASS so every instance gets fixed, not one line.
+- Learned rules: a finding of the same kind seen twice in a repo becomes a one-line rule in that repo's REVIEW.md (or a lint rule or test), added by the implementer in the fix round.
+- Always-owner paths (billing/payments, auth, CI workflows, deploy scripts, DB migrations) need the owner's look even when review is green.
 
 ## Verify (fresh verifier, flow matrix only)
 - Brief template: `~/code/dev-stack/scripts/gate/verifier-brief-template.md`; preflight runs `~/code/dev-stack/scripts/gate/verify-env-guard.sh <repo>` first and stops on exit 1 if any prod DB/env pattern matches.

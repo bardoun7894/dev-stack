@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""cpu-budget: how many parallel processes may a heavy job (Pest, vite, next build) use NOW.
+
+Owner rule 2026-10-31 "calculate from CPU, then work", on every machine.
+  cores    physical cores (Linux: unique core,socket pairs from lscpu; Mac: performance cores)
+  busy     load1 scaled to cores: ceil(load1 * cores / logical CPUs)
+  ram_cap  available MB / --per-proc-mb (default 512)
+  role_cap /etc/cpu-budget.conf (Mac: ~/.config/cpu-budget.conf), keys role= and max=
+             role=ci -> cores, hosting -> cores/4, production -> 1, build50 -> 50% of ALL cores
+  result   clamp(min(cores - busy, ram_cap, role_cap), 1, cores)
+CPU_BUDGET or PEST_PROCS in the environment overrides the result.
+Usage: cpu-budget [--explain] [--per-proc-mb N]
+"""
+import math
+import os
+import platform
+import subprocess
+import sys
+
+CONF_LINUX = "/etc/cpu-budget.conf"
+
+
+def parse_lscpu(text):
+    pairs = {tuple(ln.strip().split(",")[:2]) for ln in text.splitlines()
+             if ln.strip() and not ln.startswith("#")}
+    return len(pairs)
+
+
+def parse_meminfo(text):
+    for ln in text.splitlines():
+        if ln.startswith("MemAvailable:"):
+            return int(ln.split()[1]) // 1024
+    return 0
+
+
+def parse_vm_stat(text):
+    page = 4096
+    pages = 0
+    for ln in text.splitlines():
+        if "page size of" in ln:
+            page = int(ln.split("page size of")[1].split()[0])
+        elif ln.startswith(("Pages free:", "Pages inactive:")):
+            pages += int(ln.split(":")[1].strip().rstrip("."))
+    return pages * page // (1024 * 1024)
+
+
+def parse_conf(text):
+    out = {}
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln and not ln.startswith("#") and "=" in ln:
+            k, v = ln.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _int(v):
+    try:
+        n = int(str(v).strip())
+        return n if n >= 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def mac_all_cores(perf0, perf1, physical, fallback=1):
+    """ALL physical cores of an Apple Silicon Mac: performance + efficiency (M5: 4 + 6 = 10)."""
+    if perf0 and perf1:
+        return perf0 + perf1
+    return physical or fallback
+
+
+def compute(cores, logical, load1, mem_mb, per_proc_mb=512, conf=None, env=None, all_cores=None):
+    conf = conf or {}
+    env = env if env is not None else {}
+    all_cores = all_cores or cores
+    busy = math.ceil(load1 * cores / logical) if logical else 0
+    mx = _int(conf.get("max"))
+    # a measured max= may exceed the physical cores (SMT helps), never the logical CPU count
+    ceiling = min(mx, logical) if mx else cores
+    free = ceiling - busy
+    ram_cap = max(0, mem_mb // max(1, per_proc_mb))
+    role = conf.get("role", "")
+    role_cap = {"ci": ceiling, "hosting": max(1, cores // 4), "production": 1,
+                "build50": max(1, all_cores // 2)}.get(role, ceiling)
+    if mx:
+        role_cap = min(role_cap, mx)
+    result = max(1, min(min(free, ram_cap, role_cap), ceiling))
+    override = None
+    for k in ("CPU_BUDGET", "PEST_PROCS"):
+        override = _int(env.get(k))
+        if override:
+            result = override
+            break
+    return dict(cores=cores, logical=logical, load1=load1, busy=busy, free=free, mem_mb=mem_mb,
+                ram_cap=ram_cap, role=role or "none", role_cap=role_cap, override=override,
+                result=result)
+
+
+def explain(r):
+    return "\n".join([
+        f"cores={r['cores']} (logical {r['logical']})",
+        f"busy={r['busy']} (load1 {r['load1']})",
+        f"free={r['free']} (cores - busy)",
+        f"ram_cap={r['ram_cap']} ({r['mem_mb']} MB available)",
+        f"role_cap={r['role_cap']} (role {r['role']})",
+        f"override={r['override'] if r['override'] else 'none'}",
+        f"result={r['result']}",
+    ])
+
+
+def _run(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+def gather(per_proc_mb):
+    logical = os.cpu_count() or 1
+    load1 = os.getloadavg()[0]
+    if platform.system() == "Darwin":
+        cores = _int(_run("sysctl", "-n", "hw.perflevel0.physicalcpu").strip()) \
+            or _int(_run("sysctl", "-n", "hw.physicalcpu").strip()) or logical
+        all_cores = mac_all_cores(_int(_run("sysctl", "-n", "hw.perflevel0.physicalcpu").strip()),
+                                  _int(_run("sysctl", "-n", "hw.perflevel1.physicalcpu").strip()),
+                                  _int(_run("sysctl", "-n", "hw.physicalcpu").strip()), cores)
+        mem_mb = parse_vm_stat(_run("vm_stat"))
+        conf_path = os.path.expanduser("~/.config/cpu-budget.conf")
+    else:
+        cores = parse_lscpu(_run("lscpu", "-p=core,socket")) or logical
+        all_cores = cores
+        mem_mb = parse_meminfo(open("/proc/meminfo").read())
+        conf_path = CONF_LINUX
+    try:
+        conf = parse_conf(open(conf_path).read())
+    except OSError:
+        conf = {}
+    return dict(cores=cores, logical=logical, load1=load1, mem_mb=mem_mb, per_proc_mb=per_proc_mb,
+                conf=conf, env=os.environ, all_cores=all_cores)
+
+
+def main(argv):
+    per = 512
+    if "--per-proc-mb" in argv:
+        per = _int(argv[argv.index("--per-proc-mb") + 1]) or 512
+    r = compute(**gather(per))
+    print(explain(r) if "--explain" in argv else r["result"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
