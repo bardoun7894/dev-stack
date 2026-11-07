@@ -15,6 +15,7 @@ Rule (owner 2026-10-27, CLAUDE.md "WORK SPLIT"): split work by context, not by r
 | 0 | Prior art | `/kb-query` |
 | 1 | Brainstorm | `brainstorming` |
 | 2 | Spec | `/kb-spec pre` then `/speckit.specify`; research via `jdelegate --role researcher` (question only) into `research.md` |
+| 2d | EGM review | every spec: `/egm:egm-review specs/NNN/spec.md` (agy same prefix; Codex via skill picker), then `/egm:egm-resolve`, owner decides each finding, before `/kb-spec plan`. FAST LANE has no spec, skips it |
 | 2c | System design | new apps only: `system-design`, owner approves D/Q codes |
 | 3 | Plan | `/kb-spec plan` then `/speckit.plan`, `writing-plans` |
 | 4 | Tasks | `/kb-spec tasks` then `/speckit.tasks`; add the "Done when" section |

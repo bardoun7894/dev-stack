@@ -6,6 +6,7 @@
 | Jev down (402 / out of quota) | Nothing to change: `jev` and `jdelegate` fall back to local Laya (`laya-serve`, `engine: laya`, every `--min` gate fails closed); `jev-browse` and `jev-review` stay on Jev only and exit 3, so phase 8/9 use their normal LLM path. See `skills/jev/SKILL.md` "Local fallback: Laya" | auto |
 | 1. Brainstorm options      | `brainstorming` (obra)                                                                 | inline         |
 | 2. Pre-spec KB research    | `/kb-spec pre` → `/speckit.specify`                                                    | inline         |
+| 2d. EGM review (every spec) | `/egm:egm-review specs/NNN/spec.md` (agy same prefix; Codex via skill picker) → `/egm:egm-resolve`, owner decides each finding, before `/kb-spec plan`. FAST LANE (no spec) skips | inline         |
 | 2a. Research (mandatory)   | `jdelegate --no-auto-mcp --no-auto-skill --no-auto-role --role researcher` (one pass, read-only) → `specs/NNN/research.md` | Sonnet (read-only + web) |
 | 2b. Market & UX research   | `market-swot project` — required for new products and UI-heavy features (new screens, redesign, landing pages), optional otherwise; feeds Phase 3 | inline + researcher |
 | 2c. System design          | `system-design` → `specs/NNN/system-design.md`, check.sh gate (+ optional `/egm:egm-review` Goldfish comprehension/critic pass on high-risk designs); HARD STOP for owner approval of D/Q codes. New apps/projects only; skip for features in existing apps | inline         |
