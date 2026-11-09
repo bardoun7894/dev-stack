@@ -9,6 +9,20 @@ import { fileURLToPath } from 'node:url';
 
 const JD = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'jdelegate');
 const tmp = mkdtempSync(join(tmpdir(), 'jdelegate-test-'));
+// Spec 002 D2: a guard `ssh` is first on PATH for the whole file; every spawn below inherits it, so no test can reach a real host.
+const GUARD_SRC = join(dirname(fileURLToPath(import.meta.url)), 'fake-ssh-guard.sh');
+const guardDir = join(tmp, 'ssh-guard');
+const guardLog = join(tmp, 'ssh-guard.log');
+mkdirSync(guardDir, { recursive: true });
+writeFileSync(join(guardDir, 'ssh'), readFileSync(GUARD_SRC), { mode: 0o755 });
+process.env.PATH = `${guardDir}:${process.env.PATH}`;
+process.env.SSH_GUARD_LOG = guardLog;
+/** Throws when the guard log shows a call to any host except the fake one. */
+const assertNoRealSsh = (log) => {
+  const calls = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
+  const real = calls.filter((l) => !l.startsWith('fake-host '));
+  assert.deepEqual(real, [], `a test reached ssh: ${real.join(' | ')}`);
+};
 const sh = (cmd, cwd) => spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
 const write = (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); };
 
@@ -1544,3 +1558,170 @@ test('RR2 a codex model_not_found at start falls to the next chain entry', () =>
     env: rrEnv({ JDELEGATE_CACHE: join(tmp, 'cache-rr2'), JEV_EXHAUSTED_FILE: join(tmp, 'rr2-ex.json'), JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_AUTO_ROLE: '0' }) });
   assert.match(r.stdout, /FALLBACK-OPUS-RAN/, r.stdout + r.stderr);
 });
+
+// ── Spec 002: no registration from throwaway work (T1-T5), error-only claude starts mark the provider (T6-T8) ──
+const ROOT = join(dirname(JD), '..');   // a real, non-tmp cwd
+const s2bin = join(tmp, 's2bin');
+const s2stub = (name, body) => { write(join(s2bin, name), `#!/bin/bash\ncat >/dev/null\n${body}\n`); chmodSync(join(s2bin, name), 0o755); };
+s2stub('jev', 'exit 3');
+const s2env = (extra = {}) => {
+  const e = { ...process.env, PATH: `${s2bin}:${process.env.PATH}`, JDELEGATE_JEV: join(s2bin, 'jev'), JEV_ROUTER_CONFIG: tiers, JDELEGATE_CACHE: join(tmp, 'cache-s2'),
+    JDELEGATE_SELECT_CACHE: '0', JDELEGATE_AUTO_SKILL: '0', JDELEGATE_AUTO_ROLE: '0', JDELEGATE_AUTO_MCP: '0', JDELEGATE_MAX_LIVE: '99', WORLD_TRACK: '0',
+    JEV_EXHAUSTED_FILE: join(tmp, 's2-no-exhausted.json'), ...extra };
+  for (const k of ['FACTORY_BIN', 'JDELEGATE_REG_SSH', 'JDELEGATE_REG']) if (!(k in extra)) delete e[k];
+  return e;
+};
+const s2log = (name) => { const f = join(tmp, `s2-${name}.log`); try { unlinkSync(f); } catch {} return f; };
+const s2run = (name, { cwd = repo, args = [], env = {}, harness = ['--harness', 'claude'], escalate = false } = {}) =>
+  spawnSync(process.execPath, [JD, '--no-tab', ...(escalate ? [] : ['--no-escalate']), ...harness, '--cwd', cwd, '--name', name, ...args, 'do the thing'],
+    { encoding: 'utf8', timeout: 60_000, env: s2env(env) });
+const sshCalls = (log) => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []);
+
+test('T1 a cwd inside the tmp dir never calls ssh', () => {
+  s2stub('claude', 'echo ok');
+  const log = s2log('t1');
+  const r = s2run('s2t1', { env: { SSH_GUARD_LOG: log } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(sshCalls(log), []);
+});
+
+test('T2 --dry-run never calls ssh, even in a real cwd', () => {
+  const log = s2log('t2');
+  const r = s2run('s2t2', { cwd: ROOT, args: ['--dry-run'], env: { SSH_GUARD_LOG: log } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(sshCalls(log), []);
+});
+
+test('T3 JDELEGATE_REG=0 never calls ssh, even in a real cwd', () => {
+  s2stub('claude', 'echo ok');
+  const log = s2log('t3');
+  const r = s2run('s2t3', { cwd: ROOT, env: { SSH_GUARD_LOG: log, JDELEGATE_REG: '0' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(sshCalls(log), []);
+});
+
+test('T4 a real cwd still submits the job (fake ssh on PATH)', () => {
+  s2stub('claude', 'echo ok');
+  const fake = join(tmp, 's2fake');
+  write(join(fake, 'ssh'), readFileSync(GUARD_SRC, 'utf8').replace('[ "$host" = fake-host ]', 'true'));
+  chmodSync(join(fake, 'ssh'), 0o755);
+  const log = s2log('t4');
+  const r = s2run('s2t4', { cwd: ROOT, env: { SSH_GUARD_LOG: log, PATH: `${fake}:${s2bin}:${process.env.PATH}` } });
+  assert.equal(r.status, 0, r.stderr);
+  const calls = sshCalls(log);
+  assert.ok(calls.some((c) => c.includes('factory submit')), calls.join('\n'));
+});
+
+test('T5 the suite guard fails a test that would reach a real host', () => {
+  const log = s2log('t5');
+  const env = { ...process.env, SSH_GUARD_LOG: log };
+  const real = spawnSync('ssh', ['-o', 'BatchMode=yes', 'MyContabo', 'factory', 'list'], { encoding: 'utf8', env });
+  assert.equal(real.status, 1);
+  assert.throws(() => assertNoRealSsh(log), /a test reached ssh: MyContabo factory list/);
+  const fakeHost = s2log('t5b');
+  assert.equal(spawnSync('ssh', ['fake-host', 'true'], { encoding: 'utf8', env: { ...env, SSH_GUARD_LOG: fakeHost } }).status, 0);
+  assertNoRealSsh(fakeHost);
+});
+
+// T6-T8: chain = a claude (cliproxy) ref, then a codex ref; the stubs count their launches.
+const s2tiers = join(tmp, 's2-tiers.json');
+write(s2tiers, JSON.stringify({ tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test', 'openai-codex/gpt-test']])) }));
+const s2count = (f, name) => (existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter((l) => l === name).length : 0);
+const s2api = (name, claudeBody, codexBody = 'echo CODEX-RAN', { tiersFile = s2tiers, escalate = false, env = {} } = {}) => {
+  const launches = join(tmp, `s2-${name}-launches`);
+  try { unlinkSync(launches); } catch {}
+  s2stub('claude', `echo claude >> ${launches}\n${claudeBody}`);
+  s2stub('codex', `echo codex >> ${launches}\n${codexBody}`);
+  s2stub('opencode', `echo opencode >> ${launches}\necho OPENCODE-RAN`);
+  const exFile2 = join(tmp, `s2-${name}-exhausted.json`);
+  try { unlinkSync(exFile2); } catch {}
+  const r = s2run(`s2${name}`, { harness: [], escalate, env: { JEV_ROUTER_CONFIG: tiersFile, JEV_EXHAUSTED_FILE: exFile2, JDELEGATE_REG: '0', SSH_GUARD_LOG: s2log(name), ...env } });
+  return { r, launches, exFile2 };
+};
+const API_ERR = 'echo "API Error: 503 auth_unavailable"; echo "API Error: 503 auth_unavailable"; echo "API Error: 503 auth_unavailable"; exit 1';
+
+test('T6 an error-only claude start marks cliproxy exhausted for ~30 min and retries once on the next candidate', () => {
+  const { r, launches, exFile2 } = s2api('t6', API_ERR);
+  assert.equal(s2count(launches, 'claude'), 1, r.stdout + r.stderr);
+  assert.equal(s2count(launches, 'codex'), 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /CODEX-RAN/);
+  const until = JSON.parse(readFileSync(exFile2, 'utf8')).cliproxy;
+  assert.ok(until > Date.now() + 25 * 60e3 && until < Date.now() + 35 * 60e3, String(until));
+});
+
+const s2tiers3 = join(tmp, 's2-tiers3.json');
+write(s2tiers3, JSON.stringify({ tiers: Object.fromEntries(['T0', 'T1', 'T2', 'T3', 'T4'].map((t) => [t, ['cliproxy/claude-test', 'openai-codex/gpt-test', 'opencode-go/oc-test']])) }));
+
+test('T7 a second error-only start does not retry again: the third chain entry never launches', () => {
+  const { r, launches } = s2api('t7', API_ERR, API_ERR, { tiersFile: s2tiers3 });   // cliproxy is the only claude-harness provider, so the retry candidate (codex) fails the same way
+  assert.equal(s2count(launches, 'claude'), 1, r.stdout + r.stderr);
+  assert.equal(s2count(launches, 'codex'), 1, r.stdout + r.stderr);
+  assert.equal(s2count(launches, 'opencode'), 0, r.stdout + r.stderr);
+});
+
+test('P2 after the retry also fails, escalation does not launch another run (no --no-escalate)', () => {
+  const { r, launches } = s2api('t7e', API_ERR, API_ERR, { tiersFile: s2tiers3, escalate: true });
+  assert.equal(s2count(launches, 'claude'), 1, r.stdout + r.stderr);
+  assert.equal(s2count(launches, 'codex'), 1, r.stdout + r.stderr);
+  assert.equal(s2count(launches, 'opencode'), 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /escalated/);
+});
+
+test('P1 an exit-0 worker whose answer quotes an API error is not error-only: no mark, no retry', () => {
+  const { r, launches, exFile2 } = s2api('p1rc0', 'echo "API Error: 503 auth_unavailable"; echo "API Error: 503 auth_unavailable"; echo "API Error: 503 auth_unavailable"; exit 0');
+  assert.equal(s2count(launches, 'claude'), 1, r.stdout + r.stderr);
+  assert.equal(s2count(launches, 'codex'), 0);
+  assert.ok(!existsSync(exFile2));
+});
+
+test('P1 an error text that is not at the start of the line is not error-only (even with exit 1)', () => {
+  const { r, launches, exFile2 } = s2api('p1anch', 'echo "the log said API Error: 503 auth_unavailable"; echo "see: You have hit your weekly limit"; echo "auth_unavailable"; exit 1');
+  assert.equal(s2count(launches, 'codex'), 0, r.stdout + r.stderr);
+  assert.ok(!existsSync(exFile2));
+});
+
+const monthShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+test('P2 weekly limit with "resets <Mon D>, 3pm (Africa/Casablanca)" is exhausted until then', () => {
+  const t = new Date(Date.now() + 3 * 864e5);
+  const want = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate(), 14);   // 3pm at UTC+1; Casablanca drops to UTC+0 in Ramadan, hence the 2 h slack
+  const { r, launches, exFile2 } = s2api('p2date', `echo "You've hit your weekly limit · resets ${monthShort[t.getUTCMonth()]} ${t.getUTCDate()}, 3pm (Africa/Casablanca)"; exit 1`);
+  assert.equal(s2count(launches, 'codex'), 1, r.stdout + r.stderr);
+  const until = JSON.parse(readFileSync(exFile2, 'utf8')).cliproxy;
+  assert.ok(Math.abs(until - want) <= 2 * 36e5, `${new Date(until).toISOString()} vs ${new Date(want).toISOString()}`);
+});
+
+test('P2 weekly limit with "resets 7am (Africa/Casablanca)" is exhausted until the next 7am there', () => {
+  const { r, launches, exFile2 } = s2api('p2time', `echo "You've hit your weekly limit · resets 7am (Africa/Casablanca)"; exit 1`);
+  assert.equal(s2count(launches, 'codex'), 1, r.stdout + r.stderr);
+  const until = JSON.parse(readFileSync(exFile2, 'utf8')).cliproxy;
+  assert.ok(until > Date.now() && until <= Date.now() + 24 * 36e5 + 6e4, new Date(until).toISOString());
+  assert.ok([6, 7].includes(new Date(until).getUTCHours()) && new Date(until).getUTCMinutes() === 0, new Date(until).toISOString());
+});
+
+test('D4 an error-only run ends with reason "api errors" in the registry (fake reg ssh)', () => {
+  const regLog = s2log('d4reg');
+  const regSsh = join(tmp, 's2-reg-ssh.sh');
+  write(regSsh, `#!/bin/sh
+while [ "$1" = -o ]; do shift 2; done
+host=$1; shift
+printf '%s\\n' "$host $*" >> ${regLog}
+case "$*" in
+  *"factory submit"*) cat >/dev/null; echo "proj:owner:d4:1";;
+  *"frun start"*) echo "jdelegate:d4:1:1";;
+esac
+exit 0
+`);
+  chmodSync(regSsh, 0o755);
+  const { r } = s2api('d4', API_ERR, 'echo CODEX-RAN', { env: { JDELEGATE_REG: undefined, JDELEGATE_REG_SSH: regSsh } });
+  const calls = sshCalls(regLog);
+  assert.ok(calls.some((c) => /frun finish \S+ 1 --reason 'api errors'/.test(c)), calls.join('\n') + r.stderr);
+});
+
+test('T8 one transient API error followed by real turns does not retry', () => {
+  const { r, launches, exFile2 } = s2api('t8', 'echo "API Error: 503 auth_unavailable"; echo "real work line 1"; echo "real work line 2"; echo "done"');
+  assert.equal(s2count(launches, 'claude'), 1, r.stdout + r.stderr);
+  assert.equal(s2count(launches, 'codex'), 0);
+  assert.ok(!existsSync(exFile2));
+});
+
+test('D2 no test in this file reached a real ssh host', () => { assertNoRealSsh(guardLog); });

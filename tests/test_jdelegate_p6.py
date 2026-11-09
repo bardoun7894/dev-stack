@@ -28,6 +28,25 @@ def write_exe(path, body):
     os.chmod(path, 0o755)
 
 
+GUARD = os.path.join(os.path.dirname(__file__), "fake-ssh-guard.sh")
+
+
+def install_guard(test, tmpdir, env):
+    """Spec 002 D2: a guard `ssh` is first on PATH (an explicit JDELEGATE_REG_SSH fake still works); teardown fails when it saw a real host."""
+    d = os.path.join(tmpdir, "ssh-guard")
+    os.makedirs(d)
+    write_exe(os.path.join(d, "ssh"), open(GUARD).read())
+    test.guard_log = os.path.join(tmpdir, "ssh-guard.log")
+    env["SSH_GUARD_LOG"] = test.guard_log
+    env["PATH"] = f"{d}:{env['PATH']}"
+
+
+def assert_no_real_ssh(test):
+    calls = open(test.guard_log).read().splitlines() if os.path.exists(test.guard_log) else []
+    real = [c for c in calls if not c.startswith("fake-host ")]
+    test.assertEqual(real, [], "a test reached ssh")
+
+
 def route_stub(kind):
     """A `jev` that answers the routing question: tier T3, the given kind, doer."""
     answers = {"tier": {"choice": "T3", "confidence": 0.9}, "kind": {"choice": kind, "confidence": 0.9}, "role": {"choice": "doer", "confidence": 0.9}, "ui": {"noul": 0}}
@@ -59,10 +78,12 @@ class P6Test(unittest.TestCase):
             "WORLD_TRACK": "0",
             "FACTORY_BIN": os.path.join(self.bin, "factory"),
         }
-        for k in ("FACTORY_RETRY", "JDELEGATE_ADVISOR"):
+        for k in ("FACTORY_RETRY", "JDELEGATE_ADVISOR", "JDELEGATE_REG_SSH"):
             self.env.pop(k, None)
+        install_guard(self, t, self.env)
 
     def tearDown(self):
+        assert_no_real_ssh(self)
         self.tmp.cleanup()
 
     def dry(self, *args, **extra):
