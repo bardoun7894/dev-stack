@@ -892,7 +892,8 @@ const REG_SPOOL = join(CACHE, "reg-spool.jsonl");
  * Spec 002 D1: throwaway work never registers: --dry-run, JDELEGATE_REG=0, and a cwd inside the tmp dir (tests, scratch repos).
  * An explicit fake (JDELEGATE_REG_SSH, FACTORY_BIN) is the caller's own choice and is honoured.
  */
-const inTmp = (dir) => [tmpdir(), "/tmp", "/private/tmp"].some((t) => { const r = resolve(t); return dir === r || dir.startsWith(r + "/"); });
+const realOr = (x) => { try { return realpathSync(x); } catch { return resolve(x); } };
+const inTmp = (dir) => { const d0 = realOr(dir); return [tmpdir(), "/tmp", "/private/tmp"].some((t) => { const r = realOr(t); return d0 === r || d0.startsWith(r + "/"); }); };
 const regAllowed = () => process.env.JDELEGATE_REG !== "0" && !opt.dryRun && (!!process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH || !inTmp(opt.cwd));
 const regOn = () => regAllowed() && (!process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH);
 /** Run `tool ...args` on the server, 25 s cap (measured 2026-10-29: bare ssh 3 s, frun 5 s, factory submit 9 s; a 6 s cap lost events). Returns the spawnSync result. */
@@ -1105,7 +1106,7 @@ function apiErrorOnlyUntil(attemptP, run, rc) {
   if (attemptP.harness !== "claude" || !rc) return 0;   // a worker that exited 0 did real work; its answer may quote an API error
   let text = "";
   try { text = readFileSync(join(run, "out.log"), "utf8"); } catch { return 0; }
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   if (!lines.length || !lines.every((l) => API_ERROR_LINE.test(l))) return 0;
   const limit = lines.find((l) => /^You[’']ve hit your (weekly|usage) limit/i.test(l));
   const t = limit ? weeklyResetAt(limit) : NaN;
@@ -1320,7 +1321,7 @@ for (let i = 0; i < 3 && !opt.model && markModelError(currentP, result); i++) {
   currentP = next; result = await execute(brief, currentP, tier);
 }
 // agy out of quota: record it and retry once on the claude chain at the same tier (never escalate to agy T4 for this).
-if (!opt.model && markAgyExhausted(currentP, result.run)) {
+if (!opt.model && markAgyExhausted(currentP, result.run) && !apiErrRetried) {
   const next = pick({ ...d, tier }, { noAgy: true });
   if (next) { currentP = next; result = await execute(brief, currentP, tier); }
 }
