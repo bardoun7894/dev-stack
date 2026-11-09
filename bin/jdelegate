@@ -674,7 +674,7 @@ function workerScript(p, run, briefFile) {
       // settings, no hooks, no auto-memory; the worker's context is <run>/worker-prompt.md. (--bare would break OAuth login.)
       // Skill tool on: the repo's own .claude/skills (project settings) stay reachable; slash commands stay off.
       // disableBundledSkills: with the Skill tool on, ~19 bundled Claude Code skills added ~3k first-turn tokens.
-      return `cat ${q(briefFile)} | CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} ${sessionFlag} --dangerously-skip-permissions --setting-sources project,local --settings ${q(LEAN_SETTINGS)} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
+      return `< ${q(briefFile)} CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude -p --model ${q(id)} --effort ${effortClaude}${advisorFlag(id)} ${sessionFlag} --dangerously-skip-permissions --setting-sources project,local --settings ${q(LEAN_SETTINGS)} --append-system-prompt-file ${q(join(run, "worker-prompt.md"))} --strict-mcp-config --mcp-config ${q(join(run, "mcp.json"))} --exclude-dynamic-system-prompt-sections --tools Bash Read Edit Write Glob Grep Skill 2>&1 | tee ${q(join(run, "out.log"))}`;
     case "codex": {
       // Owner 2026-11-06: a codex reviewer reads .env even in its read-only sandbox, so it runs in a git-archive export (tracked files only) under the run dir, never in the live worktree.
       const reviewer = opt.role === "reviewer";
