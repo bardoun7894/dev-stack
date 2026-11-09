@@ -24,6 +24,6 @@ for h in "${HOSTS[@]}"; do
     continue
   fi
   echo "mirror -> $h"
-  COPYFILE_DISABLE=1 tar --no-xattrs -C "$SRC" -h -cf - --exclude='*.bak*' --exclude='__pycache__' "${ITEMS[@]}" \
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "$SRC" -cf ---exclude='*.bak*' --exclude='__pycache__' "${ITEMS[@]}" \
     | ssh -o BatchMode=yes -o ConnectTimeout=15 "$h" 'mkdir -p ~/.claude && tar --overwrite -C ~/.claude -xf -'
 done
