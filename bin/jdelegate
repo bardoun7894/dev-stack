@@ -1110,7 +1110,8 @@ function apiErrorOnlyUntil(attemptP, run, rc) {
   if (!lines.length || !lines.every((l) => API_ERROR_LINE.test(l))) return 0;
   const limit = lines.find((l) => /^You[’']ve hit your (weekly|usage) limit/i.test(l));
   const t = limit ? weeklyResetAt(limit) : NaN;
-  return t > Date.now() ? t : Date.now() + 30 * 60e3;
+  const now = Date.now();
+  return t > now && t <= now + 8 * 864e5 ? t : now + 30 * 60e3;
 }
 /** Record the provider as exhausted (same file and shape the router reads). Returns true when the run was error-only. */
 function markApiErrors(attemptP, result) {
