@@ -30,6 +30,25 @@ def write_exe(path, body):
     os.chmod(path, 0o755)
 
 
+GUARD = os.path.join(os.path.dirname(__file__), "fake-ssh-guard.sh")
+
+
+def install_guard(test, tmpdir, env):
+    """Spec 002 D2: a guard `ssh` is first on PATH (an explicit JDELEGATE_REG_SSH fake still works); teardown fails when it saw a real host."""
+    d = os.path.join(tmpdir, "ssh-guard")
+    os.makedirs(d)
+    write_exe(os.path.join(d, "ssh"), open(GUARD).read())
+    test.guard_log = os.path.join(tmpdir, "ssh-guard.log")
+    env["SSH_GUARD_LOG"] = test.guard_log
+    env["PATH"] = f"{d}:{env['PATH']}"
+
+
+def assert_no_real_ssh(test):
+    calls = open(test.guard_log).read().splitlines() if os.path.exists(test.guard_log) else []
+    real = [c for c in calls if not c.startswith("fake-host ")]
+    test.assertEqual(real, [], "a test reached ssh")
+
+
 class RegisterTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -53,8 +72,10 @@ class RegisterTest(unittest.TestCase):
         for k in ("FACTORY_BIN", "FACTORY_JOB_ID", "HERDR_ENV", "HERDR_PANE_ID"):
             env.pop(k, None)
         self.env = env
+        install_guard(self, t, self.env)
 
     def tearDown(self):
+        assert_no_real_ssh(self)
         self.tmp.cleanup()
 
     def launch(self, *extra):
@@ -110,6 +131,21 @@ class RegisterTest(unittest.TestCase):
         write_exe(os.path.join(self.bin, "ssh"), "#!/bin/sh\necho 'submit: halted' >&2\nexit 97\n")
         r = self.launch()
         self.assertEqual(r.returncode, 97, r.stdout + r.stderr)
+
+    def test_tmp_cwd_without_explicit_fake_ssh_never_calls_ssh(self):  # T1: the tmp repo is throwaway work
+        del self.env["JDELEGATE_REG_SSH"]
+        r = self.launch()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(os.path.exists(self.guard_log))
+
+    def test_registration_off_switch(self):  # T3
+        del self.env["JDELEGATE_REG_SSH"]
+        self.env["JDELEGATE_REG"] = "0"
+        r = subprocess.run(["node", JDELEGATE, "--no-tab", "--no-auto-role", "--model", PIN, "--cwd", os.path.dirname(os.path.dirname(os.path.abspath(JDELEGATE))),
+                            "--name", "f5-off", "--timeout", "5", "reply ok"], capture_output=True, text=True, env=self.env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == "__main__":

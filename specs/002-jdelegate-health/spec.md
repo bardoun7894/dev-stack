@@ -42,3 +42,9 @@ itself, cleaning the existing 1,602 rows (software-factory spec 010 + one reconc
 | F1 | live registry count N | run the jdelegate test suite | registry count still N | none | none |
 | F2 | fake claude printing 3 `API Error: 503 auth_unavailable` turns | `jdelegate --cwd <repo> "<brief>"` | first run ends `api errors`, provider in exhausted.json, second run on next candidate | 2 runs (fake reg) | exhausted.json entry |
 | F3 | F2 state | run again within 30 min | router skips the exhausted provider from the start | 1 run | none |
+
+## Result (implementer, 2026-11-09)
+- F1: live registry `jobs` count 3940 before and 3942 after the one full scoped run. The two new rows are project `review`, owner `reviewer`,
+  created 00:16:52 and 00:17:11Z while the run was going: a real concurrent review job from another session, not a jdelegate test (tests use project `repo`, and the ssh guard logged no real host).
+- T1-T8 and the D2 guard are in tests/jdelegate.test.mjs (T1-T3 also in test_jdelegate_register.py); tests/fake-ssh-guard.sh is the guard ssh.
+- Second scoped run was spent: T4/T7 stub fix (stub must drain stdin, else exit 141) and T6/T7 (no `--harness`, so the retry may leave claude) were fixed after it and are not re-run.

@@ -44,7 +44,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 const HOME = homedir();
@@ -888,7 +888,13 @@ function worldTrack(args) {
  */
 const REG_HOST = process.env.JDELEGATE_REG_HOST || "MyContabo";
 const REG_SPOOL = join(CACHE, "reg-spool.jsonl");
-const regOn = () => !process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH;
+/**
+ * Spec 002 D1: throwaway work never registers: --dry-run, JDELEGATE_REG=0, and a cwd inside the tmp dir (tests, scratch repos).
+ * An explicit fake (JDELEGATE_REG_SSH, FACTORY_BIN) is the caller's own choice and is honoured.
+ */
+const inTmp = (dir) => [tmpdir(), "/tmp", "/private/tmp"].some((t) => { const r = resolve(t); return dir === r || dir.startsWith(r + "/"); });
+const regAllowed = () => process.env.JDELEGATE_REG !== "0" && !opt.dryRun && (!!process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH || !inTmp(opt.cwd));
+const regOn = () => regAllowed() && (!process.env.FACTORY_BIN || !!process.env.JDELEGATE_REG_SSH);
 /** Run `tool ...args` on the server, 25 s cap (measured 2026-10-29: bare ssh 3 s, frun 5 s, factory submit 9 s; a 6 s cap lost events). Returns the spawnSync result. */
 function regSsh(tool, args, input, timeout = 25000) {
   const remote = [tool, ...args.map((a) => (/^[A-Za-z0-9._:\/=@-]+$/.test(a) ? a : q(a)))].join(" ");
@@ -922,6 +928,7 @@ function spoolReg(args) {
 let factoryJobId;
 function submitJob(briefFile) {
   if (factoryJobId !== undefined) return factoryJobId;
+  if (!regAllowed()) return (factoryJobId = "");
   const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9._-]/g, "-");
   const top = spawnSync("git", ["-C", opt.cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", timeout: 5000 }).stdout?.trim();
   const project = slug(basename(top || opt.cwd));
@@ -1055,6 +1062,35 @@ function markModelError(attemptP, result) {
   return true;
 }
 
+/**
+ * Spec 002 D3: epoch ms until which the provider is out when a claude worker's output is error-only (its first 3 non-empty
+ * lines are all API errors: 5xx, auth_unavailable, weekly/usage limit), else 0. A weekly-limit text with a parseable reset
+ * time ("resets Nov 12, 3pm") counts until then; otherwise 30 min.
+ */
+const API_ERROR_LINE = /API Error:\s*5\d\d|auth_unavailable|hit your (weekly|usage) limit|<synthetic>/i;
+function apiErrorOnlyUntil(attemptP, run) {
+  if (attemptP.harness !== "claude") return 0;
+  let text = "";
+  try { text = readFileSync(join(run, "out.log"), "utf8"); } catch { return 0; }
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
+  if (!lines.length || !lines.every((l) => API_ERROR_LINE.test(l))) return 0;
+  const reset = lines.join("\n").match(/hit your (?:weekly|usage) limit[^\n]*?resets?\s+(?:at\s+)?([^\n·]*?)\s*(?:\(|$)/i)?.[1];
+  const t = reset ? Date.parse(reset.replace(/(\d)(st|nd|rd|th)\b/g, "$1")) : NaN;
+  return t > Date.now() ? t : Date.now() + 30 * 60e3;
+}
+/** Record the provider as exhausted (same file and shape the router reads). Returns true when the run was error-only. */
+function markApiErrors(attemptP, result) {
+  if (!result.apiErrUntil) return false;
+  const prov = provider(attemptP.ref);
+  EXHAUSTED[prov] = result.apiErrUntil;
+  try {
+    const cur = readJson(EXHAUSTED_FILE) ?? {};
+    mkdirSync(dirname(EXHAUSTED_FILE), { recursive: true });
+    writeFileSync(EXHAUSTED_FILE, JSON.stringify({ ...cur, [prov]: result.apiErrUntil }, null, 2));
+  } catch { /* the in-memory mark still drives this run's fallback */ }
+  return true;
+}
+
 async function execute(attemptBrief, attemptP, attemptTier) {
   const { run, label, rec } = makeRun(attemptBrief, attemptP, attemptTier);
   const started = Date.now();
@@ -1104,7 +1140,8 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     await new Promise((r) => setTimeout(r, 500));
   }
   const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
-  regEnd(regRun, rc);
+  const apiErrUntil = apiErrorOnlyUntil(attemptP, run);
+  regEnd(regRun, rc, apiErrUntil ? "api errors" : undefined);
   worldEvent(rc === 0 ? "done" : "failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
   const answer = finalAnswer(attemptP, run);
   const tabFile = join(run, "tab");
@@ -1114,7 +1151,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
       if (tab && spawnSync("herdr", ["tab", "close", tab], { encoding: "utf8", timeout: 8000 }).status === 0) unlinkSync(tabFile);
     } catch { /* a tab that will not close must not fail the job */ }
   }
-  return { run, where, started, rc, answer };
+  return { run, where, started, rc, answer, apiErrUntil };
 }
 
 /**
@@ -1230,6 +1267,11 @@ const initialTier = d.tier;
 let tier = initialTier, currentP = p, brief = opt.brief;
 let result = await execute(brief, currentP, tier);
 await gateCycle(result, currentP);
+// Error-only claude start (503 auth_unavailable, weekly limit): mark the provider, retry ONCE on the next candidate; a second error-only start does not retry.
+if (markApiErrors(currentP, result) && !opt.model) {
+  const next = pick({ ...d, tier });
+  if (next) { currentP = next; result = await execute(brief, currentP, tier); markApiErrors(currentP, result); }
+}
 if (!opt.model && markCodexExhausted(currentP, result.run)) {
   const next = pick({ ...d, tier });
   if (next) { currentP = next; result = await execute(brief, currentP, tier); }
