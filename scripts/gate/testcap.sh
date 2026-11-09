@@ -5,7 +5,7 @@ MAX=${TESTCAP_MAX:-2}
 top=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "testcap: not in a git worktree" >&2; exit 2; }
 br=$(git branch --show-current 2>/dev/null); [ -n "$br" ] || br=$(git rev-parse --short HEAD)
 dir=~/.cache/gate/testcap; mkdir -p "$dir"
-cf="$dir/$(printf '%s@%s' "$top" "$br" | tr -c 'A-Za-z0-9._-\n' '_').count"
+cf="$dir/$(printf '%s@%s' "$top" "$br" | tr -c 'A-Za-z0-9._\n-' '_').count"
 n=$(cat "$cf" 2>/dev/null); n=${n:-0}
 case "$1" in
   --reset) echo 0 > "$cf"; echo "testcap: reset for $br (0/$MAX)"; exit 0;;
