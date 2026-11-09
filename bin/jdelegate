@@ -1067,15 +1067,48 @@ function markModelError(attemptP, result) {
  * lines are all API errors: 5xx, auth_unavailable, weekly/usage limit), else 0. A weekly-limit text with a parseable reset
  * time ("resets Nov 12, 3pm") counts until then; otherwise 30 min.
  */
-const API_ERROR_LINE = /API Error:\s*5\d\d|auth_unavailable|hit your (weekly|usage) limit|<synthetic>/i;
-function apiErrorOnlyUntil(attemptP, run) {
-  if (attemptP.harness !== "claude") return 0;
+const API_ERROR_LINE = /^(?:API Error:\s*5\d\d\b|API Error:.*auth_unavailable|You[’']ve hit your (?:weekly|usage) limit)/i;
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+/** Epoch ms of the wall-clock time y-mo-d h:mi in time zone tz (local time when tz is empty); NaN for an unknown zone. */
+function zonedEpoch(y, mo, d, h, mi, tz) {
+  if (!tz) return new Date(y, mo, d, h, mi).getTime();
+  try {
+    const off = (ts) => {
+      const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" }).formatToParts(ts).map((x) => [x.type, +x.value]));
+      return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(ts / 1000) * 1000;
+    };
+    const guess = Date.UTC(y, mo, d, h, mi);
+    return guess - off(guess - off(guess));
+  } catch { return NaN; }
+}
+/** Epoch ms of "resets Nov 12, 3pm (Africa/Casablanca)" / "resets 7am (Africa/Casablanca)": current year, rolled to the next year / day when already past. NaN when unparseable. */
+function weeklyResetAt(text, now = Date.now()) {
+  const m = text.match(/resets?\s+(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b\s*(?:\(([^)]+)\))?/i);
+  if (!m) return NaN;
+  const mon = m[1] ? MONTHS.indexOf(m[1].toLowerCase()) : -1;
+  if (m[1] && mon < 0) return NaN;
+  const h = (+m[3] % 12) + (m[5].toLowerCase() === "pm" ? 12 : 0), mi = +(m[4] || 0), tz = m[6]?.trim() || "";
+  const ref = new Date(now);
+  if (mon >= 0) {
+    const y = ref.getFullYear();
+    let t = zonedEpoch(y, mon, +m[2], h, mi, tz);
+    if (t <= now) t = zonedEpoch(y + 1, mon, +m[2], h, mi, tz);
+    return t;
+  }
+  // time only: the next such wall-clock time in that zone (the zone's date may differ from the local one, so try yesterday..tomorrow)
+  const day = tz ? (() => { try { return new Date(now).toLocaleDateString("en-CA", { timeZone: tz }).split("-").map(Number); } catch { return null; } })() : [ref.getFullYear(), ref.getMonth() + 1, ref.getDate()];
+  if (!day) return NaN;
+  const cands = [-1, 0, 1].map((k) => zonedEpoch(day[0], day[1] - 1, day[2] + k, h, mi, tz)).filter((t) => t > now);
+  return cands.length ? Math.min(...cands) : NaN;
+}
+function apiErrorOnlyUntil(attemptP, run, rc) {
+  if (attemptP.harness !== "claude" || !rc) return 0;   // a worker that exited 0 did real work; its answer may quote an API error
   let text = "";
   try { text = readFileSync(join(run, "out.log"), "utf8"); } catch { return 0; }
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 3);
   if (!lines.length || !lines.every((l) => API_ERROR_LINE.test(l))) return 0;
-  const reset = lines.join("\n").match(/hit your (?:weekly|usage) limit[^\n]*?resets?\s+(?:at\s+)?([^\n·]*?)\s*(?:\(|$)/i)?.[1];
-  const t = reset ? Date.parse(reset.replace(/(\d)(st|nd|rd|th)\b/g, "$1")) : NaN;
+  const limit = lines.find((l) => /^You[’']ve hit your (weekly|usage) limit/i.test(l));
+  const t = limit ? weeklyResetAt(limit) : NaN;
   return t > Date.now() ? t : Date.now() + 30 * 60e3;
 }
 /** Record the provider as exhausted (same file and shape the router reads). Returns true when the run was error-only. */
@@ -1140,7 +1173,7 @@ async function execute(attemptBrief, attemptP, attemptTier) {
     await new Promise((r) => setTimeout(r, 500));
   }
   const rc = Number(readFileSync(join(run, "exit"), "utf8").trim()) || 0;
-  const apiErrUntil = apiErrorOnlyUntil(attemptP, run);
+  const apiErrUntil = apiErrorOnlyUntil(attemptP, run, rc);
   regEnd(regRun, rc, apiErrUntil ? "api errors" : undefined);
   worldEvent(rc === 0 ? "done" : "failed", ["--dur", String(Math.round((Date.now() - started) / 1000))]);
   const answer = finalAnswer(attemptP, run);
@@ -1267,9 +1300,11 @@ const initialTier = d.tier;
 let tier = initialTier, currentP = p, brief = opt.brief;
 let result = await execute(brief, currentP, tier);
 await gateCycle(result, currentP);
+let apiErrRetried = false;   // an outage is not a weak-model problem: no tier escalation after an error-only start
 // Error-only claude start (503 auth_unavailable, weekly limit): mark the provider, retry ONCE on the next candidate; a second error-only start does not retry.
 if (markApiErrors(currentP, result) && !opt.model) {
   const next = pick({ ...d, tier });
+  apiErrRetried = true;
   if (next) { currentP = next; result = await execute(brief, currentP, tier); markApiErrors(currentP, result); }
 }
 if (!opt.model && markCodexExhausted(currentP, result.run)) {
@@ -1299,7 +1334,7 @@ else {
     verdict = JSON.parse(judged.stdout).answers.outcome;
   } catch { verdict = undefined; }
 }
-if (!opt.noEscalate && !opt.model && TIERS.indexOf(tier) < 4 && verdict?.choice === "failed_needs_stronger" && Number(verdict.confidence) >= 0.6) {
+if (!opt.noEscalate && !opt.model && !apiErrRetried && !result.apiErrUntil && TIERS.indexOf(tier) < 4 && verdict?.choice === "failed_needs_stronger" && Number(verdict.confidence) >= 0.6) {
   const previousAnswer = result.answer.slice(0, 2000);
   const oldTier = tier;
   tier = TIERS[TIERS.indexOf(tier) + 1];
