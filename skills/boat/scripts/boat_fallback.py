@@ -20,8 +20,11 @@ VARS = ("CI_RUNS_ON", "CI_CONTAINER")
 
 
 def gh_cli(args):
-    r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=60)
-    return r.returncode, r.stdout.strip()
+    try:
+        r = subprocess.run(["gh"] + args, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return 1, str(e)
+    return r.returncode, (r.stdout or r.stderr).strip()
 
 
 def parse_iso(s):
@@ -55,6 +58,11 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
     st = load_state(state_path)
     actions = []
 
+    def save():
+        if not dry_run:
+            Path(state_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(state_path).write_text(json.dumps(st, indent=1))
+
     def log(msg):
         line = "%s %s%s" % (now.strftime("%Y-%m-%dT%H:%M:%SZ"), "DRY " if dry_run else "", msg)
         actions.append(line)
@@ -76,9 +84,14 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         rc, out = gh(["variable", "list", "-R", repo, "--json", "name,value"])
         if rc != 0:
             raise RuntimeError("gh variable list %s failed" % repo)
-        return {v["name"]: v["value"] for v in json.loads(out or "[]")}
+        try:
+            return {v["name"]: v["value"] for v in json.loads(out or "[]")}
+        except (ValueError, KeyError, TypeError):
+            raise RuntimeError("gh variable list %s: bad output" % repo)
 
-    def set_var(repo, name, value):
+    def set_var(repo, name, value, current):
+        if value == current:
+            return True
         if value is None:
             return write(["variable", "delete", name, "-R", repo], "%s: delete %s" % (repo, name))
         return write(["variable", "set", name, "-R", repo, "--body", value], "%s: set %s=%s" % (repo, name, value))
@@ -135,14 +148,14 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
                 rs = st["repos"][repo] = {"saved": None, "set": fb, "since": now.isoformat(),
                                           "until": until.isoformat(), "pending": [], "reran": []}
             if rs is None:
-                saved = {k: cur.get(k) for k in VARS}
+                # State first: a crash after the writes must not lose the values to put back.
+                rs = st["repos"][repo] = {"saved": {k: cur.get(k) for k in VARS}, "set": fb,
+                                          "since": now.isoformat(), "until": until.isoformat(),
+                                          "pending": [], "reran": []}
+                save()
                 log("%s: boat full until %s, moving CI to %s" % (repo, reset.strftime("%H:%M"), fb))
-                ok = set_var(repo, "CI_RUNS_ON", fb)
-                ok = set_var(repo, "CI_CONTAINER", cur.get("CI_FALLBACK_CONTAINER")) and ok
-                if not ok:
-                    continue
-                rs = st["repos"][repo] = {"saved": saved, "set": fb, "since": now.isoformat(),
-                                          "until": until.isoformat(), "pending": [], "reran": []}
+                set_var(repo, "CI_RUNS_ON", fb, cur.get("CI_RUNS_ON"))
+                set_var(repo, "CI_CONTAINER", cur.get("CI_FALLBACK_CONTAINER"), cur.get("CI_CONTAINER"))
             elif until > parse_iso(rs["until"]):
                 rs["until"] = until.isoformat()
             rs["pending"] = sorted(set(rs["pending"]) | set(runs))
@@ -150,22 +163,37 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             when = (reset + RERUN_MARGIN).isoformat()
             for run in runs:
                 key = "%s|%s" % (repo, run)
-                st["later"][key] = max(st["later"].get(key, when), when)
+                queued = max((j["queuedAt"] for j in js if str(j["runId"]) == run and j.get("queuedAt")),
+                             default=now.isoformat())
+                old = st["later"].get(key) or {}
+                st["later"][key] = {"when": max(old.get("when", when), when), "queued": queued}
         handled |= {str(j["id"]) for j in js}
 
     # 2. Full reruns on the fallback once GitHub shows the run completed.
     for repo, rs in st["repos"].items():
         for run in list(rs["pending"]):
-            if run_status(repo, run) == "completed":
+            status = run_status(repo, run)
+            if status == "unknown":  # run deleted or unreadable: never block the way back to boat
+                log("%s: run %s not readable, dropped" % (repo, run))
+                rs["pending"].remove(run)
+            elif status == "completed":
                 if write(["run", "rerun", run, "-R", repo], "%s: rerun %s in full on the fallback" % (repo, run)):
                     rs["pending"].remove(run)
                     rs["reran"].append(run)
 
     # 3. Repos without a fallback: rerun the failed jobs after the reset.
-    for key, when in list(st["later"].items()):
-        if now >= parse_iso(when):
+    for key, item in list(st["later"].items()):
+        if now >= parse_iso(item["when"]):
             repo, run = key.split("|", 1)
-            if run_status(repo, run) != "completed":
+            info = run_info(repo, run)
+            if not info:
+                log("%s: run %s not readable, dropped" % (repo, run))
+                del st["later"][key]
+                continue
+            if info.get("startedAt") and parse_iso(info["startedAt"]) > parse_iso(item["queued"]):
+                del st["later"][key]  # someone already reran it
+                continue
+            if info.get("status") != "completed":
                 continue
             if write(["run", "rerun", run, "-R", repo, "--failed"], "%s: boat has room again, rerun %s --failed" % (repo, run)):
                 del st["later"][key]
@@ -188,9 +216,13 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             continue
         since = parse_iso(rs["since"])
         rc, out = gh(["run", "list", "-R", repo, "--limit", "50", "--json", "databaseId,status,createdAt"])
-        if rc != 0:
+        try:
+            runs_now = json.loads(out or "[]") if rc == 0 else None
+        except ValueError:
+            runs_now = None
+        if runs_now is None:
             continue
-        busy = [r for r in json.loads(out or "[]")
+        busy = [r for r in runs_now
                 if r.get("status") != "completed" and parse_iso(r["createdAt"]) >= since]
         busy += [r for r in rs["reran"] if run_status(repo, r) != "completed"]
         if busy:
@@ -198,14 +230,12 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         log("%s: boat has room again, moving CI back" % repo)
         ok = True
         for k in VARS:
-            ok = set_var(repo, k, rs["saved"].get(k)) and ok
+            ok = set_var(repo, k, rs["saved"].get(k), cur.get(k)) and ok
         if ok:
             del st["repos"][repo]
 
     st["handled"] = sorted(handled)
-    if not dry_run:
-        Path(state_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(state_path).write_text(json.dumps(st, indent=1))
+    save()
     return actions
 
 

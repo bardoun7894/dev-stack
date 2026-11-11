@@ -49,3 +49,10 @@
 |---|---|---|
 | F1 Boat full | Next real plan-limit pause on mediatgb | within 4 min the vars point to the laptop and the run is rerun there; log line shows it |
 | F2 Room again | 15 min after the reset, no active laptop runs | `CI_RUNS_ON` back to `"boat"`, `CI_CONTAINER` gone |
+
+## Review (Opus, one round) and fixes
+- P1 deleting an absent `CI_CONTAINER` failed (404) and lost the state: `set_var` skips writes that change nothing.
+- P1 a crash after the switch lost the saved values: state is written before the var writes; `gh_cli` turns
+  timeouts and missing gh into rc 1; bad JSON from gh is handled.
+- P2 `rerun --failed` skipped when the run was already rerun after the pause; unreadable runs are dropped from
+  pending/later so they never block the way back. Cron runs under `flock -n`.

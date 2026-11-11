@@ -50,6 +50,8 @@ class FakeGh:
             return 0, ""
         if args[:2] == ["variable", "delete"]:
             repo = args[args.index("-R") + 1]
+            if args[2] not in self.vars[repo]:
+                return 1, "HTTP 404"  # like real gh
             self.vars[repo].pop(args[2], None)
             self.writes.append(("delete", repo, args[2]))
             return 0, ""
@@ -192,6 +194,48 @@ class AlreadyHandled(Base):
         self.tick([job("j1")], t("07:58"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "never restores values it did not set")
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
+
+
+class ReviewFixes(Base):
+    def test_no_fallback_container_and_no_container_switches_cleanly(self):
+        del self.gh.vars[REPO]["CI_FALLBACK_CONTAINER"]
+        self.tick([job("j1")], t("07:12"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK)
+        st = bf.load_state(self.state)
+        self.assertEqual(st["repos"][REPO]["saved"]["CI_RUNS_ON"], '"boat"')
+        self.tick([job("j1")], t("07:58"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+        self.assertFalse(any(w[0] == "delete" for w in self.gh.writes))
+
+    def test_crash_after_switch_keeps_saved_values(self):
+        real = self.gh.__call__
+
+        def boom(args):
+            if args[:2] == ["run", "view"] and self.gh.vars[REPO]["CI_RUNS_ON"] == FALLBACK:
+                raise RuntimeError("crash")
+            return real(args)
+        with self.assertRaises(RuntimeError):
+            bf.tick([job("j1")], now=t("07:12"), gh=boom, state_path=self.state, log_path=self.log)
+        self.assertEqual(bf.load_state(self.state)["repos"][REPO]["saved"]["CI_RUNS_ON"], '"boat"')
+        self.tick([job("j1")], t("07:14"))
+        self.tick([job("j1")], t("07:58"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+
+    def test_later_skipped_when_someone_reran(self):
+        j = job("k1", repo=OTHER, run="200")
+        self.tick([j], t("07:30"))
+        self.gh.started[(OTHER, "200")] = "2026-11-11T07:35:00Z"
+        self.tick([j], t("07:43"))
+        self.assertEqual(self.gh.writes, [])
+        self.assertEqual(bf.load_state(self.state)["later"], {})
+
+    def test_unreadable_pending_run_does_not_block_restore(self):
+        self.gh.runs[(REPO, "100")] = "in_progress"
+        self.tick([job("j1")], t("07:12"))
+        real = self.gh.__call__
+        gone = lambda a: (1, "not found") if a[:3] == ["run", "view", "100"] else real(a)
+        bf.tick([job("j1")], now=t("07:58"), gh=gone, state_path=self.state, log_path=self.log)
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
 
 
 class Ignores(Base):
