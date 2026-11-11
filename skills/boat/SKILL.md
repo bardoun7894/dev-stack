@@ -15,7 +15,8 @@ API contract: `references/api.md`.
 
 ## Hard rules
 
-1. MEDIA TGB (bardoun7894/mediatgb) CI runs on boat (owner 2026-11-11, replaces the 2026-11-02 no-boat rule): repo variable `CI_RUNS_ON` = `"boat"`, `CI_CONTAINER` unset. Full CI took 10 min on boat vs ~53 min median on the laptop runner. Fallback: `CI_RUNS_ON` = `["self-hosted","cachy"]` and restore `CI_CONTAINER` (laptop image `localhost:5000/mediatgb-ci:2`).
+1. Boat first, other machines only when boat is full (owner 2026-11-11: "use boat ci always if there is place then the other devices"). Full = the plan's 60 sandbox starts per rolling hour are used (one start per CI job; a MEDIA TGB run is 13). Boat then pauses jobs (`GET /ci`, `state: paused`) and GitHub fails the run. `boat.py ci fallback` (cron every 2 min on MyContabo) moves a repo with var `CI_FALLBACK_RUNS_ON` (+ `CI_FALLBACK_CONTAINER`) to that runner, reruns the paused run in full, and moves it back 15 min after boat's reset; repos without a fallback get `rerun --failed` after the reset. Never `--failed` for mediatgb (the shard count comes from the vars); never delete `CI_RUNS_ON` there (the default is GitHub-hosted). Log: `~/.local/state/boat-fallback.log`.
+   MEDIA TGB (bardoun7894/mediatgb) CI runs on boat (owner 2026-11-11, replaces the 2026-11-02 no-boat rule): repo variable `CI_RUNS_ON` = `"boat"`, `CI_CONTAINER` unset. Full CI took 10 min on boat vs ~53 min median on the laptop runner. Fallback: `CI_RUNS_ON` = `["self-hosted","cachy"]` and restore `CI_CONTAINER` (laptop image `localhost:5000/mediatgb-ci:2`).
 2. Always delete sandboxes. `stop` keeps a BILLED snapshot; use `stop` only when you truly need to resume.
 3. The API key lives in env `BOAT_API_KEY` or `~/.config/boat/key` (chmod 600). Never put it in briefs, logs, commits or command lines.
 4. boat VMs have network access, unlike the factory's `--network none` Docker sandbox. Do not run untrusted code with secrets present.
@@ -35,6 +36,7 @@ boat.py stop ID | delete ID
 boat.py cleanup [--older-than HOURS] [--yes]     # dry run unless --yes
 boat.py ci enable REPO_PATH [--workflow FILE]    # ubuntu-latest -> boat, shows diff, no commit
 boat.py ci status OWNER/REPO                     # gh run list summary
+boat.py ci fallback [--dry-run]                  # boat full -> fallback runners, back after the reset
 ```
 
 Put options before `--`; everything after it is the remote command.
