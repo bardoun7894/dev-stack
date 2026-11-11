@@ -174,14 +174,15 @@ class TestCi(Base):
             self.assertIn("macos-latest", txt)
             self.assertIn("-    runs-on: ubuntu-latest", o)
 
-    def test_ci_enable_refuses_mediatgb(self):
+    def test_ci_enable_allows_mediatgb(self):
+        # Owner 2026-11-11: MEDIA TGB CI runs on boat; the 2026-11-02 block is gone.
         with tempfile.TemporaryDirectory() as d:
             wf = Path(d, "mediatgb", ".github", "workflows")
             wf.mkdir(parents=True)
             (wf / "ci.yml").write_text("runs-on: ubuntu-latest\n")
             code, _, e = self.run_main(Fake(), ["ci", "enable", str(Path(d, "mediatgb"))])
-            self.assertEqual(code, 1)
-            self.assertIn("ubuntu-latest", (wf / "ci.yml").read_text())
+            self.assertEqual(code, 0)
+            self.assertIn("runs-on: boat", (wf / "ci.yml").read_text())
 
 
 class TestCleanup(Base):

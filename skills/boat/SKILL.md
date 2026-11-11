@@ -15,7 +15,7 @@ API contract: `references/api.md`.
 
 ## Hard rules
 
-1. MEDIA TGB (bardoun7894/mediatgb) never runs on GitHub or boat CI (owner rule 2026-11-02). `ci enable` refuses it.
+1. MEDIA TGB (bardoun7894/mediatgb) CI runs on boat (owner 2026-11-11, replaces the 2026-11-02 no-boat rule): repo variable `CI_RUNS_ON` = `"boat"`, `CI_CONTAINER` unset. Full CI took 10 min on boat vs ~53 min median on the laptop runner. Fallback: `CI_RUNS_ON` = `["self-hosted","cachy"]` and restore `CI_CONTAINER` (laptop image `localhost:5000/mediatgb-ci:2`).
 2. Always delete sandboxes. `stop` keeps a BILLED snapshot; use `stop` only when you truly need to resume.
 3. The API key lives in env `BOAT_API_KEY` or `~/.config/boat/key` (chmod 600). Never put it in briefs, logs, commits or command lines.
 4. boat VMs have network access, unlike the factory's `--network none` Docker sandbox. Do not run untrusted code with secrets present.

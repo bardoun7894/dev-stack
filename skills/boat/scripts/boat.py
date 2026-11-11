@@ -22,7 +22,7 @@ SYNC_MAX = 600
 READY_STATES = {"ready", "idle", "running"}
 BAD_STATES = {"error", "failed", "archived", "stopped", "deleted"}
 SIZES = ["small", "default", "large", "xlarge"]
-BLOCKED_REPOS = ("mediatgb",)  # owner rule 2026-11-02: never on GitHub/boat CI
+BLOCKED_REPOS = ()  # none; MEDIA TGB moved to boat CI (owner 2026-11-11), replacing the 2026-11-02 block
 
 
 class BoatError(Exception):
@@ -336,7 +336,7 @@ def rewrite_workflow(text):
 def cmd_ci_enable(a):
     repo = os.path.abspath(a.repo_path)
     if _blocked(repo):
-        raise BoatError("refused: MEDIA TGB never runs on GitHub/boat CI (owner rule 2026-11-02)")
+        raise BoatError("refused: repo is in BLOCKED_REPOS")
     wf_dir = Path(repo) / ".github" / "workflows"
     files = [wf_dir / a.workflow] if a.workflow else sorted(list(wf_dir.glob("*.yml")) + list(wf_dir.glob("*.yaml")))
     changed = []
