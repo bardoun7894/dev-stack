@@ -422,7 +422,15 @@ def build_parser():
     sp.add_argument("repo")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(fn=cmd_ci_status)
+    sp = cis.add_parser("fallback", help="boat full -> fallback runners, back to boat after the reset (cron)")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.set_defaults(fn=cmd_ci_fallback)
     return p
+
+
+def cmd_ci_fallback(a):
+    import boat_fallback
+    return boat_fallback.main(dry_run=a.dry_run)
 
 
 def main(argv=None):
