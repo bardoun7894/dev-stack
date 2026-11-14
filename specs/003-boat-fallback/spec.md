@@ -24,21 +24,25 @@
 - D4 Repo without a fallback: after the reset time + 2 min, `gh run rerun <id> --failed` once per run.
 - D5 Restore after `until` (2026-11-14: runs still queued or running on the fallback no longer block; GitHub fixes vars
   per run attempt, so they finish there with their own shard count, and a steady laptop queue had kept CI off boat
-  for 11 h; a full rerun the watcher made blocks only until its new attempt has started, not until it completes):
+  for 11 h; a full rerun the watcher made blocks only until GitHub shows a higher attempt number than before the rerun, not
+  until it completes; no clock comparison):
   put back exactly the saved values (a value that was absent is deleted again). If `CI_RUNS_ON` no longer equals what
   the watcher set, someone changed it on purpose: drop the state, touch nothing. `CI_RUNS_ON` is never deleted when it
   had a value (the mediatgb workflow falls back to GitHub-hosted runners without it).
 - D6 Reset time parse: "start again at HH:MM UTC" -> the next such time after the job's `queuedAt`; no match -> now + 60 min.
 - D7 `--dry-run` prints the actions and changes nothing (no gh writes, no state write).
 - D8 Move stranded runs back (2026-11-14, owner OK): runs queued while CI pointed at the fallback keep its vars, so
-  after a restore they still wait on the laptop (11-14: 36 runs, ~18 h each, boat idle). Right after a restore:
-  - room = (60 - 15 kept for new pushes - boat starts in the last hour, counted from `jobs[].runStartedAt`) divided
-    by the starts one run of the repo takes (most distinct `jobName`s in one of its boat runs; 13 when unknown).
+  after a restore they still wait on the laptop (11-14: 36 runs, ~18 h each, boat idle). Every tick, for each repo in
+  boat's job list that has `CI_FALLBACK_RUNS_ON` and is not on it (not in fallback state):
+  - room = (60 - 15 kept for new pushes - boat starts in the last hour, counted from `jobs[].runStartedAt`, - the
+    starts of moved runs not yet started on boat) divided by the starts one run of the repo takes (most distinct
+    `jobName`s in one of its boat runs; 13 when unknown).
   - Candidates: queued runs that are the newest run of their branch, oldest first, with no job started on the
     fallback (a finished preflight or a skipped job does not count) and a waiting job on the fallback labels.
   - Up to room of them get `force-cancel` (a plain cancel leaves the `always()` ci-ok job queued for a laptop runner).
   - Later ticks: once the run shows `completed`, one full `gh run rerun` (boat's vars), unless a newer run on the
-    branch replaced it. A cancel that has not landed after 30 min is dropped.
+    branch replaced it. A cancel that has not landed after 30 min is dropped. A rerun run counts against the room
+    until boat shows one of its jobs started (or 30 min). At most 20 job lists are read per repo per tick.
 
 ## Out of scope
 - Counting starts to switch before boat is full (`/usage` is 403 for this key; sandboxes also use starts).
@@ -57,7 +61,9 @@
 - T8 Restore with 20 boat starts used and 9 starts per run: oldest unstarted runs moved, newest per branch only, at
   most 2 (25 starts of room); started runs and runs over the room stay; full rerun only after the cancel lands; a run
   replaced by a newer push is not rerun; 40 starts used moves nothing; a cancel that never lands is dropped after
-  30 min; `--dry-run` moves nothing. T3 also: a rerun blocks the restore until its attempt started, not until it ends.
+  30 min; `--dry-run` moves nothing; runs stranded while CI is already on boat (no fallback state) move too; moved
+  runs not yet started on boat use the room; nothing moves while the repo is on the fallback. T3 also: a rerun
+  blocks the restore until its attempt number went up, not until it ends.
 
 ### User-flow matrix (verifier, live)
 | Flow | Steps | Pass |

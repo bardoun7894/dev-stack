@@ -37,6 +37,8 @@ class FakeGh:
         self.started = {}        # (repo, run) -> latest attempt start
         self.active_since = {}   # repo -> `gh run list` rows: databaseId, status, headBranch, createdAt
         self.run_jobs = {}       # (repo, run) -> GitHub jobs: name, status, conclusion, labels
+        self.attempts = {}       # (repo, run) -> latest attempt number (default 1)
+        self.lazy_attempts = False  # True: a rerun does not create its attempt until the test says so
         self.writes = []
 
     def __call__(self, args):
@@ -60,10 +62,17 @@ class FakeGh:
             import json
             repo = args[args.index("-R") + 1]
             return 0, json.dumps({"status": self.runs.get((repo, args[2]), "completed"),
-                                  "startedAt": self.started.get((repo, args[2]), "2026-11-11T07:04:00Z")})
+                                  "startedAt": self.started.get((repo, args[2]), "2026-11-11T07:04:00Z"),
+                                  "attempt": self.attempts.get((repo, args[2]), 1)})
         if args[:2] == ["run", "rerun"]:
             repo = args[args.index("-R") + 1]
             self.writes.append(("rerun", repo, args[2], "--failed" in args))
+            if not self.lazy_attempts:
+                self.attempts[(repo, args[2])] = self.attempts.get((repo, args[2]), 1) + 1
+            if (repo, args[2]) in self.run_jobs:  # the new attempt's jobs take the vars of now
+                labels = sorted(bf.labels_of(self.vars[repo]["CI_RUNS_ON"]))
+                self.run_jobs[(repo, args[2])] = [dict(j, labels=labels) for j in self.run_jobs[(repo, args[2])]]
+                self.runs[(repo, args[2])] = "queued"
             return 0, ""
         if args[:2] == ["run", "list"]:
             import json
@@ -145,12 +154,13 @@ class T3Restore(Base):
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
 
     def test_rerun_blocks_restore_only_until_its_attempt_started(self):
-        self.tick([job("j1")], t("07:12"))  # run 100 completed -> rerun in full at 07:12
-        self.gh.runs[(REPO, "100")] = "in_progress"  # latest attempt start still 07:04: the rerun has not begun
+        self.gh.lazy_attempts = True
+        self.tick([job("j1")], t("07:12"))  # run 100 completed -> rerun in full at 07:12, attempt 1 before it
+        self.gh.runs[(REPO, "100")] = "in_progress"  # still attempt 1: the rerun attempt does not exist yet
         self.tick([job("j1")], t("07:58"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "rerun attempt not started: stay on fallback")
-        # The rerun attempt started: GitHub fixed its vars, so it finishes on the fallback while CI goes back.
-        self.gh.started[(REPO, "100")] = "2026-11-11T07:13:00Z"
+        # Attempt 2 exists: GitHub fixed its vars, so it finishes on the fallback while CI goes back (no clocks used).
+        self.gh.attempts[(REPO, "100")] = 2
         self.tick([job("j1")], t("07:59"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
@@ -259,13 +269,19 @@ def gh_job(name, status="queued", conclusion=None, labels=LAPTOP):
     return {"name": name, "status": status, "conclusion": conclusion, "labels": labels}
 
 
-def boat_history(n_started, at="2026-11-11T07:30:00Z", names=9):
+def boat_history(n_started, at="07:30", names=9):
     """Boat jobs of earlier runs: one run with `names` distinct jobs, plus `n_started` starts at `at`."""
     hist = [dict(job("h%d" % i, run="90", state="success"), jobName="J%d" % i, runStartedAt="2026-11-11T05:00:00Z")
             for i in range(names)]
     hist += [dict(job("s%d" % i, run=str(91 + i // names), state="success"), jobName="J%d" % (i % names),
-                  runStartedAt=at) for i in range(n_started)]
+                  runStartedAt="2026-11-11T%s:00Z" % at) for i in range(n_started)]
     return hist
+
+
+def started_on_boat(*runs, at="07:59"):
+    """Boat jobs showing these runs started (one job each)."""
+    return [dict(job("b" + r, run=r, state="success"), jobName="preflight", runStartedAt="2026-11-11T%s:00Z" % at)
+            for r in runs]
 
 
 class T8MoveStranded(Base):
@@ -301,17 +317,21 @@ class T8MoveStranded(Base):
         self.assertEqual(self.cancels(), ["201", "204"], "202 started, 203 superseded by 204, 206 over the room")
         self.assertFalse(any(w[0] == "rerun" and w[2] != "100" for w in self.gh.writes), "no rerun before the cancel lands")
         self.cancelled("201", "204")
-        self.tick([job("j1")], t("07:58"))
+        self.tick([job("j1")] + boat_history(20), t("07:58"))
         reruns = [w for w in self.gh.writes if w[0] == "rerun" and w[2] != "100"]
         self.assertEqual(reruns, [("rerun", REPO, "201", False), ("rerun", REPO, "204", False)], "full reruns")
-        self.assertEqual(bf.load_state(self.state)["moving"], {})
+        self.assertEqual(self.cancels(), ["201", "204"], "reruns not started on boat yet still use the room")
+        self.tick([job("j1")] + boat_history(20) + started_on_boat("201", "204"), t("08:00"))
+        moving = bf.load_state(self.state)["moving"]
+        self.assertNotIn(REPO + "|201", moving, "started on boat: no longer counted as pending")
+        self.assertNotIn(REPO + "|204", moving)
 
     def test_superseded_after_cancel_is_not_rerun(self):
         self.restore(20)
         self.cancelled("201", "204")
         self.gh.active_since[REPO].append({"databaseId": 207, "status": "queued", "headBranch": "a",
                                            "createdAt": "2026-11-11T07:57:00Z"})
-        self.tick([job("j1")], t("07:58"))
+        self.tick([job("j1")] + boat_history(20), t("07:58"))
         reruns = [w[2] for w in self.gh.writes if w[0] == "rerun" and w[2] != "100"]
         self.assertEqual(reruns, ["204"], "a newer push on branch a replaced 201")
 
@@ -322,11 +342,34 @@ class T8MoveStranded(Base):
 
     def test_cancel_that_never_completes_is_dropped(self):
         self.restore(20)  # 201 and 204 stay queued: the cancel never lands
-        self.tick([job("j1")], t("08:10"))
+        self.tick([job("j1")] + boat_history(20), t("08:10"))
         self.assertEqual(sorted(bf.load_state(self.state)["moving"]), [REPO + "|201", REPO + "|204"], "still waiting")
-        self.tick([job("j1")], t("08:40"))
-        self.assertEqual(bf.load_state(self.state)["moving"], {})
+        self.assertEqual(self.cancels(), ["201", "204"], "pending moves are not cancelled twice")
+        out = self.tick([job("j1")], t("08:40"))
+        self.assertTrue(any("201 still not cancelled" in line for line in out))
         self.assertFalse(any(w[0] == "rerun" and w[2] in ("201", "204") for w in self.gh.writes))
+
+    def test_stranded_while_already_on_boat(self):
+        # No fallback state at all (CI already back on boat, e.g. restored by an older watcher): still moved.
+        self.tick([job("j1", state="success")] + boat_history(20, at="08:50"), t("09:00"))
+        self.assertEqual(self.cancels(), ["201", "204"])
+
+    def test_pending_moves_use_room(self):
+        self.tick([job("j1", state="success")] + boat_history(20, at="08:50"), t("09:00"))  # room 2: 201, 204
+        self.tick([job("j1", state="success")] + boat_history(20, at="08:50"), t("09:02"))  # 2 moves pending: 25 - 18 -> 0 runs
+        self.assertEqual(self.cancels(), ["201", "204"], "206 waits until the moved runs are on boat")
+        self.cancelled("201", "204")
+        self.tick([job("j1", state="success")] + boat_history(20, at="08:50"), t("09:04"))  # reran, not started on boat
+        self.assertEqual(self.cancels(), ["201", "204"], "queued reruns on boat still use the room")
+        # An hour later: the 08:50 starts have aged out, the two reruns started on boat at 09:05 (18 starts) -> room 3.
+        self.tick([job("j1", state="success")] + boat_history(20, at="08:50")
+                  + [dict(j, jobName="J%d" % i) for r in ("201", "204")
+                     for i, j in enumerate(started_on_boat(*[r] * 9, at="09:05"))], t("10:00"))
+        self.assertEqual(self.cancels(), ["201", "204", "206"])
+
+    def test_fallback_active_moves_nothing(self):
+        self.tick([job("j1")] + boat_history(0), t("07:12"))  # boat full: CI on the fallback
+        self.assertEqual(self.cancels(), [])
 
     def test_dry_run_moves_nothing(self):
         self.tick([job("j1")], t("07:12"))
