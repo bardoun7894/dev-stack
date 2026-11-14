@@ -35,7 +35,10 @@ class FakeGh:
                      OTHER: {}}
         self.runs = {}           # (repo, run) -> status
         self.started = {}        # (repo, run) -> latest attempt start
-        self.active_since = {}   # repo -> list of runs created after a time that are not completed
+        self.active_since = {}   # repo -> `gh run list` rows: databaseId, status, headBranch, createdAt
+        self.run_jobs = {}       # (repo, run) -> GitHub jobs: name, status, conclusion, labels
+        self.attempts = {}       # (repo, run) -> latest attempt number (default 1)
+        self.lazy_attempts = False  # True: a rerun does not create its attempt until the test says so
         self.writes = []
 
     def __call__(self, args):
@@ -59,15 +62,34 @@ class FakeGh:
             import json
             repo = args[args.index("-R") + 1]
             return 0, json.dumps({"status": self.runs.get((repo, args[2]), "completed"),
-                                  "startedAt": self.started.get((repo, args[2]), "2026-11-11T07:04:00Z")})
+                                  "startedAt": self.started.get((repo, args[2]), "2026-11-11T07:04:00Z"),
+                                  "attempt": self.attempts.get((repo, args[2]), 1)})
         if args[:2] == ["run", "rerun"]:
             repo = args[args.index("-R") + 1]
             self.writes.append(("rerun", repo, args[2], "--failed" in args))
+            if not self.lazy_attempts:
+                self.attempts[(repo, args[2])] = self.attempts.get((repo, args[2]), 1) + 1
+            if (repo, args[2]) in self.run_jobs:  # the new attempt's jobs take the vars of now
+                labels = sorted(bf.labels_of(self.vars[repo]["CI_RUNS_ON"]))
+                self.run_jobs[(repo, args[2])] = [dict(j, labels=labels) for j in self.run_jobs[(repo, args[2])]]
+                self.runs[(repo, args[2])] = "queued"
             return 0, ""
         if args[:2] == ["run", "list"]:
             import json
             repo = args[args.index("-R") + 1]
-            return 0, json.dumps(self.active_since.get(repo, []))
+            rows = sorted(self.active_since.get(repo, []), key=lambda r: r["createdAt"], reverse=True)
+            if "--branch" in args:
+                rows = [r for r in rows if r["headBranch"] == args[args.index("--branch") + 1]]
+            return 0, json.dumps(rows[:int(args[args.index("--limit") + 1])])
+        if args[:3] == ["api", "-X", "POST"] and args[3].endswith("/force-cancel"):
+            parts = args[3].split("/")  # repos/OWNER/NAME/actions/runs/ID/force-cancel
+            repo, run = parts[1] + "/" + parts[2], parts[5]
+            self.writes.append(("force-cancel", repo, run))  # lands later: tests mark the run completed
+            return 0, ""
+        if args[0] == "api" and args[1].endswith("/jobs"):
+            import json
+            parts = args[1].split("/")
+            return 0, json.dumps({"jobs": self.run_jobs.get((parts[1] + "/" + parts[2], parts[5]), [])})
         raise AssertionError("unexpected gh call %r" % (args,))
 
 
@@ -124,28 +146,54 @@ class T2NoFallback(Base):
 class T3Restore(Base):
     def test_restore_after_until(self):
         self.tick([job("j1")], t("07:12"))
-        self.gh.active_since[REPO] = [{"databaseId": 5, "status": "in_progress", "createdAt": "2026-11-11T07:20:00Z"}]
+        self.tick([job("j1")], t("07:54"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "before until: no restore")
         self.tick([job("j1")], t("07:56"))
-        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "active run since switch: no restore")
-        self.gh.active_since[REPO] = []
-        self.tick([job("j1")], t("07:58"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
         self.assertNotIn("CI_CONTAINER", self.gh.vars[REPO])
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
 
-    def test_rerun_still_running_blocks_restore(self):
-        self.tick([job("j1")], t("07:12"))  # run 100 completed -> rerun in full
-        self.gh.runs[(REPO, "100")] = "in_progress"  # the rerun keeps the run's old createdAt
+    def test_rerun_blocks_restore_only_until_its_attempt_started(self):
+        self.gh.lazy_attempts = True
+        self.tick([job("j1")], t("07:12"))  # run 100 completed -> rerun in full at 07:12, attempt 1 before it
+        self.gh.runs[(REPO, "100")] = "in_progress"  # still attempt 1: the rerun attempt does not exist yet
+        self.tick([job("j1")], t("07:58"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "rerun attempt not started: stay on fallback")
+        # Attempt 2 exists: GitHub fixed its vars, so it finishes on the fallback while CI goes back (no clocks used).
+        self.gh.attempts[(REPO, "100")] = 2
+        self.tick([job("j1")], t("07:59"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+        self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
+
+    def test_no_restore_in_the_tick_of_the_rerun(self):
+        self.gh.lazy_attempts = True
+        self.gh.runs[(REPO, "100")] = "in_progress"
+        self.tick([job("j1")], t("07:12"))  # paused run still in progress: no rerun yet
+        self.gh.runs[(REPO, "100")] = "completed"
+        self.tick([job("j1")], t("07:56"))  # rerun now; the run still reads completed with attempt 1
+        self.assertIn(("rerun", REPO, "100", False), self.gh.writes)
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "completed alone must not unblock the restore")
+        self.gh.attempts[(REPO, "100")] = 2
+        self.tick([job("j1")], t("07:58"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+
+    def test_unreadable_baseline_waits_for_completion(self):
+        self.gh.attempts[(REPO, "100")] = None  # gh gave no attempt number at rerun time
+        self.gh.lazy_attempts = True
+        self.tick([job("j1")], t("07:12"))
+        self.assertIsNone(bf.load_state(self.state)["repos"][REPO]["reran_attempt"]["100"])
+        self.gh.runs[(REPO, "100")] = "in_progress"
         self.tick([job("j1")], t("07:58"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK)
         self.gh.runs[(REPO, "100")] = "completed"
-        self.tick([job("j1")], t("08:00"))
+        self.tick([job("j1")], t("07:59"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
 
-    def test_old_active_run_does_not_block(self):
+    def test_unreadable_rerun_does_not_block_restore(self):
         self.tick([job("j1")], t("07:12"))
-        self.gh.active_since[REPO] = [{"databaseId": 4, "status": "in_progress", "createdAt": "2026-11-11T07:00:00Z"}]
-        self.tick([job("j1")], t("07:58"))
+        real = self.gh.__call__
+        gone = lambda a: (1, "not found") if "view" in a and "100" in a else real(a)
+        bf.tick([job("j1")], now=t("07:58"), gh=gone, state_path=self.state, log_path=self.log)
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
 
 
