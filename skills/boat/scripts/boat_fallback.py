@@ -3,7 +3,8 @@
 Run every 2 min (cron): `boat.py ci fallback [--dry-run]`.
 When boat pauses CI jobs at the plan limit (60 starts per rolling hour):
 - repo with var CI_FALLBACK_RUNS_ON: point CI_RUNS_ON / CI_CONTAINER at the fallback, rerun each paused run in full
-  once it is completed, and put the saved values back 15 min after boat's reset when nothing it started is running;
+  once it is completed, and put the saved values back 15 min after boat's reset once its reruns have started;
+  then cancel and rerun in full the runs still waiting unstarted on the fallback, within boat's free starts (D8);
 - repo without one: `gh run rerun --failed` 2 min after the reset.
 """
 import json
@@ -17,6 +18,40 @@ LOG = Path.home() / ".local" / "state" / "boat-fallback.log"
 RESTORE_MARGIN = timedelta(minutes=15)
 RERUN_MARGIN = timedelta(minutes=2)
 VARS = ("CI_RUNS_ON", "CI_CONTAINER")
+# Moving stranded runs back (D8): boat's plan has 60 starts per rolling hour (one per job); keep some for new pushes.
+STARTS_PER_HOUR = 60
+STARTS_KEPT_FREE = 15
+DEFAULT_RUN_STARTS = 13
+MOVE_TIMEOUT = timedelta(minutes=30)
+QUEUED = ("queued", "pending", "waiting", "requested")
+
+
+def starts_last_hour(jobs, now):
+    """Sandbox starts boat counted in the last hour, from the jobs' runStartedAt (any repo: the plan is per account)."""
+    n = 0
+    for j in jobs:
+        s = j.get("runStartedAt")
+        if s and timedelta(0) <= now - parse_iso(s) < timedelta(hours=1):
+            n += 1
+    return n
+
+
+def run_starts(jobs, repo):
+    """Starts one run of `repo` takes on boat: the most distinct job names seen in one of its runs."""
+    names = {}
+    for j in jobs:
+        if j.get("repo") == repo and j.get("jobName"):
+            names.setdefault(str(j.get("runId")), set()).add(j["jobName"])
+    return max((len(v) for v in names.values()), default=DEFAULT_RUN_STARTS) or DEFAULT_RUN_STARTS
+
+
+def labels_of(runs_on):
+    """CI_RUNS_ON value ('"boat"' or '["self-hosted","cachy"]') -> set of runner labels."""
+    try:
+        v = json.loads(runs_on)
+    except (TypeError, ValueError):
+        return set()
+    return set(v) if isinstance(v, list) else {v}
 
 
 def gh_cli(args):
@@ -51,6 +86,7 @@ def load_state(path):
     st.setdefault("repos", {})
     st.setdefault("handled", [])
     st.setdefault("later", {})
+    st.setdefault("moving", {})
     return st
 
 
@@ -105,6 +141,66 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
 
     def run_status(repo, run):
         return run_info(repo, run).get("status", "unknown")
+
+    def gh_json(args):
+        rc, out = gh(args)
+        if rc != 0:
+            return None
+        try:
+            return json.loads(out or "null")
+        except ValueError:
+            return None
+
+    def newest_run(repo, branch):
+        rows = gh_json(["run", "list", "-R", repo, "--branch", branch, "--limit", "1", "--json", "databaseId"])
+        return str(rows[0]["databaseId"]) if rows else None
+
+    def unstarted_on(repo, run, labels):
+        """No job of the run has started on the fallback (a finished preflight or a skipped job does not count)."""
+        data = gh_json(["api", "repos/%s/actions/runs/%s/jobs" % (repo, run)]) or {}
+        rjobs = data.get("jobs") or []
+        if not rjobs:
+            return False
+        for j in rjobs:
+            if j.get("status") == "in_progress":
+                return False
+            if j.get("status") == "completed" and not (
+                    str(j.get("name", "")).startswith("preflight") or j.get("conclusion") == "skipped"):
+                return False
+        return any(j.get("status") != "completed" and set(j.get("labels") or []) == labels for j in rjobs)
+
+    def move_stranded(repo, labels):
+        """D8: CI is back on boat; runs queued on the fallback keep its vars. Cancel the oldest ones that have not
+        started (newest run per branch only) while boat has room, and rerun them in full on later ticks."""
+        if not labels:
+            return
+        per_run = run_starts(jobs, repo)
+        room = (STARTS_PER_HOUR - STARTS_KEPT_FREE - starts_last_hour(jobs, now)) // per_run
+        if room <= 0:
+            log("%s: no boat room to move runs waiting on the fallback" % repo)
+            return
+        rows = gh_json(["run", "list", "-R", repo, "--limit", "100",
+                        "--json", "databaseId,status,headBranch,createdAt"]) or []
+        newest = {}
+        for r in rows:
+            b = r.get("headBranch")
+            if r.get("createdAt", "") > newest.get(b, ""):
+                newest[b] = r.get("createdAt", "")
+        queued = sorted((r for r in rows if r.get("status") in QUEUED and r.get("createdAt") == newest.get(r.get("headBranch"))),
+                        key=lambda r: r.get("createdAt", ""))
+        moved = 0
+        for r in queued:
+            if moved >= room:
+                break
+            run = str(r["databaseId"])
+            key = "%s|%s" % (repo, run)
+            if key in st["moving"] or not unstarted_on(repo, run, labels):
+                continue
+            # force-cancel: a plain cancel leaves the always() ci-ok job queued for a fallback runner.
+            if write(["api", "-X", "POST", "repos/%s/actions/runs/%s/force-cancel" % (repo, run)],
+                     "%s: run %s has not started on the fallback, moving it to boat" % (repo, run)):
+                st["moving"][key] = {"since": now.isoformat(), "branch": r.get("headBranch")}
+                moved += 1
 
     # 1. New paused jobs, by repo.
     present = {str(j.get("id")) for j in jobs}
@@ -180,6 +276,7 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
                 if write(["run", "rerun", run, "-R", repo], "%s: rerun %s in full on the fallback" % (repo, run)):
                     rs["pending"].remove(run)
                     rs["reran"].append(run)
+                    rs.setdefault("reran_at", {})[run] = now.isoformat()
 
     # 3. Repos without a fallback: rerun the failed jobs after the reset.
     for key, item in list(st["later"].items()):
@@ -202,23 +299,31 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
     for repo, rs in list(st["repos"].items()):
         if now < parse_iso(rs["until"]) or rs["pending"]:
             continue
-        # A full rerun on the fallback that is not completed yet (or cannot be read) keeps CI there: its attempt may
-        # not have fixed the fallback vars yet. Other runs on the fallback do not block the way back.
+        # A full rerun on the fallback keeps CI there until its new attempt has started (or cannot be read): GitHub
+        # fixes vars when the attempt starts, so a started rerun finishes on the fallback while CI goes back to boat.
+        # Waiting for it to complete kept boat idle for hours behind a laptop queue. Other runs do not block.
         busy = False
+        reran_at = rs.setdefault("reran_at", {})
         for run in list(rs["reran"]):
             rc, out = gh(["run", "view", str(run), "-R", repo, "--json", "status,startedAt"])
+            started = None
             if rc == 0:
                 try:
-                    status = json.loads(out).get("status", "unknown")
+                    info = json.loads(out)
+                    status, started = info.get("status", "unknown"), info.get("startedAt")
                 except ValueError:
                     status = "unknown"
             else:
                 status = "gone" if ("404" in out or "not found" in out.lower()
                                     or "could not find" in out.lower()) else "unknown"
-            if status in ("completed", "gone"):  # only a confirmed deleted run stops blocking
+            at = reran_at.get(run)
+            attempt_started = bool(started and at and parse_iso(started) >= parse_iso(at)) or (
+                status != "unknown" and not at)  # state from before reran_at: that attempt began long ago
+            if status in ("completed", "gone") or attempt_started:  # only a confirmed deleted run stops blocking
                 rs["reran"].remove(run)
+                reran_at.pop(run, None)
             else:
-                busy = True  # in progress or unreadable (rate limit, network): retry next tick
+                busy = True  # rerun attempt not started yet, or unreadable (rate limit, network): retry next tick
         if busy:
             continue
         try:
@@ -239,6 +344,29 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             ok = set_var(repo, k, rs["saved"].get(k), cur.get(k)) and ok
         if ok:
             del st["repos"][repo]
+            move_stranded(repo, labels_of(rs["set"]))
+
+    # 5. Moved runs: once the cancel has landed, rerun in full so the new attempt picks boat's vars.
+    for key, item in list(st["moving"].items()):
+        repo, run = key.split("|", 1)
+        info = run_info(repo, run)
+        if not info:
+            log("%s: run %s not readable, dropped from the move" % (repo, run))
+            del st["moving"][key]
+            continue
+        if info.get("status") != "completed":
+            if now - parse_iso(item["since"]) > MOVE_TIMEOUT:
+                log("%s: run %s still not cancelled after %d min, left alone" % (
+                    repo, run, MOVE_TIMEOUT.total_seconds() // 60))
+                del st["moving"][key]
+            continue
+        newest = newest_run(repo, item["branch"])
+        if newest is not None and newest != run:
+            log("%s: run %s was replaced by %s on %s, not rerun" % (repo, run, newest, item["branch"]))
+            del st["moving"][key]
+            continue
+        if write(["run", "rerun", run, "-R", repo], "%s: rerun %s in full on boat" % (repo, run)):
+            del st["moving"][key]
 
     st["handled"] = sorted(handled)
     save()

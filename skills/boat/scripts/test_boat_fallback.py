@@ -35,7 +35,8 @@ class FakeGh:
                      OTHER: {}}
         self.runs = {}           # (repo, run) -> status
         self.started = {}        # (repo, run) -> latest attempt start
-        self.active_since = {}   # repo -> list of runs created after a time that are not completed
+        self.active_since = {}   # repo -> `gh run list` rows: databaseId, status, headBranch, createdAt
+        self.run_jobs = {}       # (repo, run) -> GitHub jobs: name, status, conclusion, labels
         self.writes = []
 
     def __call__(self, args):
@@ -67,7 +68,19 @@ class FakeGh:
         if args[:2] == ["run", "list"]:
             import json
             repo = args[args.index("-R") + 1]
-            return 0, json.dumps(self.active_since.get(repo, []))
+            rows = sorted(self.active_since.get(repo, []), key=lambda r: r["createdAt"], reverse=True)
+            if "--branch" in args:
+                rows = [r for r in rows if r["headBranch"] == args[args.index("--branch") + 1]]
+            return 0, json.dumps(rows[:int(args[args.index("--limit") + 1])])
+        if args[:3] == ["api", "-X", "POST"] and args[3].endswith("/force-cancel"):
+            parts = args[3].split("/")  # repos/OWNER/NAME/actions/runs/ID/force-cancel
+            repo, run = parts[1] + "/" + parts[2], parts[5]
+            self.writes.append(("force-cancel", repo, run))  # lands later: tests mark the run completed
+            return 0, ""
+        if args[0] == "api" and args[1].endswith("/jobs"):
+            import json
+            parts = args[1].split("/")
+            return 0, json.dumps({"jobs": self.run_jobs.get((parts[1] + "/" + parts[2], parts[5]), [])})
         raise AssertionError("unexpected gh call %r" % (args,))
 
 
@@ -131,12 +144,13 @@ class T3Restore(Base):
         self.assertNotIn("CI_CONTAINER", self.gh.vars[REPO])
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
 
-    def test_rerun_in_flight_blocks_restore(self):
-        self.tick([job("j1")], t("07:12"))  # run 100 completed -> rerun in full
-        self.gh.runs[(REPO, "100")] = "in_progress"
+    def test_rerun_blocks_restore_only_until_its_attempt_started(self):
+        self.tick([job("j1")], t("07:12"))  # run 100 completed -> rerun in full at 07:12
+        self.gh.runs[(REPO, "100")] = "in_progress"  # latest attempt start still 07:04: the rerun has not begun
         self.tick([job("j1")], t("07:58"))
-        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "rerun still running: stay on fallback")
-        self.gh.runs[(REPO, "100")] = "completed"
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "rerun attempt not started: stay on fallback")
+        # The rerun attempt started: GitHub fixed its vars, so it finishes on the fallback while CI goes back.
+        self.gh.started[(REPO, "100")] = "2026-11-11T07:13:00Z"
         self.tick([job("j1")], t("07:59"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
@@ -236,6 +250,89 @@ class ReviewFixes(Base):
         gone = lambda a: (1, "not found") if a[:3] == ["run", "view", "100"] else real(a)
         bf.tick([job("j1")], now=t("07:58"), gh=gone, state_path=self.state, log_path=self.log)
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+
+
+LAPTOP = ["self-hosted", "cachy"]
+
+
+def gh_job(name, status="queued", conclusion=None, labels=LAPTOP):
+    return {"name": name, "status": status, "conclusion": conclusion, "labels": labels}
+
+
+def boat_history(n_started, at="2026-11-11T07:30:00Z", names=9):
+    """Boat jobs of earlier runs: one run with `names` distinct jobs, plus `n_started` starts at `at`."""
+    hist = [dict(job("h%d" % i, run="90", state="success"), jobName="J%d" % i, runStartedAt="2026-11-11T05:00:00Z")
+            for i in range(names)]
+    hist += [dict(job("s%d" % i, run=str(91 + i // names), state="success"), jobName="J%d" % (i % names),
+                  runStartedAt=at) for i in range(n_started)]
+    return hist
+
+
+class T8MoveStranded(Base):
+    """On restore, runs that have not started on the fallback go back to boat, oldest first, within boat's room."""
+
+    def setUp(self):
+        super().setUp()
+        rows = [("201", "queued", "a", "07:20"), ("202", "queued", "b", "07:25"), ("203", "queued", "c", "07:30"),
+                ("204", "queued", "c", "07:35"), ("206", "queued", "d", "07:40"), ("205", "completed", "e", "07:15")]
+        self.gh.active_since[REPO] = [{"databaseId": int(i), "status": s, "headBranch": b,
+                                       "createdAt": "2026-11-11T%s:00Z" % c} for i, s, b, c in rows]
+        unstarted = [gh_job("preflight (affected & path filter)"), gh_job("ci-ok")]
+        for run in ("201", "203", "204", "206"):
+            self.gh.run_jobs[(REPO, run)] = unstarted
+            self.gh.runs[(REPO, run)] = "queued"
+        self.gh.run_jobs[(REPO, "202")] = [gh_job("preflight", "completed", "success"), gh_job("Pest 1/3", "in_progress")]
+        self.gh.runs[(REPO, "202")] = "in_progress"
+
+    def restore(self, n_started):
+        self.tick([job("j1")], t("07:12"))
+        return self.tick([job("j1")] + boat_history(n_started), t("07:56"))
+
+    def cancels(self):
+        return [w[2] for w in self.gh.writes if w[0] == "force-cancel"]
+
+    def cancelled(self, *runs):
+        for run in runs:
+            self.gh.runs[(REPO, run)] = "completed"
+
+    def test_moves_oldest_unstarted_newest_per_branch_within_room(self):
+        self.restore(20)  # room: 60 - 15 kept free - 20 used = 25 starts = 2 runs of 9
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+        self.assertEqual(self.cancels(), ["201", "204"], "202 started, 203 superseded by 204, 206 over the room")
+        self.assertFalse(any(w[0] == "rerun" and w[2] != "100" for w in self.gh.writes), "no rerun before the cancel lands")
+        self.cancelled("201", "204")
+        self.tick([job("j1")], t("07:58"))
+        reruns = [w for w in self.gh.writes if w[0] == "rerun" and w[2] != "100"]
+        self.assertEqual(reruns, [("rerun", REPO, "201", False), ("rerun", REPO, "204", False)], "full reruns")
+        self.assertEqual(bf.load_state(self.state)["moving"], {})
+
+    def test_superseded_after_cancel_is_not_rerun(self):
+        self.restore(20)
+        self.cancelled("201", "204")
+        self.gh.active_since[REPO].append({"databaseId": 207, "status": "queued", "headBranch": "a",
+                                           "createdAt": "2026-11-11T07:57:00Z"})
+        self.tick([job("j1")], t("07:58"))
+        reruns = [w[2] for w in self.gh.writes if w[0] == "rerun" and w[2] != "100"]
+        self.assertEqual(reruns, ["204"], "a newer push on branch a replaced 201")
+
+    def test_no_room_moves_nothing(self):
+        self.restore(40)  # 60 - 15 - 40 = 5 starts: not one run
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+        self.assertEqual(self.cancels(), [])
+
+    def test_cancel_that_never_completes_is_dropped(self):
+        self.restore(20)  # 201 and 204 stay queued: the cancel never lands
+        self.tick([job("j1")], t("08:10"))
+        self.assertEqual(sorted(bf.load_state(self.state)["moving"]), [REPO + "|201", REPO + "|204"], "still waiting")
+        self.tick([job("j1")], t("08:40"))
+        self.assertEqual(bf.load_state(self.state)["moving"], {})
+        self.assertFalse(any(w[0] == "rerun" and w[2] in ("201", "204") for w in self.gh.writes))
+
+    def test_dry_run_moves_nothing(self):
+        self.tick([job("j1")], t("07:12"))
+        n = len(self.gh.writes)
+        self.tick([job("j1")] + boat_history(20), t("07:56"), dry=True)
+        self.assertEqual(len(self.gh.writes), n)
 
 
 class Ignores(Base):
