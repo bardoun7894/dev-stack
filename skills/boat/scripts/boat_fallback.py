@@ -206,10 +206,19 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         # not have fixed the fallback vars yet. Other runs on the fallback do not block the way back.
         busy = False
         for run in list(rs["reran"]):
-            if run_status(repo, run) in ("completed", "unknown"):  # unreadable/deleted: never block the way back
+            rc, out = gh(["run", "view", str(run), "-R", repo, "--json", "status,startedAt"])
+            if rc == 0:
+                try:
+                    status = json.loads(out).get("status", "unknown")
+                except ValueError:
+                    status = "unknown"
+            else:
+                status = "gone" if ("404" in out or "not found" in out.lower()
+                                    or "could not find" in out.lower()) else "unknown"
+            if status in ("completed", "gone"):  # only a confirmed deleted run stops blocking
                 rs["reran"].remove(run)
             else:
-                busy = True
+                busy = True  # in progress or unreadable (rate limit, network): retry next tick
         if busy:
             continue
         try:
