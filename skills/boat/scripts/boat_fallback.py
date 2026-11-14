@@ -202,6 +202,16 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
     for repo, rs in list(st["repos"].items()):
         if now < parse_iso(rs["until"]) or rs["pending"]:
             continue
+        # A full rerun on the fallback that is not completed yet (or cannot be read) keeps CI there: its attempt may
+        # not have fixed the fallback vars yet. Other runs on the fallback do not block the way back.
+        busy = False
+        for run in list(rs["reran"]):
+            if run_status(repo, run) == "completed":
+                rs["reran"].remove(run)
+            else:
+                busy = True
+        if busy:
+            continue
         try:
             cur = get_vars(repo)
         except RuntimeError as e:
@@ -214,9 +224,6 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             log("%s: CI_RUNS_ON was changed by someone else, leaving it" % repo)
             del st["repos"][repo]
             continue
-        # Runs still queued or running on the fallback do not block: GitHub fixes vars per run attempt, so they
-        # finish there with their own shard count (11-13 history). Waiting for them never ended with a steady
-        # queue (11-14: 38 runs on the laptop, boat idle for 11 h).
         log("%s: boat has room again, moving CI back" % repo)
         ok = True
         for k in VARS:
