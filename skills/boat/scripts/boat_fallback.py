@@ -151,8 +151,14 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         except ValueError:
             return None
 
-    def newest_run(repo, branch):
-        rows = gh_json(["run", "list", "-R", repo, "--branch", branch, "--limit", "1", "--json", "databaseId"])
+    def newest_run(repo, branch, workflow, event):
+        """Newest run of the same workflow and event on the branch (other workflows do not supersede it)."""
+        cmd = ["run", "list", "-R", repo, "--branch", branch, "--limit", "1", "--json", "databaseId"]
+        if workflow:
+            cmd += ["--workflow", str(workflow)]
+        if event:
+            cmd += ["--event", event]
+        rows = gh_json(cmd)
         return str(rows[0]["databaseId"]) if rows else None
 
     def unstarted_on(repo, run, labels):
@@ -185,13 +191,16 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         if room <= 0:
             return
         rows = gh_json(["run", "list", "-R", repo, "--limit", "100",
-                        "--json", "databaseId,status,headBranch,createdAt"]) or []
+                        "--json", "databaseId,status,headBranch,createdAt,workflowDatabaseId,event"]) or []
+        # newest per branch, workflow and event: a run of another workflow or event does not supersede this one
         newest = {}
         for r in rows:
-            b = r.get("headBranch")
-            if r.get("createdAt", "") > newest.get(b, ""):
-                newest[b] = r.get("createdAt", "")
-        queued = sorted((r for r in rows if r.get("status") in QUEUED and r.get("createdAt") == newest.get(r.get("headBranch"))),
+            k = (r.get("headBranch"), r.get("workflowDatabaseId"), r.get("event"))
+            if r.get("createdAt", "") > newest.get(k, ""):
+                newest[k] = r.get("createdAt", "")
+        # in_progress: a run whose preflight finished is in_progress; unstarted_on decides whether it can move
+        queued = sorted((r for r in rows if r.get("status") in QUEUED + ("in_progress",)
+                         and r.get("createdAt") == newest.get((r.get("headBranch"), r.get("workflowDatabaseId"), r.get("event")))),
                         key=lambda r: r.get("createdAt", ""))
         moved = checked = 0
         for r in queued:
@@ -207,7 +216,8 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             # force-cancel: a plain cancel leaves the always() ci-ok job queued for a fallback runner.
             if write(["api", "-X", "POST", "repos/%s/actions/runs/%s/force-cancel" % (repo, run)],
                      "%s: run %s has not started on the fallback, moving it to boat" % (repo, run)):
-                st["moving"][key] = {"since": now.isoformat(), "branch": r.get("headBranch"), "starts": per_run}
+                st["moving"][key] = {"since": now.isoformat(), "branch": r.get("headBranch"), "starts": per_run,
+                                     "wf": r.get("workflowDatabaseId"), "event": r.get("event")}
                 moved += 1
 
     # 1. New paused jobs, by repo.
@@ -375,9 +385,11 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
                 del st["moving"][key]
             continue
         info = run_info(repo, run)
-        if not info:
-            log("%s: run %s not readable, dropped from the move" % (repo, run))
-            del st["moving"][key]
+        if not info:  # unreadable (gh error, rate limit): keep the move until MOVE_TIMEOUT, never drop it early
+            if now - parse_iso(item["since"]) > MOVE_TIMEOUT:
+                log("%s: run %s not readable for %d min, dropped from the move" % (
+                    repo, run, MOVE_TIMEOUT.total_seconds() // 60))
+                del st["moving"][key]
             continue
         if info.get("status") != "completed":
             if now - parse_iso(item["since"]) > MOVE_TIMEOUT:
@@ -385,7 +397,7 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
                     repo, run, MOVE_TIMEOUT.total_seconds() // 60))
                 del st["moving"][key]
             continue
-        newest = newest_run(repo, item["branch"])
+        newest = newest_run(repo, item["branch"], item.get("wf"), item.get("event"))
         if newest is not None and newest != run:
             log("%s: run %s was replaced by %s on %s, not rerun" % (repo, run, newest, item["branch"]))
             del st["moving"][key]
