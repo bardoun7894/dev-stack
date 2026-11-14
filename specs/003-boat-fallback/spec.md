@@ -34,7 +34,8 @@
 - D8 Move stranded runs back (2026-11-14, owner OK): runs queued while CI pointed at the fallback keep its vars, so
   after a restore they still wait on the laptop (11-14: 36 runs, ~18 h each, boat idle). Every tick, for each repo in
   boat's job list that has `CI_FALLBACK_RUNS_ON` and is not on it (not in fallback state):
-  - room = (60 - 15 kept for new pushes - boat starts in the last hour, counted from `jobs[].runStartedAt`, - the
+  - room = (the smaller of 60 - starts in the last hour and 200 - starts in the last 24 h (boat's two plan limits,
+    env `BOAT_STARTS_PER_HOUR` / `BOAT_STARTS_PER_DAY` after a plan change) - 15 kept for new pushes - the
     starts of moved runs not yet started on boat) divided by the starts one run of the repo takes (most distinct
     `jobName`s in one of its boat runs; 13 when unknown).
   - Candidates: queued runs that are the newest run of their branch, oldest first, with no job started on the

@@ -9,6 +9,7 @@ When boat pauses CI jobs at the plan limit (60 starts per rolling hour):
 - repo without one: `gh run rerun --failed` 2 min after the reset.
 """
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -19,8 +20,11 @@ LOG = Path.home() / ".local" / "state" / "boat-fallback.log"
 RESTORE_MARGIN = timedelta(minutes=15)
 RERUN_MARGIN = timedelta(minutes=2)
 VARS = ("CI_RUNS_ON", "CI_CONTAINER")
-# Moving stranded runs back (D8): boat's plan has 60 starts per rolling hour (one per job); keep some for new pushes.
-STARTS_PER_HOUR = 60
+# Moving stranded runs back (D8): boat's plan has 60 starts per rolling hour and 200 per rolling 24 h (one per job;
+# 11-14 log: "You used all 200 sandbox starts included in the last 24 hours"). Env overrides after a plan change.
+# Some starts stay free for new pushes.
+STARTS_PER_HOUR = int(os.environ.get("BOAT_STARTS_PER_HOUR", "60"))
+STARTS_PER_DAY = int(os.environ.get("BOAT_STARTS_PER_DAY", "200"))
 STARTS_KEPT_FREE = 15
 DEFAULT_RUN_STARTS = 13
 MOVE_TIMEOUT = timedelta(minutes=30)
@@ -28,12 +32,13 @@ MAX_RUN_CHECKS = 20  # job lists read per repo per tick while looking for strand
 QUEUED = ("queued", "pending", "waiting", "requested")
 
 
-def starts_last_hour(jobs, now):
-    """Sandbox starts boat counted in the last hour, from the jobs' runStartedAt (any repo: the plan is per account)."""
+def starts_last_hour(jobs, now, hours=1):
+    """Sandbox starts boat counted in the last `hours`, from the jobs' runStartedAt (any repo: the plan is per account).
+    /ci lists the latest 200 jobs, so a full day reads as at least 200: no room, which is the safe side."""
     n = 0
     for j in jobs:
         s = j.get("runStartedAt")
-        if s and timedelta(0) <= now - parse_iso(s) < timedelta(hours=1):
+        if s and timedelta(0) <= now - parse_iso(s) < timedelta(hours=hours):
             n += 1
     return n
 
@@ -179,8 +184,9 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         """Runs of `repo` boat can take now, keeping STARTS_KEPT_FREE. Moved runs not rerun yet, or rerun but not
         started on boat, are not in runStartedAt: their own start counts are added as used."""
         per_run = run_starts(jobs, repo)
-        used = starts_last_hour(jobs, now) + sum(m.get("starts", per_run) for m in st["moving"].values())
-        return max(0, (STARTS_PER_HOUR - STARTS_KEPT_FREE - used) // per_run), per_run
+        pending = sum(m.get("starts", per_run) for m in st["moving"].values())
+        free = min(STARTS_PER_HOUR - starts_last_hour(jobs, now), STARTS_PER_DAY - starts_last_hour(jobs, now, 24))
+        return max(0, (free - STARTS_KEPT_FREE - pending) // per_run), per_run
 
     def move_stranded(repo, labels):
         """D8: CI is back on boat; runs queued on the fallback keep its vars. Cancel the oldest ones that have not

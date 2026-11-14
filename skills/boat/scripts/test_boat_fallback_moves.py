@@ -121,6 +121,11 @@ class T8MoveStranded(Base):
         self.tick(other, t("09:00"))  # boat lists no job of REPO any more; the repo is remembered
         self.assertEqual(self.cancels(), ["201", "204", "206"], "13 starts per run when unknown: room 3")
 
+    def test_daily_limit_moves_nothing(self):
+        # Hour is quiet, but 190 + 9 starts in the last 24 h: 200 - 199 - 15 kept free leaves no run.
+        self.tick([job("j1", state="success")] + boat_history(190, at="05:00"), t("09:00"))
+        self.assertEqual(self.cancels(), [])
+
     def test_fallback_active_moves_nothing(self):
         self.tick([job("j1")] + boat_history(0), t("07:12"))  # boat full: CI on the fallback
         self.assertEqual(self.cancels(), [])
