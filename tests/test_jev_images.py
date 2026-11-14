@@ -138,27 +138,32 @@ class ImagesTest(unittest.TestCase):
 
     def test_box_refuses_old_model(self):
         sent, code, _ = self.run_cli("box", "x", "--image", self.png, "--model", "jev-1.13")
-        self.assertEqual((sent, code), ([], 2))
+        self.assertEqual((sent, code), ([], 4))
 
-    def test_min_low_confidence_exits_4(self):
+    def test_min_low_confidence_exits_2(self):
         ans = {"type": "box", "box": {"top": 0.1, "bottom": 0.5, "left": 0.2, "right": 0.9}, "confidence": 0.5}
         _, code, _ = self.run_cli("box", "the signature", "--image", self.png, "--min", "0.8", answer=ans)
-        self.assertEqual(code, 4)
+        self.assertEqual(code, 2)
         _, code2, _ = self.run_cli("choice", "q?", "a=x", "b=y", "-s", "hi", "--min", "0.8",
                                    answer={"type": "choice", "choice": "a", "confidence": 0.5})
-        self.assertEqual(code2, 4)
+        self.assertEqual(code2, 2)
+
+    def test_min_null_box_exits_2(self):
+        ans = {"type": "box", "box": None, "confidence": 0.99}
+        _, code, _ = self.run_cli("box", "the signature", "--image", self.png, "--min", "0.8", answer=ans)
+        self.assertEqual(code, 2)
 
     def test_wrong_type_refused(self):
         gif = self.write("a.gif", b"GIF89a" + b"\x00" * 20)
         sent, code, _ = self.run_cli("choice", "q?", "a=x", "b=y", "--image", gif)
-        self.assertEqual((sent, code), ([], 2))
+        self.assertEqual((sent, code), ([], 4))
 
     def test_dimensions_enforced(self):
         for w, h in ((279, 300), (300, 279), (1569, 300), (300, 1569)):
             sent, code, _ = self.run_cli("noul", "x", "--image", self.write(f"{w}x{h}.png", make_png(w, h)))
-            self.assertEqual((sent, code), ([], 2), f"PNG {w}x{h}")
+            self.assertEqual((sent, code), ([], 4), f"PNG {w}x{h}")
             sent, code, _ = self.run_cli("noul", "x", "--image", self.write(f"{w}x{h}.jpg", make_jpg(w, h)))
-            self.assertEqual((sent, code), ([], 2), f"JPG {w}x{h}")
+            self.assertEqual((sent, code), ([], 4), f"JPG {w}x{h}")
         for w, h in ((280, 1568), (1568, 280)):
             _, code, _ = self.run_cli("noul", "x", "--image", self.write(f"{w}x{h}.png", make_png(w, h)))
             self.assertEqual(code, 0)
@@ -195,12 +200,24 @@ class ImagesTest(unittest.TestCase):
         too_big = self.write("big.png", make_png(payload=b"\x00" * (jev.MAX_IMAGE_BYTES - overhead + 1)))
         self.assertEqual(os.path.getsize(too_big), jev.MAX_IMAGE_BYTES + 1)
         sent, code, _ = self.run_cli("noul", "x", "--image", too_big)
-        self.assertEqual((sent, code), ([], 2))
+        self.assertEqual((sent, code), ([], 4))
 
         half = self.write("half1.png", make_png(payload=b"\x00" * (jev.MAX_IMAGE_BYTES // 2 + 100)))
         half2 = self.write("half2.png", make_png(payload=b"\x00" * (jev.MAX_IMAGE_BYTES // 2 + 100)))
         sent, code, _ = self.run_cli("noul", "x", "--image", half, "--image", half2)
-        self.assertEqual((sent, code), ([], 2))
+        self.assertEqual((sent, code), ([], 4))
+
+    def test_jpeg_trailer_after_eoi_stripped(self):
+        exif_payload = b"Exif\x00\x00GPS_TRAILER=1"
+        app1 = b"\xff\xe1" + struct.pack(">H", len(exif_payload) + 2) + exif_payload
+        trailer = b"\xff\xd8" + app1 + b"\xff\xd9"
+        path = self.write("trailer.jpg", make_jpg() + trailer)
+        sent, code, _ = self.run_cli("noul", "x", "--image", path)
+        self.assertEqual(code, 0)
+        body = json.loads(sent[0].data)
+        ref = body["state"][0]["asset"]
+        sent_jpg = base64.b64decode(body["assets"][ref]["data_base64"])
+        self.assertNotIn(b"GPS_TRAILER", sent_jpg)
 
     def test_text_state_still_redacted(self):
         fake = "sk-or-v1-" + "a1B2c3D4e5F6" * 5

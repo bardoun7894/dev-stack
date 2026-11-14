@@ -6,7 +6,7 @@ answer. If the output is a label, yes/no, probability, score, routing target or 
 (`jev choice / noul / score / route`, ~$0.00002 and under a second). Jev is System 1: it screens every item and
 picks every step. You are System 2: you write text and code, handle what Jev escalates, and retune its
 questions. An LLM only runs when there is text or code to produce, an image to read, input over 32k tokens,
-or Jev is below its confidence bar / errors (exit 2, 3 or 4). Fall back then; never treat that as a pass.
+or Jev is below its confidence bar / errors (exit 2, 3 or 4; 2 = below the bar). Fall back then; never treat that as a pass.
 
 Tools on PATH (Mac `~/.local/bin`, MyContabo `/usr/local/bin`):
 - `jev route "<task>" -q`: which model tier a task needs (T0 = no model, just `jev`).

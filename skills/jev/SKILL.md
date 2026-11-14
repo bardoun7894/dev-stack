@@ -124,7 +124,7 @@ Use for classification of a paper, not for reading its fields:
   Jev classifies and boxes; it still never writes text.
 - Box crops must stay at least 280 px per side; if smaller, send the full image.
 
-Confidence: always pass `--min` (start at 0.8; tune from `jev tune`). Below it (exit 4), or on any error (exit 2/3), fall back to a
+Confidence: always pass `--min` (start at 0.8; tune from `jev tune`). Below it (exit 2), or on any error (exit 3/4), fall back to a
 vision LLM (Claude Sonnet for sensitive or Arabic papers). Never treat an image answer as final until the item's offline
 evaluation has passed.
 
@@ -192,7 +192,7 @@ daemon (127.0.0.1:8719, launchd `dev.mbardouni.laya-serve`, Mac only) before exi
 is tagged `"engine": "laya"` in the JSON output and the decision log, and stderr shows `jev: fallback=laya`.
 Laya is 20-30× faster but weaker (A/B 2026-09-22: 73% vs 81% routing, mode collapse on many-option
 choices, confidence 0.02-0.26), so:
-- every `--min` gate fails closed (exit 4): routers go one tier up, which is the safe direction;
+- every `--min` gate fails closed (exit 2): routers go one tier up, which is the safe direction;
 - `noul` probabilities bunch near 0.5, so `--yes 0.7` reads as no;
 - `jev tune` and the capability-registry/outcomes readers skip Laya decisions;
 - `jev-browse` / `jev-page` (Laya over-predicts pass) and `jev-review` (its risk nouls fall below 0.6,

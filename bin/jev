@@ -43,11 +43,11 @@ Images (choice / noul / score / box):
 Output and exit codes:
   default     JSON: {"choice":…,"confidence":…} / {"noul":…} / {"score":…,"confidence":…}
   -q          only the answer: the choice, the probability, or the score
-  --min C     choice/score/box: exit 4 when confidence < C (so `jev … --min 0.8 || fallback`)
+  --min C     choice/score/box: exit 2 when confidence < C (so `jev … --min 0.8 || fallback`)
   --yes T     noul: exit 0 when probability >= T, else 1 (so `if jev noul … --yes 0.7`)
-  exit 2      bad/unsupported/oversized/out-of-range --image, or incompatible --model for box
+  exit 2      confidence below --min threshold (or box missing/out of range)
   exit 3      API / key / network error (message on stderr)
-  exit 4      confidence below --min threshold
+  exit 4      bad/unsupported/oversized/out-of-range --image, or incompatible --model for box
   --dry-run   print the exact (redacted) request body that would be sent, send nothing
               (image data shows as "<image N bytes>")
               (JEV_DRY_RUN=1 does the same for the importable post(): it prints to stderr and
@@ -465,7 +465,15 @@ def _parse_and_strip_jpeg(data, name):
             continue
         if marker == 0xDA:  # SOS
             out.extend((0xFF, 0xDA))
-            out.extend(data[pos:])
+            # Copy entropy-coded data up to the first EOI; drop any trailer after it.
+            q = pos
+            while q < n - 1:
+                if data[q] == 0xFF and data[q + 1] == 0xD9:
+                    break
+                q += 1
+            else:
+                raise JevError(f"invalid JPEG {name}: missing EOI")
+            out.extend(data[pos:q + 2])
             break
         if pos + 2 > n:
             raise JevError(f"invalid JPEG {name}: truncated segment length")
@@ -632,7 +640,7 @@ def dry_run(body):
 def cli_ask(opts, question):
     state = opts["state"]
     # stdin only when nothing else supplied the state, so `jev route "task"` never blocks on it.
-    if state is None and not opts["images"] and not sys.stdin.isatty():
+    if state is None and not sys.stdin.isatty():
         state = parse_state(sys.stdin.read())
     if (state is None or state == "") and not opts["images"]:
         die("no state: pass --state, --state-file, --image, or pipe it on stdin", 64)
@@ -640,12 +648,12 @@ def cli_ask(opts, question):
     box = question.get("type") == "box"
     model = opts["model"] or ("jev-latest" if opts["images"] or box else MODEL)
     if box and model not in ("jev-latest", "jev-1.14", "jev-1.14.0"):
-        die("box questions need jev-1.14 or jev-latest", 2)
+        die("box questions need jev-1.14 or jev-latest", 4)
     if opts["images"]:
         try:
             assets, refs = build_assets(opts["images"])
         except JevError as e:
-            die(str(e), 2)
+            die(str(e), 4)
         state = with_images(redact(state), refs)
     if opts["dry_run"]:
         body = {"model": model, "state": state, "questions": {"q": question}}
@@ -664,7 +672,7 @@ def emit_choice_or_score(a, key, opts, extra=None):
         out.update(extra)
     print(a.get(key) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
     if opts["min"] is not None and (conf is None or conf < opts["min"]):
-        sys.exit(4)
+        sys.exit(2)
 
 
 def main(argv):
@@ -718,8 +726,13 @@ def main(argv):
         a = cli_ask(opts, {"type": "box", "instructions": pos[0]})
         out = {"box": a.get("box"), "confidence": a.get("confidence")}
         print(json.dumps(a.get("box")) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
-        if opts["min"] is not None and (out["confidence"] is None or out["confidence"] < opts["min"]):
-            sys.exit(4)
+        if opts["min"] is not None:
+            bx = a.get("box")
+            edges = [bx.get(k) for k in ("top", "bottom", "left", "right")] if isinstance(bx, dict) else []
+            bad_box = len(edges) != 4 or any(
+                isinstance(e, bool) or not isinstance(e, (int, float)) or not 0 <= e <= 1 for e in edges)
+            if bad_box or out["confidence"] is None or out["confidence"] < opts["min"]:
+                sys.exit(2)
     elif cmd == "route":
         if pos:
             opts["state"] = " ".join(pos)
