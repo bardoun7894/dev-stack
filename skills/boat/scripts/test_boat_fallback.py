@@ -141,12 +141,12 @@ class T3Restore(Base):
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
 
-    def test_unreadable_rerun_blocks_restore(self):
+    def test_unreadable_rerun_does_not_block_restore(self):
         self.tick([job("j1")], t("07:12"))
         real = self.gh.__call__
-        gone = lambda a: (1, "not found") if a[:3] == ["run", "view", "100"] else real(a)
+        gone = lambda a: (1, "not found") if "view" in a and "100" in a else real(a)
         bf.tick([job("j1")], now=t("07:58"), gh=gone, state_path=self.state, log_path=self.log)
-        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK)
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
 
 
 class T4ChangedByOthers(Base):

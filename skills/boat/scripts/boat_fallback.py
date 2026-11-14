@@ -206,7 +206,7 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         # not have fixed the fallback vars yet. Other runs on the fallback do not block the way back.
         busy = False
         for run in list(rs["reran"]):
-            if run_status(repo, run) == "completed":
+            if run_status(repo, run) in ("completed", "unknown"):  # unreadable/deleted: never block the way back
                 rs["reran"].remove(run)
             else:
                 busy = True
