@@ -22,7 +22,9 @@
     comes from the vars).
   - More paused jobs while in fallback push `until` out.
 - D4 Repo without a fallback: after the reset time + 2 min, `gh run rerun <id> --failed` once per run.
-- D5 Restore after `until`, only when no run of that repo created since the switch is still queued or in progress:
+- D5 Restore after `until` (2026-11-14: runs still queued or running on the fallback no longer block; GitHub fixes vars
+  per run attempt, so they finish there with their own shard count, and a steady laptop queue had kept CI off boat
+  for 11 h):
   put back exactly the saved values (a value that was absent is deleted again). If `CI_RUNS_ON` no longer equals what
   the watcher set, someone changed it on purpose: drop the state, touch nothing. `CI_RUNS_ON` is never deleted when it
   had a value (the mediatgb workflow falls back to GitHub-hosted runners without it).
@@ -37,8 +39,8 @@
 - T1 Paused job on a repo with `CI_FALLBACK_RUNS_ON`: vars set to the fallback, state saved, run rerun in full once
   the run is completed; not rerun while it is in progress; a second tick does nothing new.
 - T2 Repo without fallback: no var writes; `rerun --failed` only after reset + 2 min, once.
-- T3 Restore after `until` with no active runs: saved values put back (absent -> deleted); with an active run since
-  the switch: no restore yet.
+- T3 Restore after `until`: saved values put back (absent -> deleted); before `until`: no restore; active runs on
+  the fallback do not block it.
 - T4 `CI_RUNS_ON` changed by someone else: state dropped, no var write.
 - T5 Reset parse: "07:40 UTC" with queuedAt 07:10 -> 07:40 same day; queuedAt 23:50 and "00:30 UTC" -> next day.
 - T6 `--dry-run` makes no gh write and no state write.

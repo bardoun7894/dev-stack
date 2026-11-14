@@ -124,23 +124,22 @@ class T2NoFallback(Base):
 class T3Restore(Base):
     def test_restore_after_until(self):
         self.tick([job("j1")], t("07:12"))
-        self.gh.active_since[REPO] = [{"databaseId": 5, "status": "in_progress", "createdAt": "2026-11-11T07:20:00Z"}]
+        self.tick([job("j1")], t("07:54"))
+        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "before until: no restore")
         self.tick([job("j1")], t("07:56"))
-        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK, "active run since switch: no restore")
-        self.gh.active_since[REPO] = []
-        self.tick([job("j1")], t("07:58"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
         self.assertNotIn("CI_CONTAINER", self.gh.vars[REPO])
         self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
 
-    def test_rerun_still_running_blocks_restore(self):
+    def test_runs_on_fallback_do_not_block_restore(self):
+        # Vars are fixed per run attempt, so runs queued or running on the fallback finish there (11-14: a steady
+        # laptop queue kept CI off boat for 11 h).
         self.tick([job("j1")], t("07:12"))  # run 100 completed -> rerun in full
-        self.gh.runs[(REPO, "100")] = "in_progress"  # the rerun keeps the run's old createdAt
+        self.gh.runs[(REPO, "100")] = "in_progress"
+        self.gh.active_since[REPO] = [{"databaseId": 5, "status": "queued", "createdAt": "2026-11-11T07:20:00Z"}]
         self.tick([job("j1")], t("07:58"))
-        self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], FALLBACK)
-        self.gh.runs[(REPO, "100")] = "completed"
-        self.tick([job("j1")], t("08:00"))
         self.assertEqual(self.gh.vars[REPO]["CI_RUNS_ON"], '"boat"')
+        self.assertNotIn(REPO, bf.load_state(self.state)["repos"])
 
     def test_old_active_run_does_not_block(self):
         self.tick([job("j1")], t("07:12"))

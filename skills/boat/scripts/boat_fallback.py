@@ -198,7 +198,7 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             if write(["run", "rerun", run, "-R", repo, "--failed"], "%s: boat has room again, rerun %s --failed" % (repo, run)):
                 del st["later"][key]
 
-    # 4. Back to boat after the reset, once nothing started on the fallback is still running.
+    # 4. Back to boat after the reset.
     for repo, rs in list(st["repos"].items()):
         if now < parse_iso(rs["until"]) or rs["pending"]:
             continue
@@ -214,19 +214,9 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             log("%s: CI_RUNS_ON was changed by someone else, leaving it" % repo)
             del st["repos"][repo]
             continue
-        since = parse_iso(rs["since"])
-        rc, out = gh(["run", "list", "-R", repo, "--limit", "50", "--json", "databaseId,status,createdAt"])
-        try:
-            runs_now = json.loads(out or "[]") if rc == 0 else None
-        except ValueError:
-            runs_now = None
-        if runs_now is None:
-            continue
-        busy = [r for r in runs_now
-                if r.get("status") != "completed" and parse_iso(r["createdAt"]) >= since]
-        busy += [r for r in rs["reran"] if run_status(repo, r) != "completed"]
-        if busy:
-            continue
+        # Runs still queued or running on the fallback do not block: GitHub fixes vars per run attempt, so they
+        # finish there with their own shard count (11-13 history). Waiting for them never ended with a steady
+        # queue (11-14: 38 runs on the laptop, boat idle for 11 h).
         log("%s: boat has room again, moving CI back" % repo)
         ok = True
         for k in VARS:
