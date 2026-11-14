@@ -78,3 +78,12 @@
   timeouts and missing gh into rc 1; bad JSON from gh is handled.
 - P2 `rerun --failed` skipped when the run was already rerun after the pause; unreadable runs are dropped from
   pending/later so they never block the way back. Cron runs under `flock -n`.
+
+## Review of D8 (Opus medium, one round, 2026-11-14) and fixes
+- P1 a rerun read `completed` in its own tick and unblocked the restore: a run the watcher reran unblocks only on a
+  higher attempt number (or when deleted); an unreadable baseline waits for completion.
+- Fixed: repos the watcher moved are remembered (`fallback_repos`), so one with no jobs left in `/ci` is still
+  checked; pending moves carry their own start count; the room is checked before any gh call; step 2 reads each run once.
+- Not changed: vars fixed per attempt is evidenced in #47 (Pest jobs created 40 min later ran on the attempt's
+  runner); `/ci` lists completed jobs (163 of 200 on 11-14); save-at-end of tick is the existing pattern; the
+  check-then-cancel race is sub-second (P2).
