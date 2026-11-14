@@ -180,10 +180,35 @@ def route(body):
     return TYPESAFE_URL, key, {**body, "model": typesafe_model(body)}
 
 
+def check_assets(assets):
+    """Only validated, metadata-stripped PNG/JPEG images may ride along unredacted; else fail closed."""
+    if not assets:
+        return
+    if not isinstance(assets, dict):
+        raise JevError("invalid assets: not an object")
+    for ref, a in assets.items():
+        if not isinstance(a, dict) or a.get("type") != "image" or a.get("format") not in ("png", "jpg") \
+                or set(a) - {"type", "format", "data_base64"}:
+            raise JevError("invalid asset: expected {type: image, format: png|jpg, data_base64}")
+        try:
+            data = base64.b64decode(a.get("data_base64") or "", validate=True)
+            if a["format"] == "png":
+                ok = data.startswith(b"\x89PNG\r\n\x1a\n")
+                clean = _parse_and_strip_png(data, "asset") if ok else None
+            else:
+                ok = data.startswith(b"\xff\xd8\xff")
+                clean = _parse_and_strip_jpeg(data, "asset") if ok else None
+        except (ValueError, TypeError) as e:
+            raise JevError(f"invalid asset data: {e}") from e
+        if not ok or clean != data:
+            raise JevError("invalid asset: not a clean PNG/JPEG")
+
+
 def post(body, timeout=None):
     """The only function that sends anything off the machine. Redacts the whole body first, then
     Jev first; on any JevError the local Laya daemon answers instead, else the error stands."""
     assets = body.get("assets")
+    check_assets(assets)
     body = safe_body({k: v for k, v in body.items() if k != "assets"})  # image bytes are not text
     if assets:
         body["assets"] = assets
@@ -231,6 +256,8 @@ def laya_post(body):
 def post_jev(body, timeout=None):
     orig = body
     if body.get("assets"):
+        if os.environ.get("JEV_DECISIONS_URL"):
+            raise JevError("images go to TypeSafe only; unset JEV_DECISIONS_URL to send images")
         key = typesafe_key()
         if not key:
             raise JevError("images need a TypeSafe key ($TYPESAFE_API_KEY or ~/.config/typesafe/api_key)")

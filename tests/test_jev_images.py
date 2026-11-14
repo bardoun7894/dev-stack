@@ -113,13 +113,11 @@ class ImagesTest(unittest.TestCase):
         sent2, _, _ = self.run_cli("noul", "x", "-s", "hello")
         self.assertEqual(json.loads(sent2[0].data)["model"], "jev-latest")
 
-    def test_image_routing_ignores_jev_decisions_url(self):
+    def test_image_refused_when_jev_decisions_url_set(self):
         with mock.patch.dict(os.environ, {"JEV_DECISIONS_URL": "https://other.example/decisions", "OPENROUTER_API_KEY": "or-key"}):
             sent, code, _ = self.run_cli("noul", "is it signed?", "--image", self.png)
-        self.assertEqual(code, 0)
-        self.assertEqual(sent[0].full_url, jev.TYPESAFE_URL)
-        self.assertEqual(sent[0].get_header("Authorization"), f"Bearer {FAKE_TS}")
-        self.assertEqual(json.loads(sent[0].data)["model"], "jev-latest")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(sent, [])
 
     def test_box(self):
         ans = {"type": "box", "box": {"top": 0.1, "bottom": 0.5, "left": 0.2, "right": 0.9}, "confidence": 0.92}
