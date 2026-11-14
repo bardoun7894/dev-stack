@@ -28,11 +28,13 @@ State options (the thing being judged):
   (stdin)              used when neither is given and stdin is not a terminal
 
 Images (choice / noul / score / box):
-  --image PATH         repeatable. PNG or JPEG only, up to 16 MiB each; anything else exits 2.
+  --image PATH         repeatable. PNG or JPEG only, up to 16 MiB per file and 16 MiB total;
+                       each side 280-1568 px (rotate upright first; EXIF/metadata is stripped).
+                       Anything invalid, oversized, or out-of-range exits 2.
                        Sent as base64 `assets` referenced by UUID from the state, with the header
                        `TypeSafe-Danger-Zone-Images: true`, only when an image is present.
                        Needs a TypeSafe key. Images use jev-latest (jev-1.14.0) unless --model is
-                       given; box needs jev-1.14. Each side 280-1568 px; rotate upright first.
+                       given; box needs jev-1.14.
                        DANGER ZONE: TypeSafe says images and Box are not production-guaranteed;
                        formats and answers can change. Gate on confidence and keep a vision-LLM fallback.
   --model NAME         TypeSafe model for this call (default: jev-latest)
@@ -41,12 +43,13 @@ Images (choice / noul / score / box):
 Output and exit codes:
   default     JSON: {"choice":…,"confidence":…} / {"noul":…} / {"score":…,"confidence":…}
   -q          only the answer: the choice, the probability, or the score
-  --min C     choice/score: exit 2 when confidence < C (so `jev … --min 0.8 || fallback`)
+  --min C     choice/score/box: exit 4 when confidence < C (so `jev … --min 0.8 || fallback`)
   --yes T     noul: exit 0 when probability >= T, else 1 (so `if jev noul … --yes 0.7`)
+  exit 2      bad/unsupported/oversized/out-of-range --image, or incompatible --model for box
   exit 3      API / key / network error (message on stderr)
+  exit 4      confidence below --min threshold
   --dry-run   print the exact (redacted) request body that would be sent, send nothing
               (image data shows as "<image N bytes>")
-  exit 2      also: unsupported or oversized --image
               (JEV_DRY_RUN=1 does the same for the importable post(): it prints to stderr and
               raises JevError, so callers fall back)
 
@@ -82,6 +85,8 @@ URL = os.environ.get("JEV_DECISIONS_URL", "https://openrouter.ai/api/alpha/decis
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
+MIN_IMAGE_SIDE = 280
+MAX_IMAGE_SIDE = 1568
 MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
 PRICE_PER_INPUT_TOKEN = 0.042 / 1_000_000
 
@@ -160,12 +165,19 @@ def typesafe_key():
         return ""
 
 
+def typesafe_model(body):
+    m = body.get("model")
+    if not m or m == MODEL:
+        return os.environ.get("JEV_TYPESAFE_MODEL", "jev-latest")
+    return m
+
+
 def route(body):
     """(url, key, body). TypeSafe direct when a key exists: the OpenRouter credit ran out on 2026-10-13."""
     key = "" if os.environ.get("JEV_DECISIONS_URL") else typesafe_key()
     if not key:
         return URL, api_key(), body
-    return TYPESAFE_URL, key, {**body, "model": os.environ.get("JEV_TYPESAFE_MODEL", "jev-latest")}
+    return TYPESAFE_URL, key, {**body, "model": typesafe_model(body)}
 
 
 def post(body, timeout=None):
@@ -218,9 +230,13 @@ def laya_post(body):
 
 def post_jev(body, timeout=None):
     orig = body
-    if body.get("assets") and not typesafe_key():
-        raise JevError("images need a TypeSafe key ($TYPESAFE_API_KEY or ~/.config/typesafe/api_key)")
-    url, key, body = route(body)
+    if body.get("assets"):
+        key = typesafe_key()
+        if not key:
+            raise JevError("images need a TypeSafe key ($TYPESAFE_API_KEY or ~/.config/typesafe/api_key)")
+        url, body = TYPESAFE_URL, {**body, "model": typesafe_model(body)}
+    else:
+        url, key, body = route(body)
     try:
         return _send(url, key, body, timeout)
     except JevError as e:
@@ -356,28 +372,120 @@ def tune_report(tag, n=20):
 
 # --- images ----------------------------------------------------------------------------------
 
+PNG_STRIP_CHUNKS = {b"eXIf", b"tEXt", b"zTXt", b"iTXt", b"tIME"}
+JPEG_SOF_MARKERS = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+JPEG_STRIP_MARKERS = {0xE1, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEF, 0xFE}
+
+
+def _check_dims(w, h, name):
+    if not (MIN_IMAGE_SIDE <= w <= MAX_IMAGE_SIDE and MIN_IMAGE_SIDE <= h <= MAX_IMAGE_SIDE):
+        raise JevError(
+            f"image dimensions {w}x{h} out of range for {name} "
+            f"(each side must be {MIN_IMAGE_SIDE}-{MAX_IMAGE_SIDE} px)"
+        )
+
+
+def _parse_and_strip_png(data, name):
+    pos, n = 8, len(data)
+    out = bytearray(data[:8])
+    dims = None
+    saw_iend = False
+    while pos < n:
+        if pos + 12 > n:
+            raise JevError(f"invalid PNG {name}: truncated chunk")
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        ctype = data[pos + 4:pos + 8]
+        end = pos + 12 + length
+        if end > n:
+            raise JevError(f"invalid PNG {name}: truncated {ctype!r} chunk")
+        if dims is None:
+            if ctype != b"IHDR" or length < 8:
+                raise JevError(f"invalid PNG {name}: missing IHDR")
+            dims = (
+                int.from_bytes(data[pos + 8:pos + 12], "big"),
+                int.from_bytes(data[pos + 12:pos + 16], "big"),
+            )
+        if ctype not in PNG_STRIP_CHUNKS:
+            out.extend(data[pos:end])
+        pos = end
+        if ctype == b"IEND":
+            saw_iend = True
+            break
+    if dims is None or not saw_iend:
+        raise JevError(f"invalid PNG {name}: missing IHDR or IEND")
+    _check_dims(dims[0], dims[1], name)
+    return bytes(out)
+
+
+def _parse_and_strip_jpeg(data, name):
+    pos, n = 2, len(data)
+    out = bytearray(b"\xff\xd8")
+    dims = None
+    while pos < n:
+        if data[pos] != 0xFF:
+            raise JevError(f"invalid JPEG {name}: unexpected byte before marker")
+        while pos < n and data[pos] == 0xFF:
+            pos += 1
+        if pos >= n:
+            raise JevError(f"invalid JPEG {name}: truncated marker")
+        marker = data[pos]
+        pos += 1
+        if marker == 0xD9:  # EOI
+            out.extend((0xFF, 0xD9))
+            break
+        if marker == 0x00 or marker == 0x01 or (0xD0 <= marker <= 0xD7):
+            out.extend((0xFF, marker))
+            continue
+        if marker == 0xDA:  # SOS
+            out.extend((0xFF, 0xDA))
+            out.extend(data[pos:])
+            break
+        if pos + 2 > n:
+            raise JevError(f"invalid JPEG {name}: truncated segment length")
+        seg_len = int.from_bytes(data[pos:pos + 2], "big")
+        if seg_len < 2 or pos + seg_len > n:
+            raise JevError(f"invalid JPEG {name}: bad segment length")
+        if marker in JPEG_SOF_MARKERS and dims is None:
+            if seg_len < 7:
+                raise JevError(f"invalid JPEG {name}: truncated SOF")
+            h = int.from_bytes(data[pos + 3:pos + 5], "big")
+            w = int.from_bytes(data[pos + 5:pos + 7], "big")
+            dims = (w, h)
+        if marker not in JPEG_STRIP_MARKERS:
+            out.extend((0xFF, marker))
+            out.extend(data[pos:pos + seg_len])
+        pos += seg_len
+    if dims is None:
+        raise JevError(f"invalid JPEG {name}: missing frame header")
+    _check_dims(dims[0], dims[1], name)
+    return bytes(out)
+
+
 def load_image(path):
-    """(format, bytes) for a PNG or JPEG file up to 16 MiB. Raises JevError otherwise."""
+    """(format, bytes) for a PNG or JPEG file up to 16 MiB and 280-1568 px per side, metadata stripped."""
+    name = os.path.basename(path)
     try:
-        size = os.path.getsize(path)
-        if size > MAX_IMAGE_BYTES:
-            raise JevError(f"image too large: {os.path.basename(path)} is {size} bytes, the limit is 16 MiB")
         with open(path, "rb") as f:
-            data = f.read()
+            data = f.read(MAX_IMAGE_BYTES + 1)
     except OSError as e:
         raise JevError(f"cannot read image {path}: {e}") from e
+    if len(data) > MAX_IMAGE_BYTES:
+        raise JevError(f"image too large: {name} exceeds 16 MiB")
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png", data
+        return "png", _parse_and_strip_png(data, name)
     if data.startswith(b"\xff\xd8\xff"):
-        return "jpg", data
-    raise JevError(f"unsupported image type: {os.path.basename(path)} (only PNG or JPEG; no video, no audio)")
+        return "jpg", _parse_and_strip_jpeg(data, name)
+    raise JevError(f"unsupported image type: {name} (only PNG or JPEG; no video, no audio)")
 
 
 def build_assets(paths):
     """({uuid: asset}, [uuid, ...]) in the order given."""
-    assets, refs = {}, []
+    assets, refs, total = {}, [], 0
     for p in paths:
         fmt, data = load_image(p)
+        total += len(data)
+        if total > MAX_IMAGE_BYTES:
+            raise JevError(f"total image size {total} bytes exceeds the 16 MiB limit")
         ref = str(uuid.uuid4())
         assets[ref] = {"type": "image", "format": fmt, "data_base64": base64.b64encode(data).decode()}
         refs.append(ref)
@@ -423,7 +531,7 @@ def ask_many(state, questions, tag=None, timeout=None, assets=None, model=None):
     """Several questions over one state in one request. Returns (answers, ids, cost).
     `assets` ({uuid: image}) are sent as-is and must be referenced from the state."""
     state = redact(state)
-    body = {"model": model or MODEL, "state": state, "questions": questions}
+    body = {"model": model or ("jev-latest" if assets else MODEL), "state": state, "questions": questions}
     if assets:
         body["assets"] = assets
     res = post(body, timeout)
@@ -474,7 +582,6 @@ def take_opts(args):
                 opts["images"].append(v)
             elif a == "--model":
                 opts["model"] = v
-                os.environ["JEV_TYPESAFE_MODEL"] = v
             elif a == "--n":
                 opts["n"] = int(v)
             else:
@@ -503,15 +610,16 @@ def cli_ask(opts, question):
     if (state is None or state == "") and not opts["images"]:
         die("no state: pass --state, --state-file, --image, or pipe it on stdin", 64)
     assets = None
+    box = question.get("type") == "box"
+    model = opts["model"] or ("jev-latest" if opts["images"] or box else MODEL)
+    if box and model not in ("jev-latest", "jev-1.14", "jev-1.14.0"):
+        die("box questions need jev-1.14 or jev-latest", 2)
     if opts["images"]:
         try:
             assets, refs = build_assets(opts["images"])
         except JevError as e:
             die(str(e), 2)
-        if question.get("type") == "box" and (opts["model"] or "jev-latest") not in ("jev-latest", "jev-1.14", "jev-1.14.0"):
-            die("box questions need jev-1.14 or jev-latest", 2)
         state = with_images(redact(state), refs)
-    model = opts["model"] or MODEL
     if opts["dry_run"]:
         body = {"model": model, "state": state, "questions": {"q": question}}
         if assets:
@@ -529,7 +637,7 @@ def emit_choice_or_score(a, key, opts, extra=None):
         out.update(extra)
     print(a.get(key) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
     if opts["min"] is not None and (conf is None or conf < opts["min"]):
-        sys.exit(2)
+        sys.exit(4)
 
 
 def main(argv):
@@ -584,7 +692,7 @@ def main(argv):
         out = {"box": a.get("box"), "confidence": a.get("confidence")}
         print(json.dumps(a.get("box")) if opts["quiet"] else json.dumps(out, ensure_ascii=False))
         if opts["min"] is not None and (out["confidence"] is None or out["confidence"] < opts["min"]):
-            sys.exit(2)
+            sys.exit(4)
     elif cmd == "route":
         if pos:
             opts["state"] = " ".join(pos)

@@ -116,8 +116,9 @@ class SendPathTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key", "JEV_LOG_DIR": self.tmp.name,  # secret-scan:allow (test fixture)
-                                                "JEV_LOG_PREVIEW": "1"})
+                                                "JEV_LOG_PREVIEW": "1", "JEV_NO_LAYA": "1"})
         self.env.start()
+        os.environ.pop("JEV_DECISIONS_URL", None)
 
     def tearDown(self):
         self.env.stop()
@@ -167,10 +168,15 @@ class SendPathTest(unittest.TestCase):
         self.assertEqual(leaked(err.getvalue()), [])
 
     def test_non_https_endpoint_never_gets_the_key(self):
-        with mock.patch.object(jev, "URL", "http://evil.example/collect"), \
-                mock.patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
-            with self.assertRaises(jev.JevError):
-                jev.post({"state": "x"})
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
+            with mock.patch.object(jev, "typesafe_key", return_value=""), \
+                    mock.patch.object(jev, "URL", "http://evil.example/collect"):
+                with self.assertRaises(jev.JevError):
+                    jev.post({"state": "x"})
+            with mock.patch.object(jev, "typesafe_key", return_value="ts-test"), \
+                    mock.patch.object(jev, "TYPESAFE_URL", "http://evil.example/collect"):
+                with self.assertRaises(jev.JevError):
+                    jev.post({"state": "x"})
 
     def test_missing_redactor_fails_closed(self):
         with mock.patch.object(jev, "jev_redact", None), \

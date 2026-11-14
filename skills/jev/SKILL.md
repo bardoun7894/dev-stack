@@ -79,7 +79,7 @@ jev score "How urgent" "can wait" "this week" "today" "right now" -s "$MSG" -q  
 jev route "Summarize the HN front page" -q                                    # -> T1
 echo '{"order":{"total":480,"items":3},"note":"arrived broken"}' | jev choice "Next step" refund=… replace=… ask_photo=… --min 0.8 -q || ask_llm
 ```
-Exit codes: `--min` → 2 when confidence is below; `--yes` → 1 when below; 3 = API/key error. Always keep a
+Exit codes: `--min` → 4 when confidence is below; `--yes` → 1 when below; 2 = invalid/oversized/out-of-range `--image` or bad box `--model`; 3 = API/key error. Always keep a
 fallback path for exit ≠ 0. Run `jev --help` for everything.
 
 ### The jev-* tools (dev-stack `bin/`, all fail closed, all log for `jev tune`)
@@ -109,10 +109,11 @@ fallback path for exit ≠ 0. Run `jev --help` for everything.
 ## Images and Box
 
 `jev choice|noul|score ... --image PATH` (repeatable) and `jev box "<what to find>" --image PATH`.
-PNG or JPEG only, up to 16 MiB each, each side 280-1568 px (rotate upright first; EXIF is stripped, not applied).
+PNG or JPEG only, up to 16 MiB per file and 16 MiB total across `--image` flags, each side 280-1568 px
+(rotate upright first; EXIF/metadata is stripped before sending, not applied).
 No video, no audio. Images use `jev-latest` (jev-1.14.0) unless `--model`; Box needs 1.14. The CLI sends base64
-`assets` plus the `TypeSafe-Danger-Zone-Images: true` header only when an image is present; a wrong type or
-oversized file exits 2. `--dry-run` shows `<image N bytes>` instead of the data.
+`assets` plus the `TypeSafe-Danger-Zone-Images: true` header only when an image is present; a wrong type,
+oversized file/total, or out-of-range dimensions exits 2. `--dry-run` shows `<image N bytes>` instead of the data.
 
 **Danger zone:** TypeSafe says images and Box are not production-guaranteed; formats and answers can change.
 
@@ -123,7 +124,7 @@ Use for classification of a paper, not for reading its fields:
   Jev classifies and boxes; it still never writes text.
 - Box crops must stay at least 280 px per side; if smaller, send the full image.
 
-Confidence: always pass `--min` (start at 0.8; tune from `jev tune`). Below it, or on any error (exit 2/3), fall back to a
+Confidence: always pass `--min` (start at 0.8; tune from `jev tune`). Below it (exit 4), or on any error (exit 2/3), fall back to a
 vision LLM (Claude Sonnet for sensitive or Arabic papers). Never treat an image answer as final until the item's offline
 evaluation has passed.
 
@@ -191,7 +192,7 @@ daemon (127.0.0.1:8719, launchd `dev.mbardouni.laya-serve`, Mac only) before exi
 is tagged `"engine": "laya"` in the JSON output and the decision log, and stderr shows `jev: fallback=laya`.
 Laya is 20-30× faster but weaker (A/B 2026-09-22: 73% vs 81% routing, mode collapse on many-option
 choices, confidence 0.02-0.26), so:
-- every `--min` gate fails closed (exit 2): routers go one tier up, which is the safe direction;
+- every `--min` gate fails closed (exit 4): routers go one tier up, which is the safe direction;
 - `noul` probabilities bunch near 0.5, so `--yes 0.7` reads as no;
 - `jev tune` and the capability-registry/outcomes readers skip Laya decisions;
 - `jev-browse` / `jev-page` (Laya over-predicts pass) and `jev-review` (its risk nouls fall below 0.6,
