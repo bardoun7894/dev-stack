@@ -7,13 +7,18 @@ When boat pauses CI jobs at the plan limit (60 starts per rolling hour):
 - every tick, for a repo with a fallback whose CI is on boat: cancel and rerun in full the runs still waiting
   unstarted on the fallback, within boat's free starts (D8);
 - repo without one: `gh run rerun --failed` 2 min after the reset.
+Only P1 runs (push to main, head branch proof-* or train-*) are moved to boat; while a paused job says boat's hourly or
+daily cap is still on, nothing is moved.
 """
 import json
 import os
-import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from boat_caps import (  # noqa: F401  (re-exported: tests and callers use bf.<name>)
+    MONTHS, P1_BRANCH_PREFIXES, cap_blocked_until, cap_window, is_p1, labels_of, parse_iso, reset_time, run_starts,
+    starts_last_hour)
 
 STATE = Path.home() / ".local" / "state" / "boat-fallback.json"
 LOG = Path.home() / ".local" / "state" / "boat-fallback.log"
@@ -26,39 +31,9 @@ VARS = ("CI_RUNS_ON", "CI_CONTAINER")
 STARTS_PER_HOUR = int(os.environ.get("BOAT_STARTS_PER_HOUR", "60"))
 STARTS_PER_DAY = int(os.environ.get("BOAT_STARTS_PER_DAY", "200"))
 STARTS_KEPT_FREE = 15
-DEFAULT_RUN_STARTS = 13
 MOVE_TIMEOUT = timedelta(minutes=30)
 MAX_RUN_CHECKS = 20  # job lists read per repo per tick while looking for stranded runs
 QUEUED = ("queued", "pending", "waiting", "requested")
-
-
-def starts_last_hour(jobs, now, hours=1):
-    """Sandbox starts boat counted in the last `hours`, from the jobs' runStartedAt (any repo: the plan is per account).
-    /ci lists the latest 200 jobs, so a full day reads as at least 200: no room, which is the safe side."""
-    n = 0
-    for j in jobs:
-        s = j.get("runStartedAt")
-        if s and timedelta(0) <= now - parse_iso(s) < timedelta(hours=hours):
-            n += 1
-    return n
-
-
-def run_starts(jobs, repo):
-    """Starts one run of `repo` takes on boat: the most distinct job names seen in one of its runs."""
-    names = {}
-    for j in jobs:
-        if j.get("repo") == repo and j.get("jobName"):
-            names.setdefault(str(j.get("runId")), set()).add(j["jobName"])
-    return max((len(v) for v in names.values()), default=DEFAULT_RUN_STARTS) or DEFAULT_RUN_STARTS
-
-
-def labels_of(runs_on):
-    """CI_RUNS_ON value ('"boat"' or '["self-hosted","cachy"]') -> set of runner labels."""
-    try:
-        v = json.loads(runs_on)
-    except (TypeError, ValueError):
-        return set()
-    return set(v) if isinstance(v, list) else {v}
 
 
 def gh_cli(args):
@@ -67,22 +42,6 @@ def gh_cli(args):
     except (subprocess.TimeoutExpired, OSError) as e:
         return 1, str(e)
     return r.returncode, (r.stdout or r.stderr).strip()
-
-
-def parse_iso(s):
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
-
-
-def reset_time(reason, queued_at, now):
-    """Boat says "start again at HH:MM UTC": the next such time after the job was queued."""
-    m = re.search(r"start again at (\d{1,2}):(\d{2}) UTC", reason or "")
-    if not m:
-        return now + timedelta(hours=1)
-    base = parse_iso(queued_at) if queued_at else now
-    r = base.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
-    if r < base:
-        r += timedelta(days=1)
-    return r
 
 
 def load_state(path):
@@ -167,9 +126,10 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
         return str(rows[0]["databaseId"]) if rows else None
 
     def unstarted_on(repo, run, labels):
-        """No job of the run has started on the fallback (a finished preflight or a skipped job does not count)."""
+        """No job carrying the fallback's labels has started (a finished preflight or a skipped job does not count).
+        Jobs on other runners (light jobs: preflight, build, checks) are ignored: the full rerun repeats them."""
         data = gh_json(["api", "repos/%s/actions/runs/%s/jobs" % (repo, run)]) or {}
-        rjobs = data.get("jobs") or []
+        rjobs = [j for j in (data.get("jobs") or []) if labels <= set(j.get("labels") or [])]
         if not rjobs:
             return False
         for j in rjobs:
@@ -178,12 +138,14 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             if j.get("status") == "completed" and not (
                     str(j.get("name", "")).startswith("preflight") or j.get("conclusion") == "skipped"):
                 return False
-        return any(j.get("status") != "completed" and set(j.get("labels") or []) == labels for j in rjobs)
+        return any(j.get("status") != "completed" for j in rjobs)
 
     def room_for(repo):
         """Runs of `repo` boat can take now, keeping STARTS_KEPT_FREE. Moved runs not rerun yet, or rerun but not
         started on boat, are not in runStartedAt: their own start counts are added as used."""
         per_run = run_starts(jobs, repo)
+        if cap_blocked_until(jobs, now):
+            return 0, per_run
         pending = sum(m.get("starts", per_run) for m in st["moving"].values())
         free = min(STARTS_PER_HOUR - starts_last_hour(jobs, now), STARTS_PER_DAY - starts_last_hour(jobs, now, 24))
         return max(0, (free - STARTS_KEPT_FREE - pending) // per_run), per_run
@@ -206,6 +168,7 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
                 newest[k] = r.get("createdAt", "")
         # in_progress: a run whose preflight finished is in_progress; unstarted_on decides whether it can move
         queued = sorted((r for r in rows if r.get("status") in QUEUED + ("in_progress",)
+                         and is_p1(r.get("headBranch"), r.get("event"))
                          and r.get("createdAt") == newest.get((r.get("headBranch"), r.get("workflowDatabaseId"), r.get("event")))),
                         key=lambda r: r.get("createdAt", ""))
         moved = checked = 0
@@ -385,6 +348,10 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
     #    listed (and counted against boat's room) until boat shows one of its jobs started, or MOVE_TIMEOUT passed.
     for key, item in list(st["moving"].items()):
         repo, run = key.split("|", 1)
+        if not item.get("reran") and not is_p1(item.get("branch"), item.get("event")):
+            log("%s: run %s on %s is not P1, not moved to boat" % (repo, run, item.get("branch")))
+            del st["moving"][key]
+            continue
         if item.get("reran"):
             if any(str(j.get("runId")) == run and j.get("runStartedAt") for j in jobs) or (
                     now - parse_iso(item["reran"]) > MOVE_TIMEOUT):
@@ -423,7 +390,8 @@ def tick(jobs, now, gh=gh_cli, state_path=STATE, log_path=LOG, dry_run=False):
             continue
         fb = cur.get("CI_FALLBACK_RUNS_ON")
         if fb and cur.get("CI_RUNS_ON") != fb:
-            move_stranded(repo, labels_of(fb))
+            # CI_HEAVY_RUNS_ON: the laptop label set of the heavy jobs (mediatgb ci.yml); light jobs run elsewhere.
+            move_stranded(repo, labels_of(cur.get("CI_HEAVY_RUNS_ON") or fb))
 
     st["handled"] = sorted(handled)
     save()
