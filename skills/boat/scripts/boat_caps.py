@@ -66,7 +66,7 @@ def reset_time(reason, queued_at, now):
     base = parse_iso(queued_at) if queued_at else now
     m = re.search(r"start again at (?:([A-Z][a-z]{2}) (\d{1,2}), )?(\d{1,2}):(\d{2}) UTC", reason or "")
     if not m:
-        return base + timedelta(hours=24) if cap_window(reason) == "day" else now + timedelta(hours=1)
+        return base + timedelta(hours=24) if cap_window(reason) == "day" else base + timedelta(hours=1)
     hour, minute = int(m.group(3)), int(m.group(4))
     if m.group(1) in MONTHS:
         r = base.replace(month=MONTHS[m.group(1)], day=int(m.group(2)), hour=hour, minute=minute, second=0,
