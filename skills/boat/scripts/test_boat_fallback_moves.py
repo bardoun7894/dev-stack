@@ -35,8 +35,10 @@ class T8MoveStranded(Base):
 
     def setUp(self):
         super().setUp()
-        rows = [("201", "queued", "a", "07:20"), ("202", "queued", "b", "07:25"), ("203", "queued", "c", "07:30"),
-                ("204", "queued", "c", "07:35"), ("206", "queued", "d", "07:40"), ("205", "completed", "e", "07:15")]
+        # P1 head branches (train-*, proof-*): only P1 runs move to boat.
+        rows = [("201", "queued", "train-a", "07:20"), ("202", "queued", "proof-b", "07:25"),
+                ("203", "queued", "train-c", "07:30"), ("204", "queued", "train-c", "07:35"),
+                ("206", "queued", "proof-d", "07:40"), ("205", "completed", "train-e", "07:15")]
         self.gh.active_since[REPO] = [{"databaseId": int(i), "status": s, "headBranch": b,
                                        "createdAt": "2026-11-11T%s:00Z" % c} for i, s, b, c in rows]
         unstarted = [gh_job("preflight (affected & path filter)"), gh_job("ci-ok")]
@@ -75,7 +77,7 @@ class T8MoveStranded(Base):
     def test_superseded_after_cancel_is_not_rerun(self):
         self.restore(20)
         self.cancelled("201", "204")
-        self.gh.active_since[REPO].append({"databaseId": 207, "status": "queued", "headBranch": "a",
+        self.gh.active_since[REPO].append({"databaseId": 207, "status": "queued", "headBranch": "train-a",
                                            "createdAt": "2026-11-11T07:57:00Z"})
         self.tick([job("j1")] + boat_history(20), t("07:58"))
         reruns = [w[2] for w in self.gh.writes if w[0] == "rerun" and w[2] != "100"]
