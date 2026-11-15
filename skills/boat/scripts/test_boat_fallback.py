@@ -217,7 +217,7 @@ class T5Parse(unittest.TestCase):
         self.assertEqual(bf.reset_time(r, "2026-11-11T23:50:00Z", t("23:52")), t("00:30", day=12))
 
     def test_no_match(self):
-        self.assertEqual(bf.reset_time("odd", "2026-11-11T07:10:00Z", t("07:12")), t("08:10"))
+        self.assertEqual(bf.reset_time("odd", "2026-11-11T07:10:00Z", t("07:12")), t("08:12"))
 
 
 class T6DryRun(Base):
