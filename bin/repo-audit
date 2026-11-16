@@ -94,7 +94,7 @@ def scan_file_content(rel_path: str, text: str, install_hooks: list[str], red_fl
             })
 
 
-def compute_risk(license_id: str, install_hooks: list[str], binaries: list[str], red_flags: list[dict[str, str]]) -> tuple[str, list[str]]:
+def compute_risk(license_id: str, install_hooks: list[str], binaries: list[str], red_flags: list[dict[str, str]], incomplete: list[str] | None = None) -> tuple[str, list[str]]:
     reasons: list[str] = []
     high = False
     med = False
@@ -120,6 +120,10 @@ def compute_risk(license_id: str, install_hooks: list[str], binaries: list[str],
     if license_id in COPYLEFT_LICENSES or license_id == "NONE":
         med = True
         reasons.append(f"license is {license_id}")
+
+    for note in incomplete or []:
+        med = True
+        reasons.append(note)
 
     level = "HIGH" if high else ("MEDIUM" if med else "LOW")
     return level, reasons
@@ -230,13 +234,15 @@ def audit_github(owner: str, repo: str, ref_override: str | None) -> dict[str, A
     if license_id in ("NOASSERTION", "NONE") and lic_blobs:
         candidates = lic_blobs[:1] + candidates
 
+    failed_fetches: list[str] = []
+
     def fetch_blob(p: str) -> tuple[str, str | None]:
         try:
             obj = gh_api(f"repos/{owner}/{repo}/contents/{p}?ref={sha}")
             if isinstance(obj, dict) and obj.get("encoding") == "base64" and obj.get("content"):
                 return p, base64.b64decode(obj["content"]).decode("utf-8", errors="replace")
         except Exception:
-            pass
+            failed_fetches.append(p)
         return p, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
@@ -250,7 +256,12 @@ def audit_github(owner: str, repo: str, ref_override: str | None) -> dict[str, A
             continue
         scan_file_content(p, raw, install_hooks, red_flags)
 
-    level, reasons = compute_risk(license_id, install_hooks, binaries, red_flags)
+    incomplete: list[str] = []
+    if tree_resp.get("truncated"):
+        incomplete.append("repo tree truncated by GitHub; inventory incomplete")
+    if failed_fetches:
+        incomplete.append(f"{len(failed_fetches)} file(s) could not be fetched and were not scanned: {', '.join(failed_fetches[:5])}")
+    level, reasons = compute_risk(license_id, install_hooks, binaries, red_flags, incomplete)
     return {
         "mode": "github",
         "target": f"{owner}/{repo}",

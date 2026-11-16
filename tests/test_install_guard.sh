@@ -7,6 +7,7 @@ mkdir -p "$T/proj/node_modules/.bin"
 printf '#!/bin/sh\necho ok\n' > "$T/proj/node_modules/.bin/vitest"
 chmod +x "$T/proj/node_modules/.bin/vitest"
 touch "$T/proj/requirements.txt"
+printf '{"packages":{"node_modules/vitest":{}}}\n' > "$T/proj/package-lock.json"
 
 fails=0
 # check <name> <allow|ask|deny> <command> [env...]

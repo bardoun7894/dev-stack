@@ -16,9 +16,9 @@ in=""
 [ -n "$in" ] || exit 0
 
 # Fast-path exit (<2ms) when no download/package/MCP tool appears anywhere in input
-printf '%s' "$in" | grep -qiE '(^|[^[:alnum:]_-])(curl|wget|npm|pnpm|yarn|bun|npx|pnpx|bunx|uvx|pipx|pip3?|uv|cargo|go|brew|gem|claude)([^[:alnum:]_-]|$)' || exit 0
+printf '%s' "$in" | grep -qiE '(^|[^[:alnum:]_-]|\\[nrt])(curl|wget|npm|pnpm|yarn|bun|npx|pnpx|bunx|uvx|pipx|pip3?|uv|cargo|go|brew|gem|claude)([^[:alnum:]_-]|$)' || exit 0
 
-printf '%s' "$in" | python3 -c '
+out=$(printf '%s' "$in" | python3 -c '
 import json, os, re, shlex, sys
 
 try:
@@ -45,14 +45,14 @@ def emit(decision: str, reason: str) -> None:
 def strip_heredocs(text: str) -> str:
     out, skip_term = [], None
     heredoc_re = re.compile(r"<<-?\s*[\x27\x22]?([A-Za-z_][A-Za-z0-9_]*)[\x27\x22]?")
-    shell_sink_re = re.compile(r"(^|[;&|(])\s*(bash|sh|zsh|python3?|node)\b")
+    exec_consumer_re = re.compile(r"(^|[\s;&|(`$])(bash|sh|zsh|dash|ksh|python3?|node|deno|eval|source|ssh|sudo|env|xargs|exec)(?=[\s;&|)]|$)")
     for line in text.splitlines():
         if skip_term is not None:
             if line.strip() == skip_term:
                 skip_term = None
             continue
         out.append(line)
-        if "<<<" not in line and not shell_sink_re.search(line):
+        if "<<<" not in line and not exec_consumer_re.search(line):
             m = heredoc_re.search(line)
             if m:
                 skip_term = m.group(1)
@@ -101,6 +101,18 @@ def split_top(text: str, sep_chars: str):
 WRAPPER_VAL_FLAGS = {"-u", "-C", "-p", "-t"}
 SSH_VAL_FLAGS = set("-oiplFJLRDEWbcem")
 NPM_VAL_FLAGS = {"--loglevel", "--prefix", "--registry", "--cache", "--tag", "--workspace", "-w"}
+FETCH_SUB_RE = re.compile(r"^\s*[({]?\s*(sudo\s+)?(\S*/)?(curl|wget)\b")
+
+def in_lockfile(pkg: str, root: str) -> bool:
+    pat = re.compile(r"(?<![\w.-])" + re.escape(pkg) + r"(?![\w.-])")
+    for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock"):
+        try:
+            with open(os.path.join(root, name), encoding="utf-8", errors="replace") as fh:
+                if pat.search(fh.read()):
+                    return True
+        except OSError:
+            pass
+    return False
 
 def unwrap_tokens(toks):
     i, n = 0, len(toks)
@@ -113,6 +125,8 @@ def unwrap_tokens(toks):
             while i < n and toks[i].startswith("-"):
                 i += 2 if toks[i] in WRAPPER_VAL_FLAGS else 1
             continue
+        if t in ("{", "(", "!"):
+            i += 1; continue
         if t == "timeout":
             i += 2; continue
         if t in ("time", "nohup", "exec", "command", "setsid"):
@@ -170,7 +184,7 @@ def extract_cmd_substs(text: str):
         if ch == "\x22" and not sq:
             dq = not dq; i += 1; continue
         if not sq:
-            if text[i:i+2] == "$(":
+            if text[i:i+2] == "$(" or (ch in "<>" and not dq and text[i+1:i+2] == "("):
                 depth_p = 1
                 j = i + 2
                 while j < n and depth_p > 0:
@@ -198,6 +212,11 @@ def extract_cmd_substs(text: str):
 def check_script(script: str, local_cwd: str, depth: int = 0):
     if depth > 4 or not script.strip():
         return None
+    # Join line continuations and pipes split across lines; drop redirection-dup ampersands
+    # (2>&1, &>, |&) so they are not mistaken for backgrounding.
+    script = re.sub(r"\\\n", " ", script)
+    script = re.sub(r"\|\s*\n", "| ", script)
+    script = script.replace("&>", ">").replace(">&", ">").replace("|&", "|")
     cleaned = "\n".join(strip_comment(ln) for ln in strip_heredocs(script).splitlines())
 
     sub_ask = None
@@ -232,7 +251,7 @@ def check_script(script: str, local_cwd: str, depth: int = 0):
             toks = unwrap_tokens(raw_toks)
             if not toks:
                 continue
-            prog = os.path.basename(toks[0])
+            prog = os.path.basename(toks[0].strip("(){}!"))
             rest = toks[1:]
 
             if prog in ("curl", "wget"):
@@ -259,7 +278,10 @@ def check_script(script: str, local_cwd: str, depth: int = 0):
                         ask_reason = res
                 continue
 
-            if prog in ("bash", "sh", "zsh"):
+            if prog in ("bash", "sh", "zsh", "dash", "ksh", "eval", "source", "."):
+                for sub in extract_cmd_substs(stage):
+                    if FETCH_SUB_RE.match(sub):
+                        return ("deny", f"install-guard: running a download via substitution inside `{prog}` is blocked. Download to a file, inspect with repo-audit, then execute.")
                 for k, tk in enumerate(rest):
                     if tk.startswith("-") and "c" in tk[1:] and k + 1 < len(rest):
                         res = check_script(rest[k + 1], local_cwd, depth + 1)
@@ -290,7 +312,7 @@ def check_script(script: str, local_cwd: str, depth: int = 0):
                         pkg = pos[0]
                         local_bin = os.path.join(local_cwd, "node_modules", ".bin", pkg) if local_cwd else ""
                         is_plain = ("/" not in pkg and "@" not in pkg)
-                        if not (is_plain and local_bin and os.path.isfile(local_bin)):
+                        if not (is_plain and local_bin and os.path.isfile(local_bin) and in_lockfile(pkg, local_cwd)):
                             hit = f"npx {pkg}"
             elif prog == "npm" and rest and rest[0] in ("install", "i", "add", "isntall"):
                 sub_args = rest[1:]
@@ -339,4 +361,11 @@ verdict = check_script(cmd, cwd)
 if verdict:
     emit(verdict[0], verdict[1])
 '
+)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"install-guard: analysis failed; confirm the command manually."}}'
+  exit 0
+fi
+[ -n "$out" ] && printf '%s\n' "$out"
 exit 0
