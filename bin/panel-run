@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""panel-run — deterministic Round 1 + Round 2 multi-reviewer orchestrator for /panel.
+
+Runs Codex (B), Gemini (C), and OpenCode/MiniMax (D) in parallel for Round 1 (blind drafts)
+and Round 2 (confidence-scored peer cross-review), retries transient CLI failures once,
+persists verbatim outputs + transcript to `ai-knowledge-base/raw/panel/`, and prints ONLY
+file paths + parsed confidence scores so live coordinator context stays lean.
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+CRITIQUE_RE = re.compile(
+    r"(?:`([ABCD]:[^`\n]+)`|([ABCD]:\S+))\s*(?:—|–|-+)\s*confidence\s*[:=]?\s*([1-5])(?:/5)?\s*(?:—|–|-+)\s*(.+?)(?:\s+(?:—|–|--)\s+(.+))?$",
+    re.I,
+)
+
+REVIEWER_META = {
+    "A": ("claude", "PLAN A (Claude)"),
+    "B": ("codex", "PLAN B (Codex)"),
+    "C": ("gemini", "PLAN C (Gemini)"),
+    "D": ("opencode", "PLAN D (OpenCode/MiniMax)"),
+}
+
+
+def resolve_bin(env_key: str, default_name: str) -> str | None:
+    override = os.environ.get(env_key, "").strip()
+    cand = override or default_name
+    if os.path.sep in cand:
+        p = Path(cand)
+        return str(p) if (p.is_file() and os.access(p, os.X_OK)) else None
+    return shutil.which(cand)
+
+
+def slugify(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return (s[:48].rstrip("-") or "panel")
+
+
+def run_with_retry(
+    build_cmd: Callable[[str], list[str]],
+    prompt_primary: str,
+    prompt_retry: str,
+    timeout_sec: int,
+) -> tuple[bool, str, int]:
+    last_err = ""
+    for attempt, prompt in enumerate((prompt_primary, prompt_retry), start=1):
+        try:
+            res = subprocess.run(
+                build_cmd(prompt),
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            out = (res.stdout or "").strip()
+            if res.returncode == 0 and out:
+                return True, out, attempt
+            last_err = (res.stderr or res.stdout or f"rc={res.returncode}").strip()
+        except subprocess.TimeoutExpired:
+            last_err = f"timeout after {timeout_sec}s"
+        except Exception as exc:
+            last_err = str(exc)
+    return False, last_err, 2
+
+
+def build_r1_prompt(target: str, scope: str, prior_art: str, extra: str, is_opencode: bool) -> str:
+    base = (
+        "Prior art from our KB (trust this — don't re-derive):\n"
+        f"{prior_art.strip() or 'n/a'}\n\n"
+        f"Target: {target}\n"
+        f"Task: {scope}\n"
+        f"Scope: {extra.strip() or 'Strictly within Target boundary.'}\n"
+        "Format: `file:line` - severity - issue - suggested fix\n"
+        "(for plans) Output: 1) Overview 2) Files/modules touched 3) Steps in order 4) Edge cases 5) Open questions\n"
+        "Skip preambles. Lead with findings."
+    )
+    if is_opencode:
+        base += (
+            "\n\nYour focus: clarity of the proposed approach, UX/user-facing language, "
+            "issue severity classification, any cross-cutting concern the other reviewers "
+            "(code-focused) tend to miss. Flag ambiguous requirements, inconsistent terminology, "
+            "and user-impact risks."
+        )
+    return base
+
+
+def build_r2_prompt(reviewer_label: str, target: str, r1_drafts: dict[str, str]) -> str:
+    peers = [k for k in ("A", "B", "C", "D") if k != reviewer_label and k in r1_drafts]
+    blocks = []
+    for k in peers:
+        _, title = REVIEWER_META[k]
+        blocks.append(f"{title}:\n{r1_drafts[k].strip()}")
+    peer_list = ", ".join(peers)
+    fmt_examples = " or ".join(f"`{k}:<item>`" for k in peers)
+
+    focus = {
+        "B": "Ignore: style, phrasing, taste. Focus on correctness, edge cases, missing steps, hidden risks.",
+        "C": "Focus on long-context / cross-file / design / token-adherence issues.",
+        "D": "Focus on: clarity of language and requirements, user-impact risks, severity mis-labeling, cross-cutting concerns the code-focused reviewers may have missed.",
+    }[reviewer_label]
+
+    return (
+        f"You are Reviewer {reviewer_label}. Here are three peer plans for {target}.\n\n"
+        + "\n\n".join(blocks)
+        + f"\n\nYour task: critique {peer_list}. What did each miss, where is each wrong, what's your P0 dissent?\n"
+        + f"{focus}\n"
+        + f"Format: {fmt_examples} — confidence 1-5 — issue — recommendation\n"
+        + "Skip preambles."
+    )
+
+
+def parse_critiques(reviewer_label: str, text: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("-*0123456789. ")
+        if not line:
+            continue
+        m = CRITIQUE_RE.search(line)
+        if m:
+            ref = (m.group(1) or m.group(2) or "").strip()
+            items.append({
+                "by": reviewer_label,
+                "ref": ref,
+                "confidence": int(m.group(3)),
+                "issue": m.group(4).strip(),
+                "recommendation": (m.group(5) or "").strip(),
+            })
+    return items
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Deterministic parallel Round 1 + Round 2 runner for /panel.")
+    ap.add_argument("--target", required=True, help="Target feature, file, module, or PR")
+    ap.add_argument("--scope", default="plan", help="plan | review | bug-hunt | security | design-review")
+    ap.add_argument("--slug", default="", help="Output slug (defaults to slugified target)")
+    ap.add_argument("--date", default="", help="YYYY-MM-DD override")
+    ap.add_argument("--prior-art-file", default="", help="Path to shared KB / NotebookLM preamble")
+    ap.add_argument("--draft-a-file", default="", help="Path to Reviewer A (Claude) blind Round 1 draft")
+    ap.add_argument("--prompt-extra", default="", help="Scope boundary instructions")
+    ap.add_argument("--include-dir", action="append", default=[], help="Directory for Gemini --include-directories")
+    ap.add_argument("--out-dir", default="ai-knowledge-base/raw/panel", help="Base directory for panel artifacts")
+    ap.add_argument("--timeout", type=int, default=240, help="Timeout per CLI invocation in seconds")
+    args = ap.parse_args()
+
+    codex_bin = resolve_bin("PANEL_CODEX_BIN", "codex")
+    gemini_bin = resolve_bin("PANEL_GEMINI_BIN", "gemini")
+    opencode_bin = resolve_bin("PANEL_OPENCODE_BIN", "opencode")
+    codex_model = os.environ.get("PANEL_CODEX_MODEL", "gpt-5.4")
+    opencode_model = os.environ.get("PANEL_OPENCODE_MODEL", "opencode/minimax-m2.5-free")
+
+    bins = {"B": codex_bin, "C": gemini_bin, "D": opencode_bin}
+    available = [k for k in ("B", "C", "D") if bins[k]]
+    missing = [f"{k}({REVIEWER_META[k][0]})" for k in ("B", "C", "D") if not bins[k]]
+
+    if not available:
+        sys.stderr.write("panel-run: All external reviewer CLIs unavailable (codex, gemini, opencode).\n")
+        return 2
+
+    prior_art = Path(args.prior_art_file).read_text(encoding="utf-8") if args.prior_art_file else ""
+    draft_a = Path(args.draft_a_file).read_text(encoding="utf-8") if args.draft_a_file else ""
+
+    date_str = args.date or dt.date.today().isoformat()
+    slug = args.slug or slugify(args.target)
+    out_base = Path(args.out_dir)
+    run_dir = out_base / f"{date_str}-{slug}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    r1_drafts: dict[str, str] = {}
+    saved_files: dict[str, str] = {}
+    if draft_a.strip():
+        r1_drafts["A"] = draft_a
+        p_a = run_dir / "r1-A-claude.md"
+        p_a.write_text(draft_a, encoding="utf-8")
+        saved_files["r1_A"] = str(p_a)
+
+    def cmd_builder_for(label: str) -> Callable[[str], list[str]]:
+        if label == "B":
+            return lambda p: [ str(codex_bin), "exec", "--model", codex_model, "--sandbox", "read-only", p ]
+        if label == "C":
+            inc: list[str] = []
+            for d in args.include_dir:
+                inc.extend(["--include-directories", d])
+            return lambda p: [ str(gemini_bin), "-p", p, "--approval-mode", "plan", "-o", "text", *inc ]
+        return lambda p: [ str(opencode_bin), "run", p, "-m", opencode_model ]
+
+    # Round 1 — parallel blind drafts
+    errors: dict[str, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futs = {}
+        for k in available:
+            p_full = build_r1_prompt(args.target, args.scope, prior_art, args.prompt_extra, is_opencode=(k == "D"))
+            p_retry = build_r1_prompt(args.target, args.scope, prior_art[:1500], "Be concise; top P0/P1 items only.", is_opencode=(k == "D"))
+            futs[pool.submit(run_with_retry, cmd_builder_for(k), p_full, p_retry, args.timeout)] = k
+
+        for fut in concurrent.futures.as_completed(futs):
+            k = futs[fut]
+            ok, output, _ = fut.result()
+            name = REVIEWER_META[k][0]
+            if ok:
+                r1_drafts[k] = output
+                fp = run_dir / f"r1-{k}-{name}.md"
+                fp.write_text(output + "\n", encoding="utf-8")
+                saved_files[f"r1_{k}"] = str(fp)
+            else:
+                errors[f"r1_{k}"] = output
+                missing.append(f"{k}({name}:r1-failed)")
+
+    active_ext = [k for k in ("B", "C", "D") if k in r1_drafts]
+    if not active_ext:
+        sys.stderr.write(f"panel-run: All external reviewers failed in Round 1: {errors}\n")
+        return 2
+
+    # Round 2 — parallel confidence-scored peer cross-review
+    r2_outputs: dict[str, str] = {}
+    critiques: list[dict[str, Any]] = []
+    if len(r1_drafts) >= 2:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futs2 = {}
+            for k in active_ext:
+                peers_present = [p for p in ("A", "B", "C", "D") if p != k and p in r1_drafts]
+                if not peers_present:
+                    continue
+                p2_full = build_r2_prompt(k, args.target, r1_drafts)
+                truncated_drafts = {pk: pv[:3000] for pk, pv in r1_drafts.items()}
+                p2_retry = build_r2_prompt(k, args.target, truncated_drafts)
+                futs2[pool.submit(run_with_retry, cmd_builder_for(k), p2_full, p2_retry, args.timeout)] = k
+
+            for fut in concurrent.futures.as_completed(futs2):
+                k = futs2[fut]
+                ok, output, _ = fut.result()
+                name = REVIEWER_META[k][0]
+                if ok:
+                    r2_outputs[k] = output
+                    fp = run_dir / f"r2-{k}-{name}.md"
+                    fp.write_text(output + "\n", encoding="utf-8")
+                    saved_files[f"r2_{k}"] = str(fp)
+                    critiques.extend(parse_critiques(k, output))
+                else:
+                    errors[f"r2_{k}"] = output
+
+    critiques.sort(key=lambda x: (-x["confidence"], x["ref"], x["by"]))
+    total_reviewers = 1 + len(active_ext)  # Reviewer A (coordinator) + active external CLIs
+    panel_mode = f"{total_reviewers}-reviewer"
+
+    # Assemble canonical transcript ready for Round 3 synthesis
+    transcript_path = out_base / f"{date_str}-{slug}.md"
+    active_names = ["claude"] + [REVIEWER_META[k][0] for k in active_ext]
+    t_lines = [
+        "---",
+        "source: panel",
+        f"reviewers: [{', '.join(active_names)}]",
+        f"codex_model: {codex_model if 'B' in active_ext else 'n/a'}",
+        f"gemini_model: {'default' if 'C' in active_ext else 'n/a'}",
+        f"opencode_model: {opencode_model if 'D' in active_ext else 'n/a'}",
+        f"date: {date_str}",
+        f"target: {args.target}",
+        f"scope: {args.scope}",
+        "---",
+        "",
+        "## Prior art consulted",
+        prior_art.strip() or "- n/a",
+        "",
+        "## Round 1 — Independent drafts",
+    ]
+    for k, header in (("A", "Plan A (Claude)"), ("B", "Plan B (Codex)"), ("C", "Plan C (Gemini)"), ("D", "Plan D (OpenCode/MiniMax)")):
+        t_lines.extend([f"### {header}", r1_drafts.get(k, "_(not run / unavailable)_").strip(), ""])
+
+    t_lines.append("## Round 2 — Cross-review (with confidence scores)")
+    t_lines.extend(["### Claude on B + C + D", "_(synthesized by Reviewer A in Round 3)_", ""])
+    for k, label_hdr in (("B", "Codex on A + C + D"), ("C", "Gemini on A + B + D"), ("D", "OpenCode on A + B + C")):
+        t_lines.extend([f"### {label_hdr}", r2_outputs.get(k, "_(unavailable)_").strip(), ""])
+
+    t_lines.extend([
+        "## Round 3 — Weighted synthesis",
+        "_(Append final weighted verdict here)_",
+        "",
+    ])
+    transcript_path.write_text("\n".join(t_lines), encoding="utf-8")
+
+    digest = {
+        "panel_mode": panel_mode,
+        "target": args.target,
+        "scope": args.scope,
+        "active_external": active_ext,
+        "missing": missing,
+        "errors": errors,
+        "run_dir": str(run_dir),
+        "transcript_path": str(transcript_path),
+        "files": saved_files,
+        "critiques": critiques,
+    }
+    digest_path = run_dir / "digest.json"
+    digest_path.write_text(json.dumps(digest, indent=2) + "\n", encoding="utf-8")
+
+    # Compact stdout for coordinator (<35 lines, zero raw R1 dumps)
+    print(f"PANEL_MODE: {panel_mode}")
+    print(f"ACTIVE_EXTERNAL: {', '.join(f'{k}({REVIEWER_META[k][0]})' for k in active_ext)}")
+    if missing:
+        print(f"MISSING: {', '.join(missing)}")
+    print(f"RUN_DIR: {run_dir}")
+    print(f"TRANSCRIPT: {transcript_path}")
+    print(f"DIGEST_JSON: {digest_path}")
+    print("FILES:")
+    for fk, fp in sorted(saved_files.items()):
+        sz = Path(fp).stat().st_size
+        print(f"  - {fk}: {fp} ({sz} bytes)")
+    if critiques:
+        print(f"TOP_CRITIQUES ({len(critiques)} parsed):")
+        for item in critiques[:15]:
+            rec = f" -> {item['recommendation']}" if item["recommendation"] else ""
+            print(f"  - [conf {item['confidence']}] ({item['by']}) {item['ref']}: {item['issue']}{rec}")
+    else:
+        print("TOP_CRITIQUES: 0 structured lines parsed (inspect r2-*.md files in RUN_DIR).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
