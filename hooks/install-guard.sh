@@ -15,8 +15,6 @@ in=""
 [ -t 0 ] || in=$(cat 2>/dev/null || true)
 [ -n "$in" ] || exit 0
 
-# Fast-path exit (<2ms) when no download/package/MCP tool appears anywhere in input
-printf '%s' "$in" | grep -qiE '(^|[^[:alnum:]_-]|\\[nrt])(curl|wget|npm|pnpm|yarn|bun|npx|pnpx|bunx|uvx|pipx|pip3?|uv|cargo|go|brew|gem|claude)([^[:alnum:]_-]|$)' || exit 0
 
 out=$(printf '%s' "$in" | python3 -c '
 import json, os, re, shlex, sys
@@ -325,6 +323,15 @@ def check_script(script: str, local_cwd: str, depth: int = 0):
                         is_plain = ("/" not in pkg and "@" not in pkg)
                         if not (is_plain and local_bin and os.path.isfile(local_bin) and in_lockfile(pkg, local_cwd)):
                             hit = f"npx {pkg}"
+            elif prog == "npm" and rest and rest[0] in ("exec", "x"):
+                hit = " ".join(toks[:4])
+            elif prog in ("pnpm", "yarn") and rest and rest[0] == "dlx":
+                hit = " ".join(toks[:4])
+            elif prog in ("python", "python3") and rest[:2] in (["-m", "pip"], ["-m", "uv"]) and "install" in rest[2:]:
+                if not is_local_pip_only([a for a in rest[2:] if a != "install"]):
+                    hit = " ".join(toks[:5])
+            elif prog == "deno" and rest and rest[0] == "run" and any("://" in a for a in rest[1:]):
+                hit = " ".join(toks[:4])
             elif prog == "npm" and rest and rest[0] in ("install", "i", "add", "isntall"):
                 sub_args = rest[1:]
                 pos = non_flag_args(sub_args, NPM_VAL_FLAGS)

@@ -420,14 +420,17 @@ else
 fi
 
 if ! grep -q "install-guard.sh" "$settings_file" 2>/dev/null; then
-  echo "  add the following to $settings_file under .hooks.PreToolUse[] (Bash|mcp__lean-ctx__ctx_shell):"
-  cat <<'JSON'
-    {
-      "type": "command",
-      "command": "$HOME/.claude/hooks/install-guard.sh",
-      "timeout": 5
-    }
-JSON
+  ig_entry='{"matcher":"Bash|mcp__lean-ctx__ctx_shell","hooks":[{"type":"command","command":"$HOME/.claude/hooks/install-guard.sh","timeout":5}]}'
+  if command -v jq >/dev/null 2>&1 && [ -f "$settings_file" ] \
+     && jq --argjson e "$ig_entry" '.hooks.PreToolUse = ((.hooks.PreToolUse // []) + [$e])' "$settings_file" > "$settings_file.ig.tmp" 2>/dev/null; then
+    cp "$settings_file" "$settings_file.bak-install-guard"
+    mv "$settings_file.ig.tmp" "$settings_file"
+    echo "  wired    install-guard.sh into $settings_file (backup: $settings_file.bak-install-guard)"
+  else
+    rm -f "$settings_file.ig.tmp"
+    echo "  WARNING  install-guard.sh is NOT active. Add this to $settings_file under .hooks.PreToolUse[]:"
+    echo "$ig_entry"
+  fi
 else
   echo "  ok       install-guard.sh already wired in $settings_file"
 fi
