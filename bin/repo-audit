@@ -188,15 +188,12 @@ def audit_local(root: Path) -> dict[str, Any]:
 
 
 def should_inspect_remote_blob(path: str, size: int) -> bool:
-    if size > 100_000:
+    if size > 131072:
         return False
     base = os.path.basename(path)
     if base in MANIFEST_NAMES or base == "build.rs":
         return True
-    ext = Path(path).suffix.lower()
-    if ext in {".sh", ".py", ".js", ".mjs", ".ts"} and ("install" in path.lower() or "setup" in path.lower() or "hook" in path.lower()):
-        return True
-    return False
+    return Path(path).suffix.lower() in CODE_EXTS
 
 
 import concurrent.futures
@@ -229,7 +226,11 @@ def audit_github(owner: str, repo: str, ref_override: str | None) -> dict[str, A
     lic_obj = meta.get("license") or {}
     license_id = lic_obj.get("spdx_id") or "NONE"
 
-    candidates = [b for b in blobs if should_inspect_remote_blob(b["path"], int(b.get("size") or 0))][:18]
+    all_candidates = [b for b in blobs if should_inspect_remote_blob(b["path"], int(b.get("size") or 0))]
+    oversize = [b["path"] for b in blobs if int(b.get("size") or 0) > 131072 and should_inspect_remote_blob(b["path"], 0)]
+    max_inspect = 300
+    candidates = all_candidates[:max_inspect]
+    skipped_cap = len(all_candidates) - len(candidates)
     lic_blobs = [b for b in blobs if os.path.basename(b["path"]).upper().startswith("LICENSE") and "/" not in b["path"]]
     if license_id in ("NOASSERTION", "NONE") and lic_blobs:
         candidates = lic_blobs[:1] + candidates
@@ -259,6 +260,10 @@ def audit_github(owner: str, repo: str, ref_override: str | None) -> dict[str, A
     incomplete: list[str] = []
     if tree_resp.get("truncated"):
         incomplete.append("repo tree truncated by GitHub; inventory incomplete")
+    if skipped_cap > 0:
+        incomplete.append(f"{skipped_cap} file(s) beyond the {max_inspect}-file inspection cap were not scanned")
+    if oversize:
+        incomplete.append(f"{len(oversize)} file(s) over 128 KB were not scanned: {', '.join(oversize[:5])}")
     if failed_fetches:
         incomplete.append(f"{len(failed_fetches)} file(s) could not be fetched and were not scanned: {', '.join(failed_fetches[:5])}")
     level, reasons = compute_risk(license_id, install_hooks, binaries, red_flags, incomplete)

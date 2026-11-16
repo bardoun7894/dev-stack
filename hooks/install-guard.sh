@@ -52,10 +52,18 @@ def strip_heredocs(text: str) -> str:
                 skip_term = None
             continue
         out.append(line)
-        if "<<<" not in line and not exec_consumer_re.search(line):
-            m = heredoc_re.search(line)
-            if m:
-                skip_term = m.group(1)
+        code = strip_comment(line)
+        if "<<<" not in code and not exec_consumer_re.search(code):
+            for m in heredoc_re.finditer(code):
+                q = None
+                for ch in code[:m.start()]:
+                    if q is None and ch in "\x27\x22":
+                        q = ch
+                    elif ch == q:
+                        q = None
+                if q is None:
+                    skip_term = m.group(1)
+                    break
     return "\n".join(out)
 
 def strip_comment(line: str) -> str:
@@ -99,7 +107,7 @@ def split_top(text: str, sep_chars: str):
     return parts
 
 WRAPPER_VAL_FLAGS = {"-u", "-C", "-p", "-t"}
-SSH_VAL_FLAGS = set("-oiplFJLRDEWbcem")
+SSH_VAL_FLAGS = {"-o", "-i", "-p", "-l", "-F", "-J", "-L", "-R", "-D", "-E", "-W", "-b", "-c", "-e", "-m"}
 NPM_VAL_FLAGS = {"--loglevel", "--prefix", "--registry", "--cache", "--tag", "--workspace", "-w"}
 FETCH_SUB_RE = re.compile(r"^\s*[({]?\s*(sudo\s+)?(\S*/)?(curl|wget)\b")
 
@@ -233,6 +241,9 @@ def check_script(script: str, local_cwd: str, depth: int = 0):
         if re.match(r"^(git\s+commit|echo)\b", lead):
             return sub_ask
 
+    if re.search(r"[({][^|\n]*\b(curl|wget)\b[^|\n]*[)}]\s*\|\s*(sudo\s+)?(sh|bash|zsh|dash|ksh|python3?|node|deno|perl|ruby|php)\b", cleaned):
+        return ("deny", "install-guard: piping a grouped download into a shell/interpreter is blocked. Download to a file, inspect with repo-audit, then execute.")
+
     list_parts = []
     for line in cleaned.splitlines():
         for chunk, _ in split_top(line, ";&"):
@@ -256,7 +267,7 @@ def check_script(script: str, local_cwd: str, depth: int = 0):
 
             if prog in ("curl", "wget"):
                 saw_fetcher = True
-            elif saw_fetcher and idx > 0 and prog in ("sh", "bash", "zsh", "dash", "ksh", "python", "python3", "node", "deno"):
+            elif saw_fetcher and idx > 0 and prog in ("sh", "bash", "zsh", "dash", "ksh", "python", "python3", "node", "deno", "perl", "ruby", "php"):
                 fetcher = stages[0].split()[0]
                 return ("deny", f"install-guard: piping {fetcher} output directly into {prog} is blocked. Download to a file, inspect with repo-audit, then execute.")
 
