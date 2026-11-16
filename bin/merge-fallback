@@ -38,13 +38,16 @@ if [ "$MAX_S" -le 0 ]; then
   echo "merge-fallback: invalid GATE_MERGE_MAX '${GATE_MERGE_MAX:-90m}'" >&2
   exit 2
 fi
+if [ "$MAX_S" -gt 5400 ]; then
+  MAX_S=5400
+fi
 TO_S=$(dur2s "$TIMEOUT")
 if [ "$TO_S" -le 0 ]; then
   echo "merge-fallback: invalid timeout '$TIMEOUT' (expected positive integer with s/m/h/d)" >&2
   exit 2
 fi
 if [ "$TO_S" -gt "$MAX_S" ]; then
-  echo "merge-fallback: timeout $TIMEOUT exceeds ${GATE_MERGE_MAX:-90m} cap for ${PROJECT}-merge" >&2
+  echo "merge-fallback: timeout $TIMEOUT exceeds ${MAX_S}s cap (max 90m) for ${PROJECT}-merge" >&2
   exit 2
 fi
 

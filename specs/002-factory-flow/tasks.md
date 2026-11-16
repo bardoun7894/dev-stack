@@ -7,12 +7,12 @@
 
 - [x] T001 [P] Write `tests/factory-flow/wip_limit_test.sh` for F5 (TDD red) (2026-11-03, cfb64a7)
 - [x] T002 [P] Write `tests/factory-flow/automerge_test.sh` for F1, F15 (TDD red) (2026-11-03, cfb64a7)
-- [x] T003 Confirm mediatgb CI with `ci-ok` is green on PRs (CI worker, run 41541206620) (2026-11-03)
-- [x] T004 Enable branch protection on main: require ci-ok, admins exempt (2026-11-03)
+- [x] T003 Confirm mediatgb CI with `ci-ok` is green on PRs (`https://github.com/bardoun7894/mediatgb/actions/runs/41541206620`, 2026-11-03)
+- [x] T004 Enable branch protection on main: require `ci-ok`, admins exempt (`gh api repos/bardoun7894/mediatgb/branches/main/protection/required_status_checks`, 2026-11-03)
 - [x] T005 Implement `lib/prqueue.sh` ticket state from PR state (2026-11-03, cfb64a7)
 - [x] T006 jdelegate: R1 refusal at N=3 and arm auto-merge on implementer exit (2026-11-03, cfb64a7)
 - [x] T007 Implement small `bin/merge-fallback` for repos without CI (F16) (2026-11-03, cfb64a7)
-- [x] T008 Run F1, F5 live on mediatgb (2026-11-03, cfb64a7)
+- [ ] T008 Run F1, F5 live on mediatgb after PR #24 merges (unverified on current branch)
 
 ## Phase 2: R5 scoped tests and Actions
 

@@ -67,8 +67,8 @@ An implementer finishes a branch, opens a PR, enables `gh pr merge --auto --squa
 
 ### Functional Requirements
 
-- **R1**: jdelegate MUST refuse a new build worker for project P when P has >= N open PRs waiting on auto-merge (N = 3, Q2 answered).
-- **R2**: Merging is done by GitHub auto-merge (`gh pr merge --auto --squash`), gated by the required check `ci-ok` and the pr-review verdict. Implementers open the PR, arm auto-merge and exit. Ticket states: building -> ready -> merged -> deploy-offered -> deployed, derived from PR state. A small bash fallback (FIFO tickets via gate-run, `-merge` locks capped at 90m, dev-stack PR #22) remains only for repos without CI.
+- **R1**: jdelegate MUST refuse a new build worker for project P when P has >= N open non-draft PRs waiting on review or auto-merge (N = 3, Q2 answered).
+- **R2**: Merging is done by GitHub auto-merge (`gh pr merge --auto --squash`), gated by the required check `ci-ok` and the pr-review verdict. Implementers open the PR, arm auto-merge on exit only when `pr-review` is already PASS/required (otherwise `bin/pr-review` queues `--auto --squash` when the verdict passes), and exit. Ticket states: building -> ready -> merged -> deploy-offered -> deployed, derived from PR state. A small bash fallback (FIFO tickets via gate-run, `-merge` locks capped at 90m, dev-stack PR #22) remains only for repos without CI.
 - **R2a**: Trivial conflicts (lockfiles, lang/*.json, generated files) get one Grok 4.7 call via server-agent.sh, then CI re-runs. A code conflict or red `ci-ok` returns the PR to the SAME implementer (`jdelegate --resume`).
 - **R3**: PR size <= ~400 changed lines excluding lockfiles/generated. A PR older than 48h without progress returns to its implementer or is closed with tasks reopened in the spec.
 - **R4**: Every block has an owner and timeout. verdict-block -> one fix round by the same implementer within 1h (max 1 review + 1 fix round), else close and reopen tasks. The pr-review G3 exhaustion notice triggers the close path.
