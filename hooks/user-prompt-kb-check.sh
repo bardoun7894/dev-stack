@@ -213,7 +213,7 @@ if [ $rule_drift_recheck -eq 1 ]; then
 fi
 if [ -n "$drift_msg" ]; then
   printf '📋 RULE OUT OF DATE: %s\n' "$drift_msg"
-  printf '  The auto-generated dev-stack-state section in ~/.claude/CLAUDE.md is stale. Run `bash ~/code/dev-stack/scripts/refresh-rule.sh --dry-run` to see what changed, then ASK THE USER before applying with `bash ~/code/dev-stack/scripts/refresh-rule.sh`. Never apply without explicit confirmation.\n\n'
+  printf '  The auto-generated dev-stack state in ~/.claude/reference/dev-stack-state.md is stale. Run `bash ~/code/dev-stack/scripts/refresh-rule.sh --dry-run` to see what changed, then ASK THE USER before applying with `bash ~/code/dev-stack/scripts/refresh-rule.sh`. Never apply without explicit confirmation.\n\n'
   mark_seen nagged
 fi
 

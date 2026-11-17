@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# refresh-rule.sh — regenerate the auto-generated section of ~/.claude/CLAUDE.md
+# refresh-rule.sh — regenerate the auto-generated dev-stack state in ~/.claude/reference/dev-stack-state.md
+#   (moved out of ~/.claude/CLAUDE.md on 2026-11-17 so sessions do not load it; CLAUDE.md keeps a pointer)
 #
 # Reads the current state of ~/.claude/skills/ and ~/.local/bin/, classifies
 # each skill by which dev-stack tier it belongs to (first-party / kb-skill /
 # superpowers / vendor/local / external), and replaces the content between
-# the auto-gen markers in ~/.claude/CLAUDE.md.
+# the auto-gen markers in that file (CLAUDE_MD overrides the path).
 #
 # Classification is based on the dev-stack repo as source of truth (does the
 # tier folder contain a directory with this name?), NOT on symlink resolution,
@@ -23,7 +24,7 @@
 
 set -euo pipefail
 
-CLAUDE_MD="${CLAUDE_MD:-$HOME/.claude/CLAUDE.md}"
+CLAUDE_MD="${CLAUDE_MD:-$HOME/.claude/reference/dev-stack-state.md}"
 DEV_STACK="${DEV_STACK:-$HOME/code/dev-stack}"
 BEGIN_MARKER='<!-- BEGIN AUTO-GENERATED: dev-stack-state do-not-edit-by-hand -->'
 END_MARKER='<!-- END AUTO-GENERATED: dev-stack-state -->'
