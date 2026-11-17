@@ -42,6 +42,7 @@ build)
   for n in "${landed[@]}"; do
     [ "$(gh pr view "$n" -R "$repo" --json isDraft --jq .isDraft)" = true ] || gh pr ready "$n" -R "$repo" --undo >/dev/null
   done
+  body+="train-head: $(git rev-parse HEAD)"$'\n'
   title="$branch: #${landed[*]// /, #}"
   git push -q --force-with-lease origin "$branch"
   num=$(gh pr list -R "$repo" --head "$branch" --state open --json number --jq '.[0].number // empty')
@@ -57,22 +58,28 @@ land)
   pr=$1
   read -r head state < <(gh pr view "$pr" -R "$repo" --json headRefOid,state --jq '"\(.headRefOid) \(.state)"')
   [ "$state" = OPEN ] || die "train PR #$pr is $state"
-  ok=$(gh pr view "$pr" -R "$repo" --json statusCheckRollup --jq '[.statusCheckRollup[]|select(.name=="ci-ok")][0].conclusion // "none"')
+  ok=$(gh pr view "$pr" -R "$repo" --json statusCheckRollup --jq '[.statusCheckRollup[]|select((.name // .context)=="ci-ok")]|sort_by(.completedAt // .startedAt // "")|last|(.conclusion // .state) // "none"')
   [ "$ok" = SUCCESS ] || die "train PR #$pr ci-ok is $ok; not merging"
   entries=$(gh pr view "$pr" -R "$repo" --json body --jq '.body' | tr -d '\r' | sed -n 's/^- #\([0-9]*\)@\([0-9a-f]*\)$/\1 \2/p')
   [ -n "$entries" ] || die "train PR #$pr body lists no PRs (edited?); not merging"
+  thead=$(gh pr view "$pr" -R "$repo" --json body --jq '.body' | tr -d '\r' | sed -n 's/^train-head: \([0-9a-f]*\)$/\1/p')
+  [ -n "$thead" ] && [ "$thead" = "$head" ] || die "train PR #$pr head ${head:0:9} is not the built head (${thead:0:9}); commits were added after build; not merging, rebuild the train"
   while read -r n sha; do
     cur=$(gh pr view "$n" -R "$repo" --json headRefOid --jq .headRefOid)
     [ "$cur" = "$sha" ] || die "#$n head moved since build (${sha:0:9} -> ${cur:0:9}); not merging, rebuild the train"
   done <<< "$entries"
   gh pr merge "$pr" -R "$repo" --merge --match-head-commit "$head" >/dev/null
-  sleep 3
   fail=0
   while read -r n sha; do
-    now=$(gh pr view "$n" -R "$repo" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"')
-    case "$now" in
-      MERGED*) echo "#$n landed (${sha:0:9})" ;;
-      *) echo "#$n NOT landed: train had ${sha:0:9}, PR is now ${now}. Put it in the next train."; fail=1 ;;
+    st=""
+    for _ in $(seq 20); do
+      st=$(gh api "repos/$repo/compare/main...$sha" --jq .status 2>/dev/null || true)
+      case "$st" in identical|behind) break ;; esac
+      sleep 3
+    done
+    case "$st" in
+      identical|behind) echo "#$n landed (${sha:0:9})" ;;
+      *) echo "#$n NOT landed: ${sha:0:9} is not in main (${st:-unknown}). Put it in the next train."; fail=1 ;;
     esac
   done <<< "$entries"
   exit $fail
