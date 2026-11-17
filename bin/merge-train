@@ -24,6 +24,7 @@ build)
   refspecs=(+refs/heads/main:refs/remotes/origin/main)
   for n in "$@"; do refspecs+=("+refs/pull/$n/head:refs/remotes/pr/$n"); done
   git fetch -q origin "${refspecs[@]}"
+  git fetch -q origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
   git checkout -q -B "$branch" origin/main
   command -v branch-lock >/dev/null && branch-lock claim "$branch" --note "merge train" >/dev/null || true
   body="Merge train (train-* = P1). PRs at the head SHA they had when the train was built (each set to draft):"$'\n'
@@ -41,8 +42,15 @@ build)
   for n in "${landed[@]}"; do
     [ "$(gh pr view "$n" -R "$repo" --json isDraft --jq .isDraft)" = true ] || gh pr ready "$n" -R "$repo" --undo >/dev/null
   done
-  git push -q -f origin "$branch"
-  url=$(gh pr create -R "$repo" --base main --head "$branch" --title "$branch: #${landed[*]// /, #}" --body "$body")
+  title="$branch: #${landed[*]// /, #}"
+  git push -q --force-with-lease origin "$branch"
+  num=$(gh pr list -R "$repo" --head "$branch" --state open --json number --jq '.[0].number // empty')
+  if [ -n "$num" ]; then
+    gh pr edit "$num" -R "$repo" --title "$title" --body "$body" >/dev/null
+    url=$(gh pr view "$num" -R "$repo" --json url --jq .url)
+  else
+    url=$(gh pr create -R "$repo" --base main --head "$branch" --title "$title" --body "$body")
+  fi
   echo "train $branch: ${landed[*]} -> $url"
   ;;
 land)
@@ -51,6 +59,12 @@ land)
   [ "$state" = OPEN ] || die "train PR #$pr is $state"
   ok=$(gh pr view "$pr" -R "$repo" --json statusCheckRollup --jq '[.statusCheckRollup[]|select(.name=="ci-ok")][0].conclusion // "none"')
   [ "$ok" = SUCCESS ] || die "train PR #$pr ci-ok is $ok; not merging"
+  entries=$(gh pr view "$pr" -R "$repo" --json body --jq '.body' | tr -d '\r' | sed -n 's/^- #\([0-9]*\)@\([0-9a-f]*\)$/\1 \2/p')
+  [ -n "$entries" ] || die "train PR #$pr body lists no PRs (edited?); not merging"
+  while read -r n sha; do
+    cur=$(gh pr view "$n" -R "$repo" --json headRefOid --jq .headRefOid)
+    [ "$cur" = "$sha" ] || die "#$n head moved since build (${sha:0:9} -> ${cur:0:9}); not merging, rebuild the train"
+  done <<< "$entries"
   gh pr merge "$pr" -R "$repo" --merge --match-head-commit "$head" >/dev/null
   sleep 3
   fail=0
@@ -60,7 +74,7 @@ land)
       MERGED*) echo "#$n landed (${sha:0:9})" ;;
       *) echo "#$n NOT landed: train had ${sha:0:9}, PR is now ${now}. Put it in the next train."; fail=1 ;;
     esac
-  done < <(gh pr view "$pr" -R "$repo" --json body --jq '.body' | sed -n 's/^- #\([0-9]*\)@\([0-9a-f]*\)$/\1 \2/p')
+  done <<< "$entries"
   exit $fail
   ;;
 *) die "unknown command $cmd" ;;
