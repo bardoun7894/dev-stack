@@ -17,6 +17,9 @@ build)
   branch=$1; shift
   case "$branch" in train-*) ;; *) die "train branch must start with train- (that is what makes it P1)";; esac
   cache=${MERGE_TRAIN_CACHE:-$HOME/.cache/merge-train}/${repo//\//_}
+  mkdir -p "$(dirname "$cache")"
+  exec 9>"$cache.lock"
+  flock 9
   if [ ! -d "$cache/.git" ]; then
     git clone -q --filter=blob:none --no-checkout "https://github.com/$repo.git" "$cache"
   fi
