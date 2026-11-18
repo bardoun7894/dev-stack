@@ -1,0 +1,12 @@
+{
+  "modules": ["fleet", "purchase"],
+  "models": {
+    "fleet.vehicle": {"fields": ["name", "license_plate", "driver_id", "odometer", "active"], "ops": ["read"]},
+    "fleet.vehicle.log.services": {"fields": ["vehicle_id", "service_type_id", "date", "amount", "vendor_id", "description", "odometer"], "ops": ["read", "create"]},
+    "fleet.service.type": {"fields": ["name", "category"], "ops": ["read"]},
+    "purchase.order": {"fields": ["partner_id", "origin", "notes", "order_line", "state"], "ops": ["read", "create"]},
+    "purchase.order.line": {"fields": ["product_id", "product_qty", "price_unit", "name"], "ops": ["read"]},
+    "res.partner": {"fields": ["name", "vat", "phone"], "ops": ["read"]},
+    "product.product": {"fields": ["name", "default_code", "uom_id"], "ops": ["read"]}
+  }
+}
