@@ -116,9 +116,9 @@ services:
 docker compose -p odoo16 up -d
 docker compose -p odoo16 exec -T odoo odoo -d demo -i fleet,purchase,account,stock --stop-after-init --no-http \
   --db_host db --db_user odoo --db_password odoo          # demo data included; about 1 min
-# API key for admin (prints it once; put it in ~/.config/odoo/local, chmod 600):
-echo "print(env['res.users.apikeys'].with_user(env.ref('base.user_admin'))._generate(None,'local')); env.cr.commit()" | \
-  docker compose -p odoo16 exec -T odoo odoo shell -d demo --no-http --db_host db --db_user odoo --db_password odoo 2>/dev/null | tail -1
+# API key for admin (written straight to ~/.config/odoo/local, never printed):
+mkdir -p ~/.config/odoo && umask 077 && echo "print(env['res.users.apikeys'].with_user(env.ref('base.user_admin'))._generate(None,'local')); env.cr.commit()" | \
+  docker compose -p odoo16 exec -T odoo odoo shell -d demo --no-http --db_host db --db_user odoo --db_password odoo | tail -1 > ~/.config/odoo/local && chmod 600 ~/.config/odoo/local
 ```
 
 To test like a real limited user, create a second user with only e.g. `fleet.fleet_group_user` and audit as that user too.

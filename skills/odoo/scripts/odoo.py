@@ -272,6 +272,13 @@ def run(args, o: Odoo) -> int:
         return 0
     elif c == "gap":
         spec = parse_value(Path(args.spec).read_text() if args.spec != "-" else "-", {})
+        if not isinstance(spec, dict) or not (spec.get("modules") or spec.get("models")):
+            raise ValueError("spec needs a non-empty 'modules' or 'models'")
+        bad = set(spec) - {"modules", "models"}
+        for need in (spec.get("models") or {}).values():
+            bad |= set(need) - {"fields", "ops"}
+        if bad:
+            raise ValueError(f"unknown spec keys: {', '.join(sorted(bad))}")
         g = gap(o, spec)
         out(args, g, gap_markdown(g))
         return 0 if g["ok"] else 3
