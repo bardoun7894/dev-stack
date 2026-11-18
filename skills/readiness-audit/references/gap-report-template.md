@@ -38,6 +38,16 @@ For each gap, one row with these columns:
 - **P2** — should fix. Quality / competitive gap.
 - **P3** — nit. Polish.
 
+Machine mapping (`scripts/gaps-json.sh` writes `gaps.json` next to
+`inventory.json`; severity is required, unknown words fail the run):
+
+| Word in Severity column | gaps.json |
+|-------------------------|-----------|
+| P0, critical, blocker   | P0 |
+| P1, high, major         | P1 |
+| P2, medium, moderate    | P2 |
+| P3, low, minor, nit     | P3 |
+
 ### Source
 
 - `PRD` — from project's PRD doc

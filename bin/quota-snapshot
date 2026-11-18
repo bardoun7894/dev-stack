@@ -7,8 +7,11 @@ Writes ~/.cache/jev-router/quota.json atomically:
 f is the used fraction 0..1. Each source is fail-soft (error -> source "error", windows null). Tokens are never printed or stored.
   cliproxy       Anthropic oauth usage endpoint (read-only use of the Claude Code token)
   openai-codex   newest token_count rate_limits in ~/.codex/sessions
+  openrouter     GET /api/v1/credits (key from opencode auth or OPENROUTER_API_KEY); also writes the daily spend file
+  xai            no read-only balance endpoint; source "none" (the launch watchdog's exhausted.json 402 entries are the signal)
   opencode-go, commandcode   no API: our own jdelegate runs in ~/.cache/jdelegate over tiers.json quota_caps
-Options: --print (compact table), --no-write. Env: QUOTA_SNAPSHOT_OUT, JEV_ROUTER_CONFIG, JDELEGATE_CACHE, CODEX_SESSIONS_DIR, CLAUDE_CREDENTIALS.
+Options: --print (compact table), --no-write. Env: QUOTA_SNAPSHOT_OUT, JEV_ROUTER_CONFIG, JDELEGATE_CACHE, CODEX_SESSIONS_DIR, CLAUDE_CREDENTIALS,
+QUOTA_CLAUDE_AUTH_DIR (cliproxy auth dir, default /root/.cli-proxy-api), QUOTA_SPEND_OUT, OPENROUTER_API_KEY, OPENCODE_AUTH.
 """
 import json
 import os
@@ -27,6 +30,10 @@ CONFIG = os.environ.get("JEV_ROUTER_CONFIG", os.path.join(HOME, ".config", "jev-
 RUNS = os.environ.get("JDELEGATE_CACHE", os.path.join(HOME, ".cache", "jdelegate"))
 CODEX = os.environ.get("CODEX_SESSIONS_DIR", os.path.join(HOME, ".codex", "sessions"))
 CREDS = os.environ.get("CLAUDE_CREDENTIALS", os.path.join(HOME, ".claude", ".credentials.json"))
+AUTH_DIR = os.environ.get("QUOTA_CLAUDE_AUTH_DIR", "/root/.cli-proxy-api")
+SPEND_OUT = os.environ.get("QUOTA_SPEND_OUT", os.path.join(HOME, ".cache", "jev-router", "openrouter-spend.json"))
+OPENCODE_AUTH = os.environ.get("OPENCODE_AUTH", os.path.join(HOME, ".local", "share", "opencode", "auth.json"))
+CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 TOTAL_TIMEOUT = 8
 ESTIMATED = ("opencode-go", "commandcode")
@@ -93,15 +100,127 @@ def http_get(url, headers, timeout):
         return json.loads(resp.read().decode())
 
 
-def claude_quota(creds_path=CREDS, use_keychain=True, fetch=http_get, timeout=6):
-    token = claude_token(creds_path, use_keychain)
-    if not token:
-        return blank("error", "no Claude Code credentials")
+def cliproxy_auth_tokens(auth_dir=AUTH_DIR, now=None):
+    """Access tokens of every live (non-expired, enabled) cliproxy claude auth, newest expiry first."""
+    now = now or datetime.now(timezone.utc)
+    found = []
+    try:
+        names = sorted(n for n in os.listdir(auth_dir) if n.startswith("claude-") and n.endswith(".json"))
+    except OSError:
+        return []
+    for n in names:
+        try:
+            with open(os.path.join(auth_dir, n)) as f:
+                d = json.load(f)
+            exp = parse_ts(d["expired"])
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            tok = d.get("access_token")
+        except Exception:
+            continue
+        if d.get("disabled") or not tok or exp <= now:
+            continue
+        found.append((exp, tok))
+    found.sort(key=lambda x: x[0], reverse=True)
+    return [t for _, t in found]
+
+
+def cliproxy_auth_token(auth_dir=AUTH_DIR, now=None):
+    """Access token of the live cliproxy claude auth with the newest expiry, else None."""
+    toks = cliproxy_auth_tokens(auth_dir, now)
+    return toks[0] if toks else None
+
+
+def fetch_claude(token, fetch, timeout):
     try:
         body = fetch(USAGE_URL, {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"}, timeout)
     except Exception as e:
         return blank("error", ("usage request failed: " + type(e).__name__)[:120])
     return parse_claude(body)
+
+
+def used_max(r):
+    return max(v for v in (r["five_hour"], r["weekly"]) if v is not None)
+
+
+def claude_quota(creds_path=CREDS, use_keychain=True, fetch=http_get, timeout=6, auth_dir=AUTH_DIR):
+    tokens = cliproxy_auth_tokens(auth_dir)
+    if not tokens:
+        token = claude_token(creds_path, use_keychain)
+        if not token:
+            return blank("error", "no Claude Code credentials")
+        return fetch_claude(token, fetch, timeout)
+    pool = ThreadPoolExecutor(max_workers=len(tokens))
+    futures = [pool.submit(fetch_claude, t, fetch, timeout) for t in tokens]
+    wait(futures, timeout=timeout + 1)
+    results = []
+    for fut in futures:
+        try:
+            if fut.done():
+                results.append(fut.result())
+        except Exception:
+            pass
+    pool.shutdown(wait=False, cancel_futures=True)
+    ok = [r for r in results if r["source"] != "error"]
+    if not ok:
+        return blank("error", "usage request failed on all accounts", accounts=len(tokens), accounts_ok=0)
+    best = min(ok, key=used_max)
+    full = sum(1 for r in ok if used_max(r) >= 0.995)
+    best["accounts"] = len(tokens)
+    best["accounts_ok"] = len(ok)
+    best["note"] = f"{full} of {len(tokens)} accounts full; monthly window not exposed"
+    return best
+
+
+# ── openrouter (metered) / xai ──────────────────────────────────────────
+def openrouter_key(auth_path=None, env=os.environ):
+    auth_path = auth_path or OPENCODE_AUTH
+    if env.get("OPENROUTER_API_KEY"):
+        return env["OPENROUTER_API_KEY"]
+    try:
+        with open(auth_path) as f:
+            k = json.load(f)["openrouter"]["key"]
+        return k or None
+    except Exception:
+        return None
+
+
+def update_spend(prev, usage, limit_remaining, now):
+    day = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    if isinstance(prev, dict) and prev.get("day") == day and isinstance(prev.get("baseline_usd"), (int, float)):
+        baseline = float(prev["baseline_usd"])
+    else:
+        baseline = float(usage)
+    return {"at": iso(now), "day": day, "baseline_usd": baseline, "usage_usd": float(usage),
+            "today_usd": max(0.0, float(usage) - baseline), "limit_remaining_usd": limit_remaining}
+
+
+def openrouter_quota(key=None, spend_path=SPEND_OUT, fetch=http_get, now=None, timeout=6):
+    now = now or datetime.now(timezone.utc)
+    key = key or openrouter_key()
+    if not key:
+        return blank("error", "no openrouter key")
+    try:
+        data = fetch(CREDITS_URL, {"Authorization": f"Bearer {key}"}, timeout)["data"]
+        usage = float(data["total_usage"])
+        remaining = float(data["total_credits"]) - usage if isinstance(data.get("total_credits"), (int, float)) else None
+    except Exception as e:
+        return blank("error", ("credits request failed: " + type(e).__name__)[:120])
+    try:
+        with open(spend_path) as f:
+            prev = json.load(f)
+    except Exception:
+        prev = None
+    spend = update_spend(prev, usage, remaining, now)
+    try:
+        write_atomic(spend_path, spend)
+    except OSError as e:
+        return blank("error", ("spend file write failed: " + type(e).__name__)[:120])
+    return blank("api", f"metered; today ${spend['today_usd']:.2f} (UTC {spend['day']}), total ${usage:.2f}")
+
+
+def xai_quota():
+    return blank("none", "no read-only balance endpoint for Grok Build; a 402 in exhausted.json (launch watchdog) is the signal")
 
 
 # ── openai-codex ────────────────────────────────────────────────────────
@@ -247,7 +366,7 @@ def main(argv):
             caps = json.load(f).get("quota_caps", {})
     except Exception:
         caps = {}
-    sources = {"cliproxy": claude_quota, "openai-codex": codex_quota}
+    sources = {"cliproxy": claude_quota, "openai-codex": codex_quota, "openrouter": openrouter_quota, "xai": xai_quota}
     for p in ESTIMATED:
         sources[p] = (lambda p=p: estimate_quota(p, RUNS, caps))
     snap = build_snapshot(sources)

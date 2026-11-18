@@ -47,7 +47,7 @@ class ClaudeTest(unittest.TestCase):
 
     def test_no_credentials_is_error(self):
         with tempfile.TemporaryDirectory() as d:
-            r = qs.claude_quota(creds_path=os.path.join(d, "none.json"), use_keychain=False, fetch=lambda *a: self.fail("no call"))
+            r = qs.claude_quota(creds_path=os.path.join(d, "none.json"), use_keychain=False, auth_dir="/nonexistent", fetch=lambda *a: self.fail("no call"))
         self.assertEqual(r["source"], "error")
         self.assertIsNone(r["weekly"])
 
@@ -60,7 +60,7 @@ class ClaudeTest(unittest.TestCase):
             def fetch(url, headers, timeout):
                 seen.update(headers)
                 return {"five_hour": {"utilization": 5}, "seven_day": {"utilization": 6}}
-            r = qs.claude_quota(creds_path=p, use_keychain=False, fetch=fetch)
+            r = qs.claude_quota(creds_path=p, use_keychain=False, auth_dir="/nonexistent", fetch=fetch)
         self.assertEqual(seen["Authorization"], "Bearer SECRET-TOKEN")
         self.assertEqual(seen["anthropic-beta"], "oauth-2025-04-20")
         self.assertNotIn("SECRET-TOKEN", json.dumps(r))
@@ -72,7 +72,7 @@ class ClaudeTest(unittest.TestCase):
 
             def fetch(*a):
                 raise OSError("boom SECRET-TOKEN")
-            r = qs.claude_quota(creds_path=p, use_keychain=False, fetch=fetch)
+            r = qs.claude_quota(creds_path=p, use_keychain=False, auth_dir="/nonexistent", fetch=fetch)
         self.assertEqual(r["source"], "error")
         self.assertNotIn("SECRET-TOKEN", json.dumps(r))
 
@@ -191,6 +191,171 @@ class SnapshotTest(unittest.TestCase):
             qs.write_atomic(out, {"at": "y", "providers": {}})
             self.assertEqual(json.load(open(out))["at"], "y")
             self.assertEqual(os.listdir(os.path.dirname(out)), ["quota.json"])
+
+
+
+class ServerAuthTest(unittest.TestCase):
+    def _write(self, d, name, expired, token="tok", **extra):
+        with open(os.path.join(d, name), "w") as f:
+            json.dump({"type": "claude", "access_token": token, "expired": expired, **extra}, f)
+
+    def test_picks_newest_non_expired(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-old.json", "2026-06-27T00:09:34+01:00", "old")
+            self._write(d, "claude-a.json", "2026-10-03T14:00:00Z", "a")
+            self._write(d, "claude-b.json", "2026-10-03T20:00:00Z", "b")
+            self.assertEqual(qs.cliproxy_auth_token(d, now=NOW), "b")
+
+    def test_skips_disabled_and_expired(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-old.json", "2026-06-27T00:09:34+01:00", "old")
+            self._write(d, "claude-x.json", "2026-10-03T20:00:00Z", "x", disabled=True)
+            self.assertIsNone(qs.cliproxy_auth_token(d, now=NOW))
+
+    def test_missing_dir_is_none(self):
+        self.assertIsNone(qs.cliproxy_auth_token("/nonexistent-dir-p635", now=NOW))
+
+    def test_claude_quota_uses_auth_dir(self):
+        seen = {}
+        def fetch(url, headers, timeout):
+            seen["auth"] = headers["Authorization"]
+            return {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-b.json", "2099-01-01T00:00:00Z", "srv")
+            r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, fetch=fetch, auth_dir=d)
+        self.assertEqual(r["source"], "api")
+        self.assertEqual(seen["auth"], "Bearer srv")
+
+    def _fetch_by_token(self, table):
+        def fetch(url, headers, timeout):
+            v = table[headers["Authorization"].split(" ", 1)[1]]
+            if isinstance(v, Exception):
+                raise v
+            return {"five_hour": {"utilization": v * 100}, "seven_day": {"utilization": v * 100}}
+        return fetch
+
+    def test_best_of_two_accounts(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-full.json", "2099-01-01T00:00:00Z", "t-full")
+            self._write(d, "claude-free.json", "2099-01-01T00:00:00Z", "t-free")
+            r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d,
+                                fetch=self._fetch_by_token({"t-full": 1.0, "t-free": 0.2}))
+        self.assertAlmostEqual(r["weekly"], 0.2)
+        self.assertEqual(r["accounts"], 2)
+        self.assertEqual(r["accounts_ok"], 2)
+        self.assertIn("1 of 2", r["note"])
+        self.assertNotIn("claude-", r["note"])
+
+    def test_one_account_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-bad.json", "2099-01-01T00:00:00Z", "t-bad")
+            self._write(d, "claude-ok.json", "2099-01-01T00:00:00Z", "t-ok")
+            r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d,
+                                fetch=self._fetch_by_token({"t-bad": OSError("boom"), "t-ok": 0.5}))
+        self.assertAlmostEqual(r["weekly"], 0.5)
+        self.assertEqual(r["accounts"], 2)
+        self.assertEqual(r["accounts_ok"], 1)
+
+    def test_expired_account_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-old.json", "2020-01-01T00:00:00Z", "t-old")
+            self._write(d, "claude-ok.json", "2099-01-01T00:00:00Z", "t-ok")
+            r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d,
+                                fetch=self._fetch_by_token({"t-ok": 0.3}))
+        self.assertEqual(r["accounts"], 1)
+        self.assertAlmostEqual(r["weekly"], 0.3)
+
+    def test_all_fail_no_token_leak(self):
+        import contextlib, io
+        secret = "sk-ant-FAKESECRET123"
+        def fetch(url, headers, timeout):
+            raise RuntimeError("failed with " + headers["Authorization"])
+        out, err = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, "claude-a.json", "2099-01-01T00:00:00Z", secret)
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                r = qs.claude_quota(creds_path="/nonexistent", use_keychain=False, auth_dir=d, fetch=fetch)
+                snap = qs.build_snapshot({"cliproxy": lambda: r})
+                print(qs.table(snap))
+        self.assertEqual(r["source"], "error")
+        blob = out.getvalue() + err.getvalue() + json.dumps(snap)
+        self.assertTrue(secret not in blob and "Bearer" not in blob, "secret leaked (redacted)")
+
+
+    def test_claude_quota_falls_back_to_creds(self):
+        with tempfile.TemporaryDirectory() as d:
+            cred = os.path.join(d, "c.json")
+            json.dump({"claudeAiOauth": {"accessToken": "mac"}}, open(cred, "w"))
+            seen = {}
+            def fetch(url, headers, timeout):
+                seen["auth"] = headers["Authorization"]
+                return {"five_hour": {"utilization": 1}}
+            qs.claude_quota(creds_path=cred, use_keychain=False, fetch=fetch, auth_dir="/nonexistent-dir-p635")
+        self.assertEqual(seen["auth"], "Bearer mac")
+
+
+class OpenRouterTest(unittest.TestCase):
+    def test_first_run_of_day_sets_baseline(self):
+        s = qs.update_spend(None, 100.0, 50.0, NOW)
+        self.assertEqual(s["day"], "2026-10-03")
+        self.assertEqual(s["baseline_usd"], 100.0)
+        self.assertEqual(s["usage_usd"], 100.0)
+        self.assertEqual(s["today_usd"], 0.0)
+        self.assertEqual(s["limit_remaining_usd"], 50.0)
+
+    def test_same_day_keeps_baseline(self):
+        prev = {"day": "2026-10-03", "baseline_usd": 100.0}
+        s = qs.update_spend(prev, 103.25, None, NOW)
+        self.assertEqual(s["baseline_usd"], 100.0)
+        self.assertAlmostEqual(s["today_usd"], 3.25)
+        self.assertIsNone(s["limit_remaining_usd"])
+
+    def test_new_day_resets_baseline(self):
+        prev = {"day": "2026-10-02", "baseline_usd": 90.0}
+        s = qs.update_spend(prev, 103.0, None, NOW)
+        self.assertEqual(s["baseline_usd"], 103.0)
+        self.assertEqual(s["today_usd"], 0.0)
+
+    def test_negative_today_clamped(self):
+        s = qs.update_spend({"day": "2026-10-03", "baseline_usd": 10.0}, 9.0, None, NOW)
+        self.assertEqual(s["today_usd"], 0.0)
+
+    def test_openrouter_quota_writes_spend_and_note(self):
+        with tempfile.TemporaryDirectory() as d:
+            spend = os.path.join(d, "openrouter-spend.json")
+            fetch = lambda url, headers, timeout: {"data": {"total_credits": 200, "total_usage": 120.5}}
+            r = qs.openrouter_quota(key="k", spend_path=spend, fetch=fetch, now=NOW)
+            self.assertEqual(r["source"], "api")
+            self.assertIn("today $0.00", r["note"])
+            self.assertEqual(json.load(open(spend))["baseline_usd"], 120.5)
+            fetch2 = lambda url, headers, timeout: {"data": {"total_credits": 200, "total_usage": 123.0}}
+            r = qs.openrouter_quota(key="k", spend_path=spend, fetch=fetch2, now=NOW)
+            self.assertIn("today $2.50", r["note"])
+            self.assertEqual(json.load(open(spend))["baseline_usd"], 120.5)
+
+    def test_no_key_is_error_and_no_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            spend = os.path.join(d, "s.json")
+            qs.OPENCODE_AUTH = "/nonexistent"
+            os.environ.pop("OPENROUTER_API_KEY", None)
+            r = qs.openrouter_quota(key=None, spend_path=spend, now=NOW)
+            self.assertEqual(r["source"], "error")
+            self.assertFalse(os.path.exists(spend))
+
+    def test_key_from_opencode_auth(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "auth.json")
+            json.dump({"openrouter": {"type": "api", "key": "sekret"}}, open(p, "w"))
+            self.assertEqual(qs.openrouter_key(p, env={}), "sekret")
+            self.assertEqual(qs.openrouter_key(p, env={"OPENROUTER_API_KEY": "envkey"}), "envkey")
+            self.assertIsNone(qs.openrouter_key("/nonexistent", env={}))
+
+
+class XaiTest(unittest.TestCase):
+    def test_none_source(self):
+        r = qs.xai_quota()
+        self.assertEqual(r["source"], "none")
+        self.assertIn("402", r["note"])
 
 
 if __name__ == "__main__":

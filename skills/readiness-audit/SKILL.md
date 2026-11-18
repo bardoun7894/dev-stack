@@ -48,7 +48,7 @@ promises vs code with grep evidence, (b) checklist pass/fail per PC code, (c)
 
 Phase 3 reviewer brief (`references/reviewer-brief.md`) is adversarial: verify
 each G exists in code (cite `file:line`) or duplicates an existing spec, drop
-false gaps.
+false gaps. After writing `gap-report.md`, run `scripts/gaps-json.sh <gap-report.md> specs/_audit/<date>/gaps.json` (also in `--report-only`; `[]` when no gaps).
 
 ## Token budget
 
@@ -90,3 +90,5 @@ own `where-to-work` config or `~/.claude/where-to-work.yaml`.
 
 - `scripts/inventory.sh <repo>` — emits JSON to stdout, no AI. <30s on a
   large repo. See `tests/readiness-audit/inventory_test.sh`.
+- `scripts/gaps-json.sh <gap-report.md> <out.json>` — G-code table to
+  `[{code,text,severity,source?}]`. See `tests/readiness-audit/gaps_json_test.sh`.

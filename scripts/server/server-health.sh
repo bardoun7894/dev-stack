@@ -165,6 +165,8 @@ check_backups() {
   while IFS=$'\t' read -r key ts sz psz; do
     [ -z "$key" ] && continue
     prefix=${key#*|}
+    # mediatgb prod moved to MediaContabo 2026-10-28 (backups run there); old dumps here are stale
+    [ "$prefix" = mediatgb ] && continue
     age_h=$(( (now - ts) / 3600 ))
     if [ "$age_h" -gt 36 ]; then
       # retired prefixes (nothing for a week) stop alerting

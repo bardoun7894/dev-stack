@@ -1,0 +1,34 @@
+# REVIEW.md (copy to the repo root, link from CLAUDE.md)
+
+The reviewer reads this first. It wins over generic checks.
+
+## 1. What failure looks like here
+- docs: it lies (says something the code does not do)
+- config: it misroutes (right value, wrong target)
+- billing / payments: wrong amount
+- <area>: <how it fails>
+
+## 2. Skip these paths
+- generated code, vendor/, lockfiles, build output: <list repo paths>
+
+## 3. Nit cap
+At most 3 P3 nits per review. Drop the rest.
+
+## 4. Evidence
+Every finding cites path:line from the code. Never a guess from a name.
+Tag each: Important / Nit / Pre-existing (present before this diff, reported, never blocks).
+
+## 5. Summary
+Starts with the finding count. If clean, say "nothing to fix" plainly.
+
+## 6. Always-owner paths
+Need the owner's look even when review is green. An agent approval never counts as the owner's.
+- billing/payments
+- auth
+- CI workflow files
+- deploy scripts
+- DB migrations
+
+## 7. Learned rules
+One line each, with the date. Added by the implementer in the fix round when the same kind of finding appears twice.
+(none yet)
