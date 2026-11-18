@@ -161,8 +161,9 @@ Technical models for auditing:
 - ACLs (`ir.model.access`) are per group and per model, and set read, write, create and unlink.
   `check_access_rights` tests these.
 - Record rules (`ir.rule`) filter rows by domain. A user can have read on a model and still see zero rows.
-  Live example: a Fleet / User sees only their own vehicles, so `fleet.vehicle` count was 0 for a
-  Fleet-User API account while the admin saw 5. Always compare a limited user's counts with an admin's
+  Live example: rule "User can only see his/her vehicle" (`driver_id = user.partner_id` or manager)
+  made `fleet.vehicle` count 0 for a Fleet-User API account while the admin saw 5; the multi-company
+  rule also cut partners from 65 to 58. Always compare a limited user's counts with an admin's
   before you trust them.
 - Multi-company: rows are filtered by `allowed_company_ids`. Set `company_id` explicitly on create when
   the client has several companies.

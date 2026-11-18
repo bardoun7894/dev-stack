@@ -157,6 +157,21 @@ class AuditTests(unittest.TestCase):
         self.assertIn("overdue", texts)
         self.assertEqual(rep["findings"][0]["severity"], "high")
 
+    def test_admin_detected_in_french(self):
+        """Group names are read in en_US even when the profile language is French."""
+        def groups(args):
+            lang = args[6].get("context", {}).get("lang")
+            return [{"id": 3, "full_name": "Administration / Settings" if lang == "en_US"
+                     else "Administration / Paramètres"}]
+        t = {("res.users", "read"): [{"id": 2, "name": "A", "login": "admin",
+                                      "company_id": [1, "C"], "company_ids": [1],
+                                      "groups_id": [3], "lang": "fr_FR", "tz": "UTC",
+                                      "share": False}],
+             ("res.groups", "read"): groups}
+        o, _ = mk(t)
+        o.context = {"lang": "fr_FR"}
+        self.assertTrue(Audit(o, []).user()["admin"])
+
     def test_gap_reports_missing_field_and_required(self):
         t = {
             ("ir.model", "search_count"): lambda a: 1 if a[5][0][0][2] == "fleet.vehicle" else 0,
@@ -218,6 +233,11 @@ class CliGuardTests(unittest.TestCase):
     def test_call_write_method_refused(self):
         code, _, _, _ = self.run_cli(["call", "account.move", "action_post", "[[5]]"])
         self.assertIn("refused", str(code))
+
+    def test_table_many2one_vs_id_list(self):
+        out = cli.table([{"a": [5, "Truck"], "b": [1, 2]}], ["a", "b"])
+        self.assertIn("Truck", out)
+        self.assertIn("[1, 2]", out)
 
     def test_python_literal_domain(self):
         code, _, _, f = self.run_cli(["count", "res.partner", "[('is_company','=',True)]"])

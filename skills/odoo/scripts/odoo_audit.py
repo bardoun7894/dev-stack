@@ -100,8 +100,10 @@ class Audit:
         u = self.o.execute("res.users", "read", [uid],
                            fields=["name", "login", "company_id", "company_ids", "groups_id",
                                    "lang", "tz", "share"])[0]
+        # en_US so the admin check works whatever the user's or profile's language
         groups = self.safe("res.groups", lambda: [g["full_name"] for g in self.o.execute(
-            "res.groups", "read", u["groups_id"], fields=["full_name"])], [])
+            "res.groups", "read", u["groups_id"], fields=["full_name"],
+            context={"lang": "en_US"})], [])
         admin = any(g in ("Administration / Settings", "Administration / Access Rights")
                     for g in groups)
         if admin:
@@ -255,7 +257,7 @@ class Audit:
             return None
         rows = self.safe(f"{model} duplicates", lambda: self.o.execute(
             model, "read_group", domain + [(field, "!=", False)], [field], [field],
-            lazy=True, limit=500), [])
+            lazy=True), [])  # no limit: 16 cannot order groups by count server-side
         d = [r for r in rows or [] if r.get(f"{field}_count", r.get("__count", 0)) > 1]
         if d:
             self.find("medium", "fix", f"{len(d)} duplicate {model}.{field} values "

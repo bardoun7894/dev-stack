@@ -183,7 +183,7 @@ $this->odoo->create('purchase.order', [
     ],
 ]);
 // many2many: replace all tags
-['category_id' => [[6, 0, [3, 7]]]]
+$this->odoo->write('res.partner', [$partnerId], ['category_id' => [[6, 0, [3, 7]]]]);
 ```
 
 Codes: 0 create, 1 update(id, vals), 2 delete(id), 3 unlink(id), 4 link(id), 5 clear, 6 set(ids).

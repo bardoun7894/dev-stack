@@ -40,7 +40,8 @@ def out(args, data, md: str | None = None):
 
 def table(rows: list, cols: list[str]) -> str:
     def cell(v):
-        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int):
+        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int) \
+                and isinstance(v[1], str):
             v = v[1]  # many2one -> display name
         s = "" if v is False or v is None else str(v)
         return s.replace("\n", " ")[:60]
