@@ -153,7 +153,8 @@ public function writeOnce(string $model, string $keyField, string $key, array $v
     // $key is namespaced by the app ("jaafar:wa:<message id>") so it can never equal a value a
     // person typed in Odoo (a product code, a vendor ref).
     // One writer per key at a time: two queue workers retrying the same key must not both create.
-    return Cache::lock("odoo-write:$key", 60)->block(30, function () use ($model, $keyField, $key, $values) {
+    // TTL must exceed the worst case: search (30 s timeout) + create (30 s timeout) + margin.
+    return Cache::lock("odoo-write:$key", 120)->block(30, function () use ($model, $keyField, $key, $values) {
         // 1. our table: odoo_writes(intake_key UNIQUE, model, odoo_id, request, response, attempts)
         if ($done = OdooWrite::where('intake_key', $key)->whereNotNull('odoo_id')->first()) {
             return $done->odoo_id;
@@ -249,6 +250,21 @@ class FakeOdoo implements OdooGateway
 
 The `failNextCreate` case is the test that matters: create succeeds in Odoo, the answer is lost, the retry
 must find the record by key and not create a second one.
+
+```php
+public function test_write_once_survives_lost_create_answer(): void
+{
+    $fake = new FakeOdoo();
+    $fake->failNextCreate = new OdooException('Timeout', 'answer lost');
+    $svc = new OdooWriter($fake); // the class holding writeOnce
+
+    try { $svc->writeOnce('res.partner', 'ref', 'app:wa:1', ['name' => 'A']); } catch (OdooException $e) {}
+    $id = $svc->writeOnce('res.partner', 'ref', 'app:wa:1', ['name' => 'A']); // retry
+
+    $this->assertCount(1, $fake->records['res.partner']);
+    $this->assertSame(array_key_first($fake->records['res.partner']), $id);
+}
+```
 
 ## Pulling data (sync into the app)
 
