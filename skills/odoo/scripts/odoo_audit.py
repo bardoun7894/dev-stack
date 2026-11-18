@@ -271,8 +271,10 @@ class Audit:
             "mail.mail", [("state", "=", "exception")], "medium", "fix",
             "{n} emails failed to send (mail.mail state=exception)",
             "fix the mail server, then resend from Settings > Technical > Emails")
-        h["dup_partner_email"] = self._dupes("res.partner", "email", [("active", "=", True)])
-        h["dup_partner_vat"] = self._dupes("res.partner", "vat", [("active", "=", True)])
+        # top-level partners only: child contacts often share the company's email and VAT
+        top = [("active", "=", True), ("parent_id", "=", False)]
+        h["dup_partner_email"] = self._dupes("res.partner", "email", top)
+        h["dup_partner_vat"] = self._dupes("res.partner", "vat", top)
         h["dup_product_code"] = self._dupes("product.product", "default_code",
                                             [("active", "=", True)])
         h["products_no_code"] = self._count_check(

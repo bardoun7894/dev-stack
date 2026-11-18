@@ -162,6 +162,9 @@ def main(argv=None) -> int:
     except ConfigError as e:
         print(f"config: {e}", file=sys.stderr)
         return 2
+    except (ValueError, SyntaxError) as e:
+        print(f"bad argument (expected JSON or a Python literal): {e}", file=sys.stderr)
+        return 2
     except OdooError as e:
         print(f"odoo: {e}", file=sys.stderr)
         if e.is_access:

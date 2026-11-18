@@ -62,7 +62,7 @@ def err(data):
 
 def mk(table=None):
     f = Fake(table)
-    return Odoo("http://x", "db", "u", "secretkey", transport=f), f
+    return Odoo("https://x", "db", "u", "secretkey", transport=f), f
 
 
 class ClientTests(unittest.TestCase):
@@ -82,7 +82,7 @@ class ClientTests(unittest.TestCase):
 
     def test_failed_login(self):
         f = Fake(uid=False)
-        o = Odoo("http://x", "db", "u", "bad", transport=f)
+        o = Odoo("https://x", "db", "u", "bad", transport=f)
         with self.assertRaises(OdooError):
             o.login()
 
@@ -233,6 +233,37 @@ class CliGuardTests(unittest.TestCase):
     def test_call_write_method_refused(self):
         code, _, _, _ = self.run_cli(["call", "account.move", "action_post", "[[5]]"])
         self.assertIn("refused", str(code))
+
+    def test_dupes_counts_groups_over_one_top_level_only(self):
+        seen = {}
+        def rg(args):
+            seen["domain"] = args[5][0]
+            return [{"email": "a@x", "email_count": 2}, {"email": "b@x", "email_count": 1}]
+        o, _ = mk({("res.partner", "read_group"): rg, ("ir.model", "search_count"): 1})
+        a = Audit(o, [])
+        self.assertEqual(a._dupes("res.partner", "email", [("parent_id", "=", False)]), 1)
+        self.assertIn(("parent_id", "=", False), seen["domain"])
+
+    def test_xmlid_domain_for_two_refs(self):
+        code, _, _, f = self.run_cli(["xmlid", "base.main_company", "fleet.vehicle_1"])
+        self.assertEqual(f.calls[-1]["args"][5][0],
+                         ["|", "&", ("module", "=", "base"), ("name", "=", "main_company"),
+                          "&", ("module", "=", "fleet"), ("name", "=", "vehicle_1")])
+
+    def test_bad_json_is_usage_error(self):
+        code, _, err_, _ = self.run_cli(["--yes", "create", "res.partner", '{"name": "X"'])
+        self.assertEqual(code, 2)
+        self.assertIn("bad argument", err_)
+
+    def test_non_json_response_is_odooerror(self):
+        o = Odoo("http://localhost", "db", "u", "k",
+                 transport=lambda *a: (_ for _ in ()).throw(OdooError("BadResponse", "html")))
+        with self.assertRaises(OdooError):
+            o.version()
+
+    def test_plain_http_refused_for_remote_host(self):
+        with self.assertRaises(ConfigError):
+            Odoo("http://client.example.ma", "db", "u", "k")
 
     def test_table_many2one_vs_id_list(self):
         out = cli.table([{"a": [5, "Truck"], "b": [1, 2]}], ["a", "b"])

@@ -46,7 +46,8 @@ class OdooException extends RuntimeException
     {
         parent::__construct("$odooName: $message");
     }
-    public function isAccess(): bool { return str_ends_with($this->odooName, 'AccessError'); }
+    public function isAccess(): bool { return str_ends_with($this->odooName, 'AccessError')
+        || str_ends_with($this->odooName, 'AccessDenied'); }
     public function isValidation(): bool { return str_ends_with($this->odooName, 'ValidationError')
         || str_ends_with($this->odooName, 'UserError'); }
 }
@@ -145,17 +146,30 @@ PHP gotchas:
 ```php
 public function writeOnce(string $model, string $keyField, string $key, array $values): int
 {
-    // 1. our table: odoo_writes(intake_key UNIQUE, model, odoo_id, request, response, attempts)
-    if ($done = OdooWrite::where('intake_key', $key)->whereNotNull('odoo_id')->first()) {
-        return $done->odoo_id;
-    }
-    // 2. Odoo itself: a create that succeeded but whose answer was lost is found here
-    $found = $this->odoo->searchRead($model, [[$keyField, '=', $key]], ['id'], 1);
-    $id = $found[0]['id'] ?? $this->odoo->create($model, $values + [$keyField => $key]);
-    OdooWrite::updateOrCreate(['intake_key' => $key], ['model' => $model, 'odoo_id' => $id]);
-    return $id;
+    // $key is namespaced by the app ("jaafar:wa:<message id>") so it can never equal a value a
+    // person typed in Odoo (a product code, a vendor ref).
+    // One writer per key at a time: two queue workers retrying the same key must not both create.
+    return Cache::lock("odoo-write:$key", 60)->block(30, function () use ($model, $keyField, $key, $values) {
+        // 1. our table: odoo_writes(intake_key UNIQUE, model, odoo_id, request, response, attempts)
+        if ($done = OdooWrite::where('intake_key', $key)->whereNotNull('odoo_id')->first()) {
+            return $done->odoo_id;
+        }
+        // 2. Odoo itself, archived records included: a create that succeeded but whose answer
+        //    was lost is found here
+        $found = $this->odoo->call($model, 'search_read', [[[$keyField, '=', $key]]],
+            ['fields' => ['id'], 'limit' => 2, 'context' => ['active_test' => false]]);
+        if (count($found) > 1) {
+            throw new OdooException('DuplicateKey', "$model has 2+ records with $keyField=$key; fix by hand");
+        }
+        $id = $found[0]['id'] ?? $this->odoo->create($model, $values + [$keyField => $key]);
+        OdooWrite::updateOrCreate(['intake_key' => $key], ['model' => $model, 'odoo_id' => $id]);
+        return $id;
+    });
 }
 ```
+
+`Cache::lock` needs a lock-capable cache store (database or redis). The queued job can also use
+`WithoutOverlapping($key)` middleware; keep the lock inside `writeOnce` so every caller gets it.
 
 Key field choice, best first:
 1. A custom char field `x_ext_key` (or `x_intake_key`), added by the client's admin in Settings >
@@ -233,9 +247,11 @@ must find the record by key and not create a second one.
 
 ## Pulling data (sync into the app)
 
-- Incremental: keep the last `write_date` you saw per model, then
-  `searchRead($model, [['write_date', '>', $last]], $fields, 500, 0, 'write_date asc, id asc')`, page until
-  empty. Deleted records do not show; run a weekly full id diff (`search` with `active_test: false` in context).
+- Incremental, keyset paging on `(write_date, id)` so rows sharing one timestamp are never skipped:
+  keep `$lastDate, $lastId` per model, then
+  `searchRead($model, ['|', ['write_date', '>', $lastDate], '&', ['write_date', '=', $lastDate], ['id', '>', $lastId]], $fields, 500, 0, 'write_date asc, id asc')`;
+  after each page set both from its last row, repeat until a page is empty. Upserts by Odoo id make a
+  re-read harmless. Deleted records do not show; run a weekly full id diff (`search` with `active_test: false` in context).
 - Cache small lists (vehicles, partners, products, taxes, journals) in local tables, refreshed hourly, to
   match AI-extracted text locally instead of calling Odoo per message.
 

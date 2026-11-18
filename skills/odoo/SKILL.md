@@ -25,8 +25,9 @@ Read these before you build:
    - If one is missing, collect it with `request_secret` (file delivery). One profile per client, e.g. `jaafar`, `amiininox`.
    - In apps, encrypt the API key at rest, never send it to an AI prompt, and never log it.
 3. Use a dedicated internal integration user with only the groups the app needs, never admin. If the audit shows the user is admin, report that as a finding.
-4. Every write from an app is exactly-once. Use a key field, search before create, and search again before each retry (`laravel.md`).
+4. Every write from an app is exactly-once. Use an app-namespaced key, a lock per key, a search before create (archived included), and the same search before each retry (`laravel.md`).
 5. Mark each Odoo fact you report as `audit`, `live` or `docs`. Never write a field or model name from memory into app code: run `fields MODEL` or `gap` first, because custom modules and versions rename things.
+6. https only. The client refuses `http://` except to localhost; set `ODOO_ALLOW_HTTP=1` only for a private network.
 
 ## Profile file
 
@@ -71,7 +72,9 @@ Domains accept JSON or Python literals. Pass `-` to read JSON from stdin.
 ## W1. Read a client's Odoo: what we have, what needs fixing
 
 1. `version`. Unreachable, or `login failed` on a correct key: the plan may block the API. On Odoo Online the external API needs the Custom plan. That is a question for the client, not a bug.
-2. `whoami`, then `audit --out <project>/odoo-audit/<date>`. Pass `--sample 3` when you need example rows to understand the data.
+2. `whoami`, then `audit --out ~/odoo-audits/<client>/<date>`. Write it outside any git repo: with
+   `--sample N` the JSON holds the client's real records (contacts, employees). Pass `--sample 3` only
+   when you need example rows to understand the data.
 3. If the audit runs as the limited integration user, it reports what that user cannot read and models that show "readable but 0 records" (record rules). Ask the client admin for one admin-level audit run, or compare counts with an admin export.
 4. Report to the owner with codes: `F1..Fn` from the audit's Findings, sorted high first.
    - Split them into fix (data or config problems in their Odoo) and connect (what the app must handle, such as multi-company or custom fields).

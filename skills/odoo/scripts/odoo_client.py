@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -85,12 +86,21 @@ def http_transport(url: str, payload: dict, timeout: float) -> dict:
         raise OdooError("HTTPError", f"{e.code} {e.reason} at {url}: {body}") from None
     except urllib.error.URLError as e:
         raise OdooError("URLError", f"{e.reason} at {url}") from None
+    except (TimeoutError, OSError) as e:
+        raise OdooError("NetworkError", f"{e} at {url}") from None
+    except ValueError as e:  # JSONDecodeError, UnicodeDecodeError: proxy/login page, not Odoo
+        raise OdooError("BadResponse", f"not a JSON-RPC answer from {url}: {e}") from None
 
 
 class Odoo:
     def __init__(self, url: str, db: str = "", user: str = "", key: str = "",
                  timeout: float = 30, transport=http_transport, context: dict | None = None):
         self.url = url.rstrip("/")
+        host = urllib.parse.urlsplit(self.url).hostname or ""
+        if self.url.startswith("http://") and host not in ("localhost", "127.0.0.1") \
+                and not os.environ.get("ODOO_ALLOW_HTTP"):
+            raise ConfigError(f"{self.url} is plain http: the API key would travel unencrypted. "
+                              "Use https (or set ODOO_ALLOW_HTTP=1 for a private network)")
         self.db, self.user, self.key = db, user, key
         self.timeout = timeout
         self.transport = transport

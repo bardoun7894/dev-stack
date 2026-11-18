@@ -187,7 +187,8 @@ See `laravel.md` for the full pattern and the "created, answer lost" test.
 
 ## 8. Pull and push
 
-- Pull incrementally on `write_date > last_seen`, ordered `write_date asc, id asc`, paged. Archived rows
+- Pull incrementally with keyset paging on `(write_date, id)`, ordered `write_date asc, id asc`
+  (domain in `laravel.md`); a bare `write_date > last` skips rows that share the boundary second. Archived rows
   need `active_test: false`. Deletions need a periodic id diff.
 - Push from Odoo 16: there is no webhook action. That was added to Automation Rules in 17. Server-action
   Python cannot make HTTP calls; it has no `requests` and no imports (live: `ir_actions.py` eval context).
