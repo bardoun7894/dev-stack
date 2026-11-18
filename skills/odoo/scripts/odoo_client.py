@@ -96,9 +96,11 @@ class Odoo:
     def __init__(self, url: str, db: str = "", user: str = "", key: str = "",
                  timeout: float = 30, transport=http_transport, context: dict | None = None):
         self.url = url.rstrip("/")
-        host = urllib.parse.urlsplit(self.url).hostname or ""
-        if self.url.startswith("http://") and host not in ("localhost", "127.0.0.1") \
-                and not os.environ.get("ODOO_ALLOW_HTTP"):
+        parts = urllib.parse.urlsplit(self.url)  # scheme is lowercased here
+        host = parts.hostname or ""
+        local_http = parts.scheme == "http" and (
+            host in ("localhost", "127.0.0.1") or os.environ.get("ODOO_ALLOW_HTTP"))
+        if parts.scheme != "https" and not local_http:
             raise ConfigError(f"{self.url} is plain http: the API key would travel unencrypted. "
                               "Use https (or set ODOO_ALLOW_HTTP=1 for a private network)")
         self.db, self.user, self.key = db, user, key

@@ -22,8 +22,9 @@ interface OdooGateway
     public function authenticate(): int;                                    // uid
     public function version(): array;                                       // no login
     public function searchRead(string $model, array $domain = [], array $fields = [],
-                               int $limit = 80, int $offset = 0, ?string $order = null): array;
-    public function searchCount(string $model, array $domain = []): int;
+                               int $limit = 80, int $offset = 0, ?string $order = null,
+                               array $context = []): array;
+    public function searchCount(string $model, array $domain = [], array $context = []): int;
     public function fieldsGet(string $model, array $attributes = ['string','type','required','relation','selection']): array;
     public function create(string $model, array $values): int;
     public function write(string $model, array $ids, array $values): bool;
@@ -100,16 +101,19 @@ class JsonRpcOdoo implements OdooGateway
     }
 
     public function searchRead(string $model, array $domain = [], array $fields = [],
-                               int $limit = 80, int $offset = 0, ?string $order = null): array
+                               int $limit = 80, int $offset = 0, ?string $order = null,
+                               array $context = []): array
     {
         $kw = ['fields' => $fields, 'limit' => $limit, 'offset' => $offset];
         if ($order) { $kw['order'] = $order; }
+        if ($context) { $kw['context'] = $context; }
         return $this->call($model, 'search_read', [$domain], $kw);
     }
 
-    public function searchCount(string $model, array $domain = []): int
+    public function searchCount(string $model, array $domain = [], array $context = []): int
     {
-        return $this->call($model, 'search_count', [$domain]);
+        $kw = $context ? ['context' => $context] : [];
+        return $this->call($model, 'search_count', [$domain], $kw);
     }
 
     public function fieldsGet(string $model, array $attributes = ['string','type','required','relation','selection']): array
@@ -156,8 +160,8 @@ public function writeOnce(string $model, string $keyField, string $key, array $v
         }
         // 2. Odoo itself, archived records included: a create that succeeded but whose answer
         //    was lost is found here
-        $found = $this->odoo->call($model, 'search_read', [[[$keyField, '=', $key]]],
-            ['fields' => ['id'], 'limit' => 2, 'context' => ['active_test' => false]]);
+        $found = $this->odoo->searchRead($model, [[$keyField, '=', $key]], ['id'], 2, 0, null,
+            ['active_test' => false]);
         if (count($found) > 1) {
             throw new OdooException('DuplicateKey', "$model has 2+ records with $keyField=$key; fix by hand");
         }
@@ -214,12 +218,13 @@ class FakeOdoo implements OdooGateway
 
     public function authenticate(): int { return 2; }
     public function version(): array { return ['server_version' => '16.0', 'server_serie' => '16.0']; }
-    public function searchRead(string $model, array $domain = [], array $fields = [], int $limit = 80, int $offset = 0, ?string $order = null): array
+    public function searchRead(string $model, array $domain = [], array $fields = [], int $limit = 80, int $offset = 0, ?string $order = null, array $context = []): array
     {
         $this->calls[] = ['searchRead', $model, $domain];
+        $activeTest = $context['active_test'] ?? true;
         $rows = [];
         foreach ($this->records[$model] ?? [] as $id => $v) {
-            $ok = true;
+            $ok = $activeTest ? ($v['active'] ?? true) !== false : true;
             foreach ($domain as $c) {
                 if (is_array($c) && $c[1] === '=' && ($v[$c[0]] ?? null) !== $c[2]) { $ok = false; }
             }
@@ -227,7 +232,7 @@ class FakeOdoo implements OdooGateway
         }
         return array_slice($rows, $offset, $limit);
     }
-    public function searchCount(string $model, array $domain = []): int { return count($this->searchRead($model, $domain, [], PHP_INT_MAX)); }
+    public function searchCount(string $model, array $domain = [], array $context = []): int { return count($this->searchRead($model, $domain, [], PHP_INT_MAX, 0, null, $context)); }
     public function fieldsGet(string $model, array $attributes = []): array { return []; }
     public function create(string $model, array $values): int
     {
