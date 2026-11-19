@@ -1,0 +1,24 @@
+<!-- Bootstrap 5.3.9 from jsDelivr. Hashes computed from the npm package and checked against
+     jsDelivr on 2026-11-19. Pick the CSS by direction; never load both. -->
+
+<!-- <head>, LTR -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/css/bootstrap.min.css"
+      integrity="sha384-yEPZ7jP9S0QKiUQ0m3jjsO4ProIW7wvR9gXkI7JOGa2XVsw53Yke2bsdkBbjmmiX" crossorigin="anonymous">
+
+<!-- <head>, RTL (<html lang="ar" dir="rtl">) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/css/bootstrap.rtl.min.css"
+      integrity="sha384-fFMX5LqaHoT6olm8r/JTe3Dg4+vFEFXrVlhIo8IGs96iA+JhgKLLYwY4y2fHeyMY" crossorigin="anonymous">
+
+<!-- Blade: one tag, chosen by locale -->
+@php($rtl = app()->getLocale() === 'ar')
+<html lang="{{ app()->getLocale() }}" dir="{{ $rtl ? 'rtl' : 'ltr' }}">
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/css/bootstrap{{ $rtl ? '.rtl' : '' }}.min.css"
+      integrity="{{ $rtl ? 'sha384-fFMX5LqaHoT6olm8r/JTe3Dg4+vFEFXrVlhIo8IGs96iA+JhgKLLYwY4y2fHeyMY' : 'sha384-yEPZ7jP9S0QKiUQ0m3jjsO4ProIW7wvR9gXkI7JOGa2XVsw53Yke2bsdkBbjmmiX' }}"
+      crossorigin="anonymous">
+<!-- then the app theme, after Bootstrap -->
+<link rel="stylesheet" href="{{ asset('css/bs-theme.css') }}">
+
+<!-- end of <body>: one JS file, Popper included -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-WyOxWvTyr1QaMPfiPJSv76iReVthorl5uWlFtZPyK0IEB0hGzo9y5Bp9mYanr8Bu" crossorigin="anonymous"></script>

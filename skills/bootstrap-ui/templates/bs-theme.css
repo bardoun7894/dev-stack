@@ -1,0 +1,174 @@
+/* bs-theme.css: runtime theme for Bootstrap 5.3.x apps without a build step (CDN or a
+   copied bootstrap.min.css). Load it AFTER bootstrap(.rtl).min.css. No !important.
+   Bootstrap 5.3 compiles the primary blue into 23 component rules and 3 SVG icons
+   (checked in the 5.3.9 dist), so changing --bs-primary alone is not enough: every one of
+   them is re-pointed below. Change the BRAND block only. Keep each *-rgb triplet equal to
+   its hex (Bootstrap reads the triplet for rgba() tints; a mismatch gives two blues). */
+
+:root, [data-bs-theme="light"] {
+  /* ---- BRAND ---- */
+  --app-primary: #2a52be;
+  --app-primary-rgb: 42, 82, 190;
+  --app-primary-hover: #2346a2;          /* ~15% darker */
+  --app-primary-active: #213f97;
+  --app-ink: #161b26;
+  --app-ink-rgb: 22, 27, 38;
+  --app-canvas: #f5f6f8;
+  --app-canvas-rgb: 245, 246, 248;
+  --app-surface: #fff;                   /* cards, modals, menus, inputs sit on the canvas */
+
+  /* ---- Bootstrap tokens ---- */
+  --bs-primary: var(--app-primary);
+  --bs-primary-rgb: var(--app-primary-rgb);
+  --bs-primary-text-emphasis: color-mix(in srgb, var(--app-primary) 62%, #000);
+  --bs-primary-bg-subtle: color-mix(in srgb, var(--app-primary) 10%, #fff);
+  --bs-primary-border-subtle: color-mix(in srgb, var(--app-primary) 28%, #fff);
+  --bs-link-color: var(--app-primary);
+  --bs-link-color-rgb: var(--app-primary-rgb);
+  --bs-link-hover-color: var(--app-primary-hover);
+  --bs-link-hover-color-rgb: 35, 70, 162;
+  --bs-link-decoration: none;
+
+  --bs-body-font-family: "Inter", "IBM Plex Sans Arabic", system-ui, -apple-system,
+    "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --bs-body-font-size: .9375rem;
+  --bs-body-line-height: 1.55;
+  --bs-body-color: var(--app-ink);
+  --bs-body-color-rgb: var(--app-ink-rgb);
+  --bs-body-bg: var(--app-canvas);
+  --bs-body-bg-rgb: var(--app-canvas-rgb);
+  --bs-emphasis-color: #0b0e14;
+  --bs-heading-color: var(--app-ink);
+  --bs-secondary-color: rgba(var(--app-ink-rgb), .68);
+  --bs-tertiary-bg: #eef0f3;
+  --bs-border-color: #e2e5ea;
+  --bs-border-radius: .5rem;
+  --bs-border-radius-sm: .375rem;
+  --bs-border-radius-lg: .75rem;
+  --bs-border-radius-xl: 1rem;
+  --bs-border-radius-xxl: 1.5rem;
+  --bs-box-shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);
+  --bs-box-shadow: 0 1px 3px rgba(16, 24, 40, .08), 0 1px 2px rgba(16, 24, 40, .04);
+  --bs-box-shadow-lg: 0 16px 32px -8px rgba(16, 24, 40, .16);
+  --bs-focus-ring-width: .2rem;
+  --bs-focus-ring-opacity: .22;
+  --bs-focus-ring-color: rgba(var(--app-primary-rgb), .22);
+  --app-focus: 0 0 0 .2rem rgba(var(--app-primary-rgb), .22);
+  --app-focus-border: color-mix(in srgb, var(--app-primary) 55%, #fff);
+  /* calmer info tint than Bootstrap's cyan (alerts, list groups); text-bg-info stays stock */
+  --bs-info-text-emphasis: #0a3d73;
+  --bs-info-bg-subtle: #e3eefb;
+  --bs-info-border-subtle: #b9d3f2;
+}
+
+[data-bs-theme="dark"] {
+  --app-primary: #7c9cff;                 /* lighter in dark mode so text on it still passes */
+  --app-primary-rgb: 124, 156, 255;
+  --app-primary-hover: #9bb3ff;
+  --app-primary-active: #b3c5ff;
+  --app-ink: #e3e6ec;
+  --app-ink-rgb: 227, 230, 236;
+  --app-canvas: #0e1117;
+  --app-canvas-rgb: 14, 17, 23;
+  --app-surface: #161a22;
+  --bs-primary-text-emphasis: color-mix(in srgb, var(--app-primary) 70%, #fff);
+  --bs-primary-bg-subtle: color-mix(in srgb, var(--app-primary) 16%, #0e1117);
+  --bs-primary-border-subtle: color-mix(in srgb, var(--app-primary) 40%, #0e1117);
+  --bs-link-hover-color-rgb: 155, 179, 255;
+  --bs-emphasis-color: #fff;
+  --bs-tertiary-bg: #161a22;
+  --bs-border-color: #262c38;
+  --app-focus-border: color-mix(in srgb, var(--app-primary) 60%, #0e1117);
+  --bs-info-text-emphasis: #9cc4f2;
+  --bs-info-bg-subtle: #0d1f33;
+  --bs-info-border-subtle: #1d3a5c;
+}
+
+[dir="rtl"] { --bs-body-font-family: "IBM Plex Sans Arabic", "Inter", system-ui, Tahoma,
+  "Segoe UI", sans-serif; }
+
+/* ---- the 23 hard-coded primary spots ---- */
+.btn-primary {
+  --bs-btn-color: #fff; --bs-btn-bg: var(--app-primary); --bs-btn-border-color: var(--app-primary);
+  --bs-btn-hover-color: #fff; --bs-btn-hover-bg: var(--app-primary-hover);
+  --bs-btn-hover-border-color: var(--app-primary-hover);
+  --bs-btn-focus-shadow-rgb: var(--app-primary-rgb);
+  --bs-btn-active-color: #fff; --bs-btn-active-bg: var(--app-primary-active);
+  --bs-btn-active-border-color: var(--app-primary-active);
+  --bs-btn-disabled-color: #fff; --bs-btn-disabled-bg: var(--app-primary);
+  --bs-btn-disabled-border-color: var(--app-primary);
+}
+[data-bs-theme="dark"] .btn-primary { --bs-btn-color: #0e1117; --bs-btn-hover-color: #0e1117;
+  --bs-btn-active-color: #0e1117; --bs-btn-disabled-color: #0e1117; }
+.btn-outline-primary {
+  --bs-btn-color: var(--app-primary); --bs-btn-border-color: var(--app-primary);
+  --bs-btn-hover-color: #fff; --bs-btn-hover-bg: var(--app-primary);
+  --bs-btn-hover-border-color: var(--app-primary); --bs-btn-focus-shadow-rgb: var(--app-primary-rgb);
+  --bs-btn-active-color: #fff; --bs-btn-active-bg: var(--app-primary);
+  --bs-btn-active-border-color: var(--app-primary); --bs-btn-disabled-color: var(--app-primary);
+  --bs-btn-disabled-border-color: var(--app-primary);
+}
+.btn { --bs-btn-font-weight: 500; --bs-btn-padding-x: 1rem; --bs-btn-padding-y: .5rem; }
+.form-control:focus, .form-select:focus, .form-check-input:focus {
+  border-color: var(--app-focus-border); box-shadow: var(--app-focus);
+}
+.form-check-input:checked, .form-check-input[type="checkbox"]:indeterminate {
+  background-color: var(--app-primary); border-color: var(--app-primary);
+}
+.form-switch .form-check-input:focus {
+  --bs-form-switch-bg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='3' fill='rgba%2842, 82, 190, .5%29'/%3e%3c/svg%3e");
+}
+.form-range::-webkit-slider-thumb { background-color: var(--app-primary); }
+.form-range::-moz-range-thumb { background-color: var(--app-primary); }
+.form-range:focus::-webkit-slider-thumb { box-shadow: 0 0 0 1px var(--bs-body-bg), var(--app-focus); }
+.form-range:focus::-moz-range-thumb { box-shadow: 0 0 0 1px var(--bs-body-bg), var(--app-focus); }
+.nav-link:focus-visible { box-shadow: var(--app-focus); }
+.dropdown-menu, .dropdown-menu-dark { --bs-dropdown-link-active-bg: var(--app-primary);
+  --bs-dropdown-border-color: var(--bs-border-color); --bs-dropdown-box-shadow: var(--bs-box-shadow-lg); }
+.dropdown-menu { box-shadow: var(--bs-dropdown-box-shadow); }
+.nav-pills { --bs-nav-pills-link-active-bg: var(--app-primary); }
+.accordion { --bs-accordion-btn-focus-box-shadow: var(--app-focus);
+  --bs-accordion-btn-active-icon: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%231a3376' stroke-linecap='round' stroke-linejoin='round'%3e%3cpath d='M2 5L8 11L14 5'/%3e%3c/svg%3e"); }
+[data-bs-theme="dark"] .accordion-button::after {
+  --bs-accordion-btn-active-icon: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23b3c5ff' stroke-linecap='round' stroke-linejoin='round'%3e%3cpath d='M2 5L8 11L14 5'/%3e%3c/svg%3e");
+  --bs-accordion-btn-icon: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23b3c5ff' stroke-linecap='round' stroke-linejoin='round'%3e%3cpath d='M2 5L8 11L14 5'/%3e%3c/svg%3e");
+}
+.pagination { --bs-pagination-focus-box-shadow: var(--app-focus);
+  --bs-pagination-active-bg: var(--app-primary); --bs-pagination-active-border-color: var(--app-primary);
+  --bs-pagination-border-radius: var(--bs-border-radius); }
+.progress, .progress-stacked { --bs-progress-bar-bg: var(--app-primary); }
+.list-group { --bs-list-group-active-bg: var(--app-primary);
+  --bs-list-group-active-border-color: var(--app-primary); }
+.btn-close { --bs-btn-close-focus-shadow: var(--app-focus); }
+.table-primary { --bs-table-bg: var(--bs-primary-bg-subtle); --bs-table-color: var(--bs-body-color);
+  --bs-table-border-color: var(--bs-primary-border-subtle); }
+
+/* ---- house look ---- */
+h1, h2, h3, h4, h5, h6, .h1, .h2, .h3, .h4, .h5, .h6 { font-weight: 600; }
+h1, h2, h3, .h1, .h2, .h3 { letter-spacing: -.015em; }
+[dir="rtl"] :is(h1, h2, h3, .h1, .h2, .h3) { letter-spacing: 0; }
+.form-label { font-weight: 500; margin-bottom: .375rem; }
+.form-control, .form-select { --bs-border-color: #d5d9e0; padding-block: .5rem; }
+[data-bs-theme="dark"] :is(.form-control, .form-select) { --bs-border-color: #303746; }
+/* Bootstrap paints these with --bs-body-bg (the canvas); give them the surface instead */
+.form-control, .form-select { background-color: var(--app-surface); }
+.form-check-input { --bs-form-check-bg: var(--app-surface); }
+.modal { --bs-modal-bg: var(--app-surface); }
+.dropdown-menu { --bs-dropdown-bg: var(--app-surface); }
+.list-group { --bs-list-group-bg: var(--app-surface); }
+.pagination { --bs-pagination-bg: var(--app-surface); }
+.accordion { --bs-accordion-bg: var(--app-surface); }
+.popover { --bs-popover-bg: var(--app-surface); }
+.toast { --bs-toast-bg: var(--app-surface); }
+.table { --bs-table-bg: transparent; }
+.card { --bs-card-bg: var(--app-surface); --bs-card-border-color: var(--bs-border-color); --bs-card-cap-bg: transparent;
+  --bs-card-border-radius: var(--bs-border-radius-lg); --bs-card-inner-border-radius: calc(var(--bs-border-radius-lg) - 1px);
+  --bs-card-spacer-y: 1.25rem; --bs-card-spacer-x: 1.25rem; box-shadow: var(--bs-box-shadow-sm); }
+[data-bs-theme="dark"] .card { box-shadow: none; }
+.card-header { font-weight: 600; }
+.table { --bs-table-border-color: var(--bs-border-color); }
+.table:not(.table-sm) > :not(caption) > * > * { padding: .75rem; }
+.table > thead th { color: var(--bs-secondary-color); font-size: .8125rem; font-weight: 600; white-space: nowrap; }
+.badge { font-weight: 600; padding: .35em .6em; }
+.modal { --bs-modal-border-radius: var(--bs-border-radius-xl); --bs-modal-box-shadow: var(--bs-box-shadow-lg); }
+.alert { --bs-alert-border-radius: var(--bs-border-radius-lg); }
