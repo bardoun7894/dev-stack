@@ -54,7 +54,7 @@ CLASS_MIGRATION = [
     ("thead-light", "table-light (on thead)", "bs4", ""),
     ("btn-default", "btn-secondary or btn-outline-secondary", "bs3", ""),
     ("btn-xs", "btn-sm", "bs3", ""),
-    ("col-xs-{n}", "col-{n}", "bs3", ""),
+    ("col-xs-{col}", "col-{col}", "bs3", ""),
     ("hidden-xs", "d-none d-sm-block", "bs3", "and the other hidden-*/visible-* classes"),
     ("pull-right", "float-end", "bs3", ""),
     ("pull-left", "float-start", "bs3", ""),
@@ -67,6 +67,7 @@ CLASS_MIGRATION = [
 
 COLORS = "primary|secondary|success|danger|warning|info|light|dark"
 PLACEHOLDERS = {"{n}": r"(?:[0-5]|auto|n[1-5])", "{color}": f"(?:{COLORS})",
+                "{col}": r"(?:1[0-2]|[1-9])",
                 "{w}": r"(?:bold|bolder|normal|light|lighter)"}
 
 # BS5 classes that do not exist in BS4 (used to flag BS5 markup on a BS4 page).
@@ -104,7 +105,7 @@ ADMIN_THEMES = [
     (r"plugins\.bundle(\.rtl)?(\.min)?\.css", "Metronic plugins", None),
     (r"adminlte(\.rtl)?(\.min)?\.css", "AdminLTE", None),
     (r"@coreui/coreui|coreui(\.rtl)?(\.min)?\.css", "CoreUI", 5),
-    (r"vuexy|core\.css", "Vuexy", None),
+    (r"(^|/)vuexy[^/]*\.css", "Vuexy", None),
     (r"argon-dashboard|material-dashboard|light-bootstrap-dashboard", "Creative Tim", None),
 ]
 

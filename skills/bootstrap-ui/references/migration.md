@@ -1,6 +1,6 @@
 # BS3 / BS4 to Bootstrap 5.3 migration
 
-Generated from `scripts/bs_rules.py` by `scripts/gen_migration.py`; edit the rules, not this file. Every pair was checked against the dist CSS of bootstrap 4.6.2 and 5.3.9: the old class exists in the old CSS and not in 5.3.9, the new one exists in 5.3.9. `{n}` = 0-5/auto (and n1-n5 for margins), `{color}` = theme color, `{w}` = bold/bolder/normal/light/lighter.
+Generated from `scripts/bs_rules.py` by `scripts/gen_migration.py`; edit the rules, not this file. Every pair was checked against the dist CSS of bootstrap 4.6.2 and 5.3.9: the old class exists in the old CSS and not in 5.3.9, the new one exists in 5.3.9. `{n}` = 0-5/auto (and n1-n5 for margins), `{color}` = theme color, `{w}` = bold/bolder/normal/light/lighter, `{col}` = 1-12.
 
 ## Order of work
 
@@ -60,7 +60,7 @@ Generated from `scripts/bs_rules.py` by `scripts/gen_migration.py`; edit the rul
 | `thead-light` | `table-light (on thead)` | BS4 |  |
 | `btn-default` | `btn-secondary or btn-outline-secondary` | BS3 |  |
 | `btn-xs` | `btn-sm` | BS3 |  |
-| `col-xs-{n}` | `col-{n}` | BS3 |  |
+| `col-xs-{col}` | `col-{col}` | BS3 |  |
 | `hidden-xs` | `d-none d-sm-block` | BS3 | and the other hidden-*/visible-* classes |
 | `pull-right` | `float-end` | BS3 |  |
 | `pull-left` | `float-start` | BS3 |  |

@@ -15,6 +15,7 @@
   --app-ink-rgb: 22, 27, 38;
   --app-canvas: #f5f6f8;
   --app-canvas-rgb: 245, 246, 248;
+  --app-surface: #fff;                   /* cards, modals, menus, inputs sit on the canvas */
 
   /* ---- Bootstrap tokens ---- */
   --bs-primary: var(--app-primary);
@@ -69,6 +70,7 @@
   --app-ink-rgb: 227, 230, 236;
   --app-canvas: #0e1117;
   --app-canvas-rgb: 14, 17, 23;
+  --app-surface: #161a22;
   --bs-primary-text-emphasis: color-mix(in srgb, var(--app-primary) 70%, #fff);
   --bs-primary-bg-subtle: color-mix(in srgb, var(--app-primary) 16%, #0e1117);
   --bs-primary-border-subtle: color-mix(in srgb, var(--app-primary) 40%, #0e1117);
@@ -148,10 +150,21 @@ h1, h2, h3, .h1, .h2, .h3 { letter-spacing: -.015em; }
 .form-label { font-weight: 500; margin-bottom: .375rem; }
 .form-control, .form-select { --bs-border-color: #d5d9e0; padding-block: .5rem; }
 [data-bs-theme="dark"] :is(.form-control, .form-select) { --bs-border-color: #303746; }
-.card { --bs-card-border-color: var(--bs-border-color); --bs-card-cap-bg: transparent;
+/* Bootstrap paints these with --bs-body-bg (the canvas); give them the surface instead */
+.form-control, .form-select { background-color: var(--app-surface); }
+.form-check-input { --bs-form-check-bg: var(--app-surface); }
+.modal { --bs-modal-bg: var(--app-surface); }
+.dropdown-menu { --bs-dropdown-bg: var(--app-surface); }
+.list-group { --bs-list-group-bg: var(--app-surface); }
+.pagination { --bs-pagination-bg: var(--app-surface); }
+.accordion { --bs-accordion-bg: var(--app-surface); }
+.popover { --bs-popover-bg: var(--app-surface); }
+.toast { --bs-toast-bg: var(--app-surface); }
+.table { --bs-table-bg: transparent; }
+.card { --bs-card-bg: var(--app-surface); --bs-card-border-color: var(--bs-border-color); --bs-card-cap-bg: transparent;
   --bs-card-border-radius: var(--bs-border-radius-lg); --bs-card-inner-border-radius: calc(var(--bs-border-radius-lg) - 1px);
   --bs-card-spacer-y: 1.25rem; --bs-card-spacer-x: 1.25rem; box-shadow: var(--bs-box-shadow-sm); }
-[data-bs-theme="dark"] .card { --bs-card-bg: var(--bs-tertiary-bg); box-shadow: none; }
+[data-bs-theme="dark"] .card { box-shadow: none; }
 .card-header { font-weight: 600; }
 .table { --bs-table-border-color: var(--bs-border-color); }
 .table:not(.table-sm) > :not(caption) > * > * { padding: .75rem; }

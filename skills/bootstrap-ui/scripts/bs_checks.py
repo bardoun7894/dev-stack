@@ -89,27 +89,33 @@ def check_versions(pages, project):
     return out, default
 
 
+def duplicated(assets, key=lambda a: a.ref) -> bool:
+    """Two different values loaded together. Partials pulled in by @include may be @if/@else
+    alternatives (head vs head_ar), so two includes alone do not count; anything on the page
+    or layout chain plus anything else does, and so does a repeat inside one include."""
+    direct = {key(a) for a in assets if a.via == "direct"}
+    per_inc: dict = {}
+    for a in assets:
+        if a.via == "include":
+            per_inc.setdefault(a.src, set()).add(key(a))
+    inc_all = set().union(*per_inc.values()) if per_inc else set()
+    if len(direct) > 1 or any(len(v) > 1 for v in per_inc.values()):
+        return True
+    return bool(direct) and bool(inc_all - direct)
+
+
 def check_double_load(pages):
     out = []
     multi_css, multi_js, popper_dup, no_popper, mixed_rtl, mismatch = [], [], [], [], [], []
     for pg in pages:
-        # alternatives in @if branches (head vs head_ar) are separate files with the same
-        # major: only same-file duplicates or different majors are real double loads
         css = [a for a in pg.assets if a.kind in ("bs-css", "theme")
                and a.note != "Metronic plugins"]
-        by_src = {}
-        for a in css:
-            by_src.setdefault(a.src, set()).add(a.ref)
         majors = {a.version.split(".")[0] for a in css if a.version}
-        if any(len(v) > 1 for v in by_src.values()) or len(majors) > 1:
+        if duplicated(css) or len(majors) > 1:
             multi_css.append(f"{pg.path}: " + ", ".join(sorted({a.ref.rsplit('/', 1)[-1]
                              for a in pg.assets if a.kind in ("bs-css", "theme")})))
         js = [a for a in pg.assets if a.kind == "bs-js"]
-        js_src = {}
-        for a in js:
-            js_src.setdefault(a.src, set()).add(a.ref)
-        if any(len(v) > 1 for v in js_src.values()) or \
-                len({a.version.split(".")[0] for a in js if a.version}) > 1:
+        if duplicated(js) or len({a.version.split(".")[0] for a in js if a.version}) > 1:
             multi_js.append(f"{pg.path}: " + ", ".join(sorted({a.ref for a in js})))
         if any(a.note == "bundle" for a in js) and any(a.kind == "popper" for a in pg.assets):
             popper_dup.append(pg.path)
@@ -122,11 +128,7 @@ def check_double_load(pages):
         jsv = {a.version.split(".")[0] for a in js if a.version}
         if cssv and jsv and cssv != jsv:
             mismatch.append(f"{pg.path}: CSS {sorted(cssv)} with JS {sorted(jsv)}")
-        rtl_src = {}
-        for a in pg.assets:
-            if a.kind in ("bs-css", "theme"):
-                rtl_src.setdefault(a.src, set()).add(a.rtl)
-        if any(len(v) > 1 for v in rtl_src.values()):
+        if duplicated([a for a in css if a.kind == "bs-css"], key=lambda a: a.rtl):
             mixed_rtl.append(pg.path)
     if multi_css:
         out.append(F("high", "double-css", "more than one Bootstrap build on the same page "
@@ -182,7 +184,7 @@ def check_markup(pages, default):
                 if "data-bs-" in line:
                     bs5_on_4["data-bs-*"].append(f"{pg.path}:{ln}")
     for (old, new, origin, note), hits in sorted(mig.items(), key=lambda kv: -len(kv[1])):
-        sev = "high" if origin == "bs3" else "medium"
+        sev = "medium"   # unstyled, not broken; generic names (panel, well) can be the app's own
         out.append(F(sev, f"{origin}-class", f"{origin.upper()} class `{old}` on Bootstrap 5 "
                      f"pages has no style{': ' + note if note else ''}", f"replace with `{new}`",
                      hits, len(hits)))
@@ -250,7 +252,9 @@ def check_tailwind(pages, project):
     # compiled CSS is the truth; a source file with preflight counts unless the config disables it
     preflight_on = "preflight" in notes or ("preflight-src" in notes and not cfg_off) or \
         (not notes - {""} and pages_both and not cfg_off)
-    prefixed = bool(re.search(r"prefix\s*:\s*['\"]\w+", cfg_txt))
+    prefixed = bool(re.search(r"prefix\s*:\s*['\"]\w+", cfg_txt)) or any(
+        re.search(r"""@import\s+['"]tailwindcss[^;]*prefix\(""", project.read(f, 100_000))
+        for f in project.files if f.name.endswith(".css"))
     cdn = any(a.kind == "tailwind" and "cdn.tailwindcss" in a.ref for pg in pages_both
               for a in pg.assets)
     if preflight_on or cdn:
@@ -278,8 +282,7 @@ def check_assets(pages):
                 http.add(a.ref)
             if a.note == "unpinned" or "@latest" in a.ref:
                 unpinned.add(a.ref)
-            if a.kind in ("bs-css", "bs-js") and a.ref.startswith("https://") and \
-                    "integrity" not in pg.text:
+            if a.kind in ("bs-css", "bs-js") and a.ref.startswith("https://") and not a.sri:
                 no_sri.add(a.ref)
     out = []
     if http:
@@ -300,7 +303,7 @@ def check_custom_css(project, files, pages):
         # theme bundles and font kits are vendor code, not the app's own overrides
         if f.name.endswith(STYLE_EXT) and ".bundle." not in f.name and \
                 "/fonts/" not in project.rel(f) and not re.match(
-                    r"(style|plugins|vendors?|theme|core|app-assets)[.-]", f.name):
+                    r"(plugins|vendors?)[.-]", f.name):
             imp[project.rel(f)] = project.read(f).count("!important")
     for pg in pages:
         n = len(HEX_STYLE_RX.findall(pg.text))

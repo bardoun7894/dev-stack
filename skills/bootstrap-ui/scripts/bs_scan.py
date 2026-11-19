@@ -15,6 +15,7 @@ from pathlib import Path
 
 from bs_rules import ADMIN_THEMES, EXCLUDE_DIRS, EXCLUDE_PATHS, MARKUP_EXT, STYLE_EXT
 
+TAG_RX = re.compile(r"<(?:link|script)\b[^>]*>", re.I)
 REF_RX = re.compile(r"""(?:href|src)\s*=\s*(?:"([^"]+)"|'([^']+)')""", re.I)
 VITE_RX = re.compile(r"""@vite\(\s*\[?([^)\]]*)""")
 MIX_RX = re.compile(r"""(?:asset|mix|url|secure_asset)\(\s*['"]([^'"]+)['"]""")
@@ -34,6 +35,8 @@ class Asset:
     rtl: bool = False
     note: str = ""
     src: str = ""        # file the reference was found in
+    via: str = "direct"  # direct (page/layout chain) or include (an @include partial)
+    sri: bool = False    # the tag carries integrity=
 
 
 @dataclass
@@ -237,13 +240,30 @@ class Project:
         return out
 
     def own_assets(self, text: str, src: str = "") -> list:
-        refs = [self.normalise(a or b) for a, b in REF_RX.findall(text)]
-        refs = [r for r in refs
-                if re.search(r"\.(css|js|scss)(\?|#|$)|cdn\.tailwindcss|bootstrap@", r)]
-        assets = [self.classify(r) for r in refs] + self.vite_assets(text)
+        assets = []
+        for tag in TAG_RX.findall(text):
+            m = REF_RX.search(tag)
+            if not m:
+                continue
+            r = self.normalise(m.group(1) or m.group(2))
+            if re.search(r"\.(css|js|scss)(\?|#|$)|cdn\.tailwindcss|bootstrap@", r):
+                a = self.classify(r)
+                a.sri = "integrity" in tag.lower()
+                assets.append(a)
+        assets += self.vite_assets(text)
         for a in assets:
             a.src = src
         return assets
+
+    def include_assets(self, text: str, near: Path) -> list:
+        out = []
+        for inc in INCLUDE_RX.findall(text):
+            ip = self.view_path(inc, near)
+            if ip:
+                for a in self.own_assets(self.read(ip), self.rel(ip)):
+                    a.via = "include"
+                    out.append(a)
+        return out
 
     # -- layouts ----------------------------------------------------------
     def view_path(self, dotted: str, near: Path | None = None) -> Path | None:
@@ -274,10 +294,7 @@ class Project:
         text = self.read(p)
         assets = self.own_assets(text, self.rel(p))
         if depth == 0:
-            for inc in INCLUDE_RX.findall(text):
-                ip = self.view_path(inc, p)
-                if ip:
-                    assets += self.own_assets(self.read(ip), self.rel(ip))
+            assets += self.include_assets(text, p)
             parent = self.layout_for(text, p)
             if parent and parent != p:
                 assets += self.layout_assets(parent, 1)
@@ -301,11 +318,6 @@ class Project:
                     cache[lay] = self.layout_assets(lay)
                 pg.assets = pg.own + cache[lay]
             else:
-                inc = []
-                for name in INCLUDE_RX.findall(text):
-                    ip = self.view_path(name, f)
-                    if ip:
-                        inc += self.own_assets(self.read(ip), self.rel(ip))
-                pg.assets = pg.own + inc
+                pg.assets = pg.own + self.include_assets(text, f)
             out.append(pg)
         return out

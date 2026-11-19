@@ -86,9 +86,10 @@ def lum(c):
 
 
 def ratio(fg, bg) -> float:
+    """Unrounded; round only for display, so 4.496 never passes as 4.5."""
     fg = over(fg, bg)
     l1, l2 = sorted((lum(fg), lum(bg)), reverse=True)
-    return round((l1 + 0.05) / (l2 + 0.05), 2)
+    return (l1 + 0.05) / (l2 + 0.05)
 
 
 def check(blocks) -> list:
@@ -100,8 +101,13 @@ def check(blocks) -> list:
         if mode == "dark":
             env = {**env, **merged(blocks, dark_sel)}
         bg = color("var(--bs-body-bg)", env)
-        card = color("var(--bs-tertiary-bg)", env) if mode == "dark" else (1, 1, 1, 1)
+        card_env = {**env, **merged(blocks, {".card"})}
+        if mode == "dark":
+            card_env.update(merged(blocks, {"[data-bs-theme=dark] .card"}))
+        card = color("var(--bs-card-bg, var(--bs-body-bg))", card_env) or bg
         if not bg:
+            rows.append({"mode": mode, "pair": "body background (unparsed color)", "ratio": 0,
+                         "need": 4.5, "ok": False})
             continue
         pairs = [
             ("body text on page", "var(--bs-body-color)", bg, 4.5),
@@ -119,10 +125,15 @@ def check(blocks) -> list:
                           color(f"var(--bs-{name}-bg-subtle)", env), 4.5))
         for label, fg, b, need in pairs:
             f = color(fg, env)
+            if not resolve(fg, env).strip() or "unset" in label:
+                continue
             if f and b:
                 r = ratio(f, b)
                 rows.append({"mode": mode, "pair": label, "ratio": r, "need": need,
                              "ok": r >= need})
+            else:   # a color we cannot parse (hsl, oklch, named) must not pass silently
+                rows.append({"mode": mode, "pair": label + " (unparsed color)", "ratio": 0,
+                             "need": need, "ok": False})
         for sel, props in blocks:
             m = re.fullmatch(r"(\[data-bs-theme=\"?dark\"?\] )?\.btn-(primary|secondary|success|"
                              r"danger|warning|info)", sel.replace("'", '"'))
@@ -171,6 +182,9 @@ def main(argv=None) -> int:
         for r in rows:
             mark = "ok  " if r["ok"] else "FAIL"
             print(f"{mark} {r['mode']:5} {r['ratio']:5.2f} (need {r['need']}) {r['pair']}")
+    if not rows:
+        print("FAIL no color tokens found: is this a Bootstrap 5.3 theme?")
+        return 1
     return 0 if all(r["ok"] for r in rows) else 1
 
 

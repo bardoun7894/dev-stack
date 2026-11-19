@@ -136,6 +136,53 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(bs_doctor.main(["/nonexistent/dir"]), 2)
 
 
+class ReviewRegressionTests(unittest.TestCase):
+    def test_bs3_col_xs_12(self):
+        root = project({"public/a.html": f'<link href="{CDN5}/css/bootstrap.min.css">'
+                                          '<div class="col-xs-12"></div>'})
+        self.assertIn("bs3-class", codes(root))
+
+    def test_same_major_js_on_page_and_layout(self):
+        root = project({
+            V + "layouts/app.blade.php": f'<script src="{CDN5}/js/bootstrap.bundle.min.js">',
+            V + "p.blade.php": "@extends('layouts.app')\n"
+                               f'<script src="{CDN5}/js/bootstrap.min.js"></script>',
+        })
+        self.assertIn("double-js", codes(root))
+
+    def test_score_css_is_not_a_theme(self):
+        root = project({"public/a.html": f'<link href="{CDN5}/css/bootstrap.min.css" '
+                                          'integrity="x"><link href="/css/score.css">',
+                        "public/css/score.css": ".x{}"})
+        self.assertNotIn("double-css", codes(root))
+
+    def test_tailwind_v4_css_prefix_counts(self):
+        root = project({
+            "resources/css/app.css": '@import "tailwindcss" prefix(tw);',
+            "public/css/tw.css": "/*! tailwindcss v4.1.11 | MIT License */.tw\\:flex{}",
+            "public/a.html": f'<link href="{CDN5}/css/bootstrap.min.css"><link href="/css/tw.css">'
+                             '<div class="collapse"></div>',
+        })
+        self.assertNotIn("tw-clash", codes(root))
+
+    def test_sri_read_per_tag_and_from_layout(self):
+        root = project({
+            V + "layouts/app.blade.php": f'<link href="{CDN5}/css/bootstrap.min.css" '
+                                         'integrity="sha384-x" crossorigin="anonymous">',
+            V + "p.blade.php": "@extends('layouts.app')",
+        })
+        self.assertNotIn("no-sri", codes(root))
+
+    def test_unparsed_color_fails(self):
+        css = ":root{--bs-body-bg:hsl(0 0% 100%);--bs-body-color:#aaa}"
+        rows = contrast.check(contrast.parse(css))
+        self.assertTrue(rows and not all(r["ok"] for r in rows))
+
+    def test_borderline_not_rounded_up(self):
+        self.assertLess(contrast.ratio(contrast.color("#777777", {}),
+                                       contrast.color("#ffffff", {})), 4.5)
+
+
 class ContrastTests(unittest.TestCase):
     def test_ratio_math(self):
         self.assertEqual(contrast.ratio((0, 0, 0, 1), (1, 1, 1, 1)), 21.0)

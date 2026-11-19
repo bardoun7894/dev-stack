@@ -38,6 +38,20 @@ $body-color: $ink;
 $body-bg: $canvas;
 $body-secondary-color: rgba($ink, .68);
 $body-tertiary-bg: #eef0f3;
+// Bootstrap 5.3 paints cards, modals, menus, inputs and tables with --bs-body-bg; on a grey
+// canvas that makes every surface grey. --app-surface keeps them white (raised in dark).
+$app-surface: var(--app-surface);
+$card-bg: $app-surface;
+$modal-content-bg: $app-surface;
+$dropdown-bg: $app-surface;
+$input-bg: $app-surface;
+$form-check-input-bg: $app-surface;
+$list-group-bg: $app-surface;
+$pagination-bg: $app-surface;
+$accordion-bg: $app-surface;
+$popover-bg: $app-surface;
+$toast-background-color: $app-surface;
+$table-bg: transparent;
 $border-color: #e2e5ea;
 $link-decoration: none;
 $link-hover-decoration: underline;
@@ -105,8 +119,10 @@ $border-color-dark: #262c38;
 @import "bootstrap/scss/bootstrap";   // or import only the partials you use (references/theming.md)
 
 // ---- HOUSE RULES on top (small, no !important) ----------------------------------------
+:root, [data-bs-theme="light"] { --app-surface: #fff; }
+[data-bs-theme="dark"] { --app-surface: #{$body-tertiary-bg-dark}; }
 .card { box-shadow: var(--bs-box-shadow-sm); }
-[data-bs-theme="dark"] .card { --bs-card-bg: var(--bs-tertiary-bg); box-shadow: none; }
+[data-bs-theme="dark"] .card { box-shadow: none; }
 .card-header { font-weight: 600; border-bottom-color: var(--bs-border-color); }
 .table > thead th { color: var(--bs-secondary-color); font-size: $small-font-size;
   border-bottom-width: 1px; white-space: nowrap; }

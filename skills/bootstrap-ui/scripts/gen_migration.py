@@ -22,7 +22,7 @@ def render() -> str:
          "not this file. Every pair was checked against the dist CSS of bootstrap 4.6.2 and "
          "5.3.9: the old class exists in the old CSS and not in 5.3.9, the new one exists in "
          "5.3.9. `{n}` = 0-5/auto (and n1-n5 for margins), `{color}` = theme color, `{w}` = "
-         "bold/bolder/normal/light/lighter.", "",
+         "bold/bolder/normal/light/lighter, `{col}` = 1-12.", "",
          "## Order of work", "",
          "1. One Bootstrap per layout: remove the old `<link>`/`<script>` (doctor codes "
          "`double-css`, `double-js`, `js-css-mismatch`).",
