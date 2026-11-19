@@ -1,0 +1,117 @@
+// theme.scss: Bootstrap 5.3.x theme for apps with a build step (Vite / Mix / sass CLI).
+// Copy to resources/sass/theme.scss, set the brand block, import it instead of
+// "bootstrap/scss/bootstrap". Variables go BEFORE Bootstrap (all of Bootstrap's are !default).
+// Swap per client: the BRAND block only. Everything else is the house look.
+
+@import "bootstrap/scss/functions";
+
+// ---- BRAND (per client) ---------------------------------------------------------------
+$primary:   #2a52be;   // white text must reach 4.5:1 on it (run scripts/contrast.py)
+$secondary: #5b6474;
+$success:   #18794e;
+$info:      #0b6bcb;
+$warning:   #b25e09;   // dark enough that white text passes; Bootstrap's #ffc107 does not
+$danger:    #c62f3b;
+$ink:       #161b26;   // body text
+$canvas:    #f5f6f8;   // page background; cards stay white so they read as a layer
+
+// ---- TYPE -----------------------------------------------------------------------------
+$font-family-sans-serif: "Inter", "IBM Plex Sans Arabic", system-ui, -apple-system,
+  "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+$font-size-base: .9375rem;          // 15px: denser admin screens without looking small
+$line-height-base: 1.55;
+$headings-font-weight: 600;
+$headings-color: $ink;
+$h1-font-size: 2rem;
+$h2-font-size: 1.625rem;
+$h3-font-size: 1.375rem;
+$h4-font-size: 1.125rem;
+$h5-font-size: 1rem;
+$h6-font-size: .9375rem;
+// fs-* utilities keep their own scale (Bootstrap derives them from h1-h6 by default)
+$font-sizes: (1: 2.25rem, 2: 1.875rem, 3: 1.5rem, 4: 1.375rem, 5: 1.125rem, 6: 1rem);
+$small-font-size: .8125rem;
+$font-weight-semibold: 600;
+
+// ---- COLOR + SURFACES -----------------------------------------------------------------
+$body-color: $ink;
+$body-bg: $canvas;
+$body-secondary-color: rgba($ink, .68);
+$body-tertiary-bg: #eef0f3;
+$border-color: #e2e5ea;
+$link-decoration: none;
+$link-hover-decoration: underline;
+$min-contrast-ratio: 4.5;
+
+// ---- SHAPE + DEPTH --------------------------------------------------------------------
+$border-radius:     .5rem;
+$border-radius-sm:  .375rem;
+$border-radius-lg:  .75rem;
+$border-radius-xl:  1rem;
+$border-radius-xxl: 1.5rem;
+$box-shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);
+$box-shadow:    0 1px 3px rgba(16, 24, 40, .08), 0 1px 2px rgba(16, 24, 40, .04);
+$box-shadow-lg: 0 16px 32px -8px rgba(16, 24, 40, .16);
+$enable-shadows: false;             // flat controls; depth only on cards, menus, modals
+$enable-gradients: false;
+$focus-ring-width: .2rem;
+$focus-ring-opacity: .22;
+
+// ---- SPACING + COMPONENTS -------------------------------------------------------------
+$spacer: 1rem;
+$input-padding-y: .5rem;
+$input-padding-x: .75rem;
+$input-border-color: #d5d9e0;
+$input-placeholder-color: rgba($ink, .45);
+$form-label-font-weight: 500;
+$form-label-margin-bottom: .375rem;
+$btn-padding-y: .5rem;
+$btn-padding-x: 1rem;
+$btn-font-weight: 500;
+$card-border-color: $border-color;
+$card-cap-bg: transparent;
+$card-spacer-y: 1.25rem;
+$card-spacer-x: 1.25rem;
+$card-border-radius: $border-radius-lg;
+$table-cell-padding-y: .75rem;
+$table-cell-padding-x: .75rem;
+$table-th-font-weight: 600;
+$table-border-color: $border-color;
+$dropdown-border-color: $border-color;
+$dropdown-box-shadow: $box-shadow-lg;
+$dropdown-link-active-bg: $primary;
+$modal-content-border-radius: $border-radius-xl;
+$modal-content-box-shadow-sm-up: $box-shadow-lg;
+$badge-font-weight: 600;
+$badge-padding-y: .35em;
+$badge-padding-x: .6em;
+$nav-pills-border-radius: $border-radius;
+$pagination-border-radius: $border-radius;
+$alert-border-radius: $border-radius-lg;
+$toast-border-radius: $border-radius-lg;
+
+// ---- DARK MODE (data-bs-theme="dark") -------------------------------------------------
+$body-bg-dark: #0e1117;
+$body-color-dark: #e3e6ec;
+$body-secondary-color-dark: rgba(#e3e6ec, .7);
+$body-tertiary-bg-dark: #161a22;
+$border-color-dark: #262c38;
+
+@import "bootstrap/scss/variables";
+@import "bootstrap/scss/variables-dark";
+@import "bootstrap/scss/maps";
+@import "bootstrap/scss/mixins";
+@import "bootstrap/scss/utilities";
+@import "bootstrap/scss/bootstrap";   // or import only the partials you use (references/theming.md)
+
+// ---- HOUSE RULES on top (small, no !important) ----------------------------------------
+.card { box-shadow: var(--bs-box-shadow-sm); }
+[data-bs-theme="dark"] .card { --bs-card-bg: var(--bs-tertiary-bg); box-shadow: none; }
+.card-header { font-weight: 600; border-bottom-color: var(--bs-border-color); }
+.table > thead th { color: var(--bs-secondary-color); font-size: $small-font-size;
+  border-bottom-width: 1px; white-space: nowrap; }
+.table-hover > tbody > tr:hover > * { --bs-table-bg-state: rgba(var(--bs-primary-rgb), .04); }
+h1, h2, h3, .h1, .h2, .h3 { letter-spacing: -.015em; }
+[dir="rtl"] h1, [dir="rtl"] h2, [dir="rtl"] h3 { letter-spacing: 0; }   // never track Arabic
+.btn:focus-visible, .form-control:focus, .form-select:focus { outline: 0; }
+.form-text { color: var(--bs-secondary-color); }
