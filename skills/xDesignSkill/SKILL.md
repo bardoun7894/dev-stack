@@ -185,8 +185,10 @@ post API and web search.
 
 - Without `xdesign login` and without Grok, posts come only from a web search engine
   (DuckDuckGo), which indexes part of X and lags a few days; the gallery is much thinner.
-- X login needs a window (the Mac). A server gets the session with `xdesign session export`; X
-  may end a session used from a new country, then log in on the Mac and copy it again.
+- X login needs a window (the Mac). A server gets the session with `xdesign session export`.
+  Tested 2026-11-23 on MyContabo: the session was accepted (logged-in page), but X search returned
+  no posts there (the search timeline did not load in headless Chrome on a datacenter IP). Run
+  `find` on the Mac for X search; servers rely on Grok, web and pool.
 - That engine blocks an address after roughly 20 requests in a short time. One `find` makes
   2, and repeats of the same idea within a day make none (cached). When blocked, use `--links`.
 - Likes and saves measure reception, not design quality. Step 3 exists for that reason.
