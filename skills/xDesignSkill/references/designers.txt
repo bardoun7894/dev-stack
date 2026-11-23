@@ -1,0 +1,16 @@
+# Seed watchlist for xDesignSkill: X accounts that post UI/UX work.
+# One handle per line, text after # is ignored. Your own list is ~/.config/xdesign/handles.txt
+# (`xdesign.mjs handles add <handle>`), read before this one.
+# Every handle below answered `handles check` on 2026-11-23 with UI posts from 2026.
+# Re-run `handles check` before trusting it; drop accounts that went quiet.
+
+uifoysal      # dashboards and mobile apps, one shot a day, 4096 px images
+uixninja      # dashboards, often as video of the working UI
+disarto_max   # product UI
+ui8           # UI kits, many dashboard kits, often video
+pageflows     # real product flows
+jsngr         # interface experiments
+0xdesigner    # product UI
+kubadesign    # interface details
+mobbin        # weekly real-app screens
+dribbble      # mixed picks
