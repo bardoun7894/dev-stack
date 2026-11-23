@@ -200,7 +200,7 @@ post API and web search.
 
 - `scripts/xdesign.mjs` (commands), `lib.mjs` (ranking, parsing), `net.mjs` (post API, web
   search, pool), `xsearch.mjs` (X login and X search, playwright-core installed on first
-  `login`), `grok.mjs` (Grok's X search), `media.mjs` (ffmpeg, gallery). Tests: `node --test tests/xdesign.test.mjs` from the
+  `login`), `grok.mjs` (Grok's X search), `media.mjs` (ffmpeg, gallery), `save.mjs` (saving chosen posts; downloads retry, a post with no saved file is not recorded). Tests: `node --test tests/xdesign.test.mjs` from the
   dev-stack root.
 - `scripts/link-harnesses.sh`: links this skill into every agent's skills folder on the
   machine and puts `xdesign` on the PATH.
