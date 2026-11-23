@@ -42,6 +42,8 @@ const TIMEOUT_MS = Number(process.env.PR_REVIEW_TIMEOUT_MS) || 300000;
 const B_TIMEOUT_MS = 240000;
 const MIN_CONF = 0.9;
 const HAIKU_MIN_CONF = 0.95;
+// UI files (owner 2026-11-20: no Haiku on UI): front-end code, styles, Blade views.
+const UI_RE = /(^|\/)resources\/(js|css|views)\/|\.(tsx|jsx|vue|css|scss|blade\.php)$/;
 // Fix timeout: 600s + 60s per 200 changed lines, cap 1800s (env overrides: tests).
 const FIX_BASE_S = process.env.PR_REVIEW_FIX_BASE_S !== undefined ? Number(process.env.PR_REVIEW_FIX_BASE_S) : 600;
 const FIX_STEP_S = process.env.PR_REVIEW_FIX_STEP_S !== undefined ? Number(process.env.PR_REVIEW_FIX_STEP_S) : 60;
@@ -1106,7 +1108,7 @@ function gitSnapshot(dir) {
   return JSON.stringify([read("config"), read("config.worktree"), read("HEAD"), ls("hooks"), ls("info")]);
 }
 
-// One fix round (round 1 Haiku 5.5, later rounds Sonnet 5.5). Returns { status: "skipped"|"noop"|"rejected"|"pushed"|"error", reason?, sha?, round? }.
+// One fix round (round 1 Haiku 5.5, later rounds Sonnet 5.5; Opus 5.5 in every round when the PR touches UI files). Returns { status: "skipped"|"noop"|"rejected"|"pushed"|"error", reason?, sha?, round? }.
 function autoFix(repo, n, r) {
   const skipped = (reason) => ({ status: "skipped", reason });
   if (listedIn("no-autofix.txt", [repo, `${repo}#${n}`])) return skipped("no-autofix");
@@ -1119,8 +1121,10 @@ function autoFix(repo, n, r) {
   const fr = fixRound(repo, n, r.sha, v.comments);
   if (!fr.ok) return skipped(fr.reason);
   const round = fr.round;
-  const model = round === 1 ? "claude-haiku-5-5" : "claude-sonnet-5-5";
-  const modelName = round === 1 ? "Haiku 5.5" : "Sonnet 5.5";
+  // Owner 2026-11-20: Haiku made wrong UI. A PR that touches UI files is fixed by Opus 5.5 in every round.
+  const prUi = (r.files ?? []).some((f) => UI_RE.test(f.path));
+  const model = prUi ? "claude-opus-5-5" : round === 1 ? "claude-haiku-5-5" : "claude-sonnet-5-5";
+  const modelName = prUi ? "Opus 5.5" : round === 1 ? "Haiku 5.5" : "Sonnet 5.5";
   // The merge gate already blocks a PR with a risky path, so a fix there may touch risky paths too (a human merges it).
   const prRisky = (r.files ?? []).some((f) => RISKY_RE.test(f.path));
   if (v.state && v.state !== "OPEN") return skipped("not-open");
