@@ -17,7 +17,7 @@ const { loadPool, savePool } = await import(join(S, 'net.mjs'));
 
 const NOW = Date.parse('2026-11-23T12:00:00Z');
 const post = (text, daysAgo = 1, extra = {}) => ({
-  id: String(Math.round(daysAgo * 1000)), handle: 'h', text, created_at: new Date(NOW - daysAgo * 864e5).toISOString(),
+  id: String(Math.round(daysAgo * 1000)), handle: 'h_design', text, created_at: new Date(NOW - daysAgo * 864e5).toISOString(),
   likes: 10, views: 1000, media: [{ type: 'photo', url: 'u', width: 100, height: 100 }], ...extra,
 });
 
@@ -152,11 +152,11 @@ test('a well received post of another project type passes an exact match nobody 
 
 test('rankPosts drops duplicate ids, caps posts per author, filters by likes, sorts on request', () => {
   const posts = [
-    post('Bank dashboard one', 1, { id: 'a1', handle: 'A', likes: 50 }),
-    post('Bank dashboard two', 2, { id: 'a2', handle: 'a', likes: 40 }),
-    post('Bank dashboard three', 3, { id: 'a3', handle: 'A', likes: 30 }),
-    post('Bank dashboard other', 4, { id: 'b1', handle: 'B', likes: 5 }),
-    post('Bank dashboard one', 1, { id: 'a1', handle: 'A', likes: 50 }),
+    post('Bank dashboard one', 1, { id: 'a1', handle: 'A_ui', likes: 50 }),
+    post('Bank dashboard two', 2, { id: 'a2', handle: 'a_UI', likes: 40 }),
+    post('Bank dashboard three', 3, { id: 'a3', handle: 'A_ui', likes: 30 }),
+    post('Bank dashboard other', 4, { id: 'b1', handle: 'B_ui', likes: 5 }),
+    post('Bank dashboard one', 1, { id: 'a1', handle: 'A_ui', likes: 50 }),
   ];
   assert.equal(rankPosts(posts, 'bank dashboard', { now: NOW }).length, 4);
   assert.deepEqual(rankPosts(posts, 'bank dashboard', { now: NOW, perAuthor: 2 }).map((p) => p.id), ['a1', 'a2', 'b1']);
@@ -199,4 +199,30 @@ test('the pool keeps posts across runs: merged by id, newest copy wins, posts wi
   assert.equal(pool[1].likes, 80);
   assert.equal(pool[1].rank, undefined);
   assert.deepEqual(rankPosts(pool, 'fleet dashboard', { now: NOW }).map((p) => p.id), ['p1', 'p3']);
+});
+
+test('xQuery asks X for UI/UX media posts with a likes floor, without replies', async () => {
+  const { xQuery } = await import(join(S, 'xsearch.mjs'));
+  assert.equal(xQuery(' fleet dashboard '), 'fleet dashboard (UI OR UX OR Figma) filter:media min_faves:20 -filter:replies');
+  assert.equal(xQuery('restaurant POS order management dashboard', 0), '(restaurant OR pos) dashboard (UI OR UX OR Figma) filter:media -filter:replies');
+  assert.equal(xQuery('order management dashboard'), '(order OR management) dashboard (UI OR UX OR Figma) filter:media min_faves:20 -filter:replies');
+  assert.equal(xQuery('dashboard'), 'dashboard (UI OR UX OR Figma) filter:media min_faves:20 -filter:replies');
+  assert.equal(xQuery('banking app ui'), 'banking filter:media min_faves:20 -filter:replies');
+});
+
+test('posts that never name design work are dropped, unless --all', () => {
+  const posts = [
+    post('KAV loves Solana, the biggest order book dashboard of 2030', 1, { id: 'coin', handle: 'KavianCoin', likes: 9000 }),
+    post('Restaurant order dashboard UI, light and dark', 2, { id: 'ui', handle: 'someone' }),
+    post('Restaurant Revenue Dashboard (Light & Dark)', 2, { id: 'by-designer', handle: 'abu_uiuxdesign' }),
+  ];
+  assert.deepEqual(rankPosts(posts, 'restaurant order dashboard', { now: NOW }).map((p) => p.id), ['ui', 'by-designer']);
+  assert.equal(rankPosts(posts, 'restaurant order dashboard', { now: NOW, all: true }).length, 3);
+});
+
+test('only the opening of a post counts for the match', () => {
+  const terms = ideaTerms('restaurant pos dashboard');
+  const thread = post('Top 21 web project ideas to build your portfolio. ' + 'Ideas list. '.repeat(40) + '19. Restaurant POS dashboard UI', 1);
+  assert.equal(scorePost(thread, terms, NOW).matched, 0);
+  assert.equal(scorePost(post('Restaurant POS dashboard UI', 1), terms, NOW).matched, 8);
 });

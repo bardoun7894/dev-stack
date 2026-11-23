@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // xdesign.mjs — pull UI/UX design references from the latest X (Twitter) posts, any account.
 //
-//   xdesign find     "<idea>" [--links url,url] [--handles a,b] [--no-web] [--no-watchlist] [--no-pool]
+//   xdesign find     "<idea>" [--links url,url] [--handles a,b] [--no-x] [--no-grok] [--min-faves N]
+//                             [--no-web] [--no-watchlist] [--no-pool]
 //                             [--days N] [--min-likes N] [--sort score|likes|recent]
 //                             [--per-author N] [--limit N] [--all] [--out DIR] [--json]
 //   xdesign pick     <n>... [--from DIR] [--no-frames]      download the chosen candidates
@@ -9,11 +10,12 @@
 //   xdesign download <post-url|id>... [--out DIR] [--subject "<text>"] [--no-frames]
 //   xdesign latest   <handle>... [--limit N] [--json]
 //   xdesign handles  [list | add <handle>... | rm <handle>... | check [<handle>...]]
+//   xdesign login | logout                                  X session for X's own search
 //   xdesign doctor
 //
-// `find` gathers posts four ways, none needing an X login: web search for post links about
-// the idea (any account), the newest posts of the authors that search turned up, the newest
-// posts of a watchlist, and the pool of posts earlier runs saw. It ranks them by closeness to the idea and by how well they
+// `find` gathers posts from X's own search (only after `xdesign login`; see xsearch.mjs),
+// Grok's X search (grok.mjs), web search for post links about the idea (any account), the newest posts of the authors
+// those searches turned up, a watchlist, and the pool of posts earlier runs saw. It ranks them by closeness to the idea and by how well they
 // were received, and writes a gallery to choose from. `pick` saves the chosen ones: images
 // at original size, cut into tiles when large, real colors sampled; videos cut into frames.
 // Reference use only — see SKILL.md. Logic: lib.mjs. Network: net.mjs. ffmpeg + pages: media.mjs.
@@ -25,6 +27,8 @@ import { fileURLToPath } from 'node:url';
 import { slugify, parsePostRef, cleanHandle, parseHandleList, ideaTerms, rankPosts } from './lib.mjs';
 import { API, sleep, timeline, getPost, webDiscover, saveUrl, loadPool, savePool } from './net.mjs';
 import { hasBin, palette, tiles, videoFrames, contactSheet, galleryHtml, readme } from './media.mjs';
+import { login, logout, status as xStatus, searchX, PROFILE } from './xsearch.mjs';
+import { searchGrok, grokWhere } from './grok.mjs';
 
 export * from './lib.mjs';
 
@@ -155,6 +159,19 @@ async function gather(idea) {
   const found = await hydrate(String(flags.links || '').split(',').map(parsePostRef).filter(Boolean));
   if (found.length) log(`link ${found.length} passed post(s) with an image or video`);
 
+  const source = async (name, run) => { // run → { refs, note }; links are read, made-up ids drop out
+    const s = await run();
+    log(s.note);
+    if (!s.refs.length) return;
+    const got = await hydrate(s.refs);
+    log(`${name.padEnd(4)} ${got.length} of ${Math.min(s.refs.length, MAX_HYDRATE)} links are real posts with an image or video`);
+    found.push(...got);
+  };
+  // X's own search, only when `xdesign login` was done on this machine
+  if (!flags['no-x']) await source('x', () => searchX(idea, { minFaves: flags['min-faves'] === undefined ? 20 : int(flags['min-faves'], 0) }));
+  // Grok's X search (local grok CLI, or over ssh); about 2 to 3 minutes, cached for a day
+  if (!flags['no-grok']) await source('grok', () => searchGrok(idea, { days: int(flags.days, 90) }));
+
   if (!flags['no-web']) {
     const web = await webDiscover(idea);
     web.notes.forEach((n) => log('web  ' + n));
@@ -272,6 +289,17 @@ async function cmdHandles() {
   fs.writeFileSync(USER_FILE, user.join('\n') + '\n');
 }
 
+async function cmdLogin() {
+  const r = await login();
+  if (!r.ok) die('no X session after 5 minutes (window closed or login not finished); run xdesign login again');
+  console.log(`${r.already ? 'already logged in' : 'logged in'} (session kept in ${PROFILE}, no password stored)`);
+}
+
+async function cmdLogout() {
+  await logout();
+  console.log(`removed ${PROFILE}`);
+}
+
 async function cmdDoctor() {
   const major = parseInt(process.versions.node, 10);
   console.log(`node ${process.versions.node} ${major >= 18 ? 'ok' : 'TOO OLD (need 18+)'}`);
@@ -283,6 +311,10 @@ async function cmdDoctor() {
   const web = await webDiscover('dashboard', { max: 5 });
   console.log(`web search ${web.blocked ? 'BLOCKED for now (rate limit; pass --links or wait)' : web.refs.length ? 'ok' : 'FAIL'} (${web.notes.join('; ')})`);
   console.log(`pool ${loadPool().length} saved posts`);
+  const g = grokWhere();
+  console.log(`grok ${g ? (g.where === 'local' ? 'local CLI' : 'over ssh on ' + g.host) : 'none (no grok CLI, no ssh host)'}`);
+  const x = await xStatus();
+  console.log(`x login ${x.login ? 'yes' : 'no'}${x.note ? ' (' + x.note + ')' : ''}`);
   console.log(`project root ${projectRoot() || 'none here (pass --out)'}`);
   if (major < 18 || t.error) process.exit(1);
 }
@@ -290,14 +322,14 @@ async function cmdDoctor() {
 async function main() {
   const argv = process.argv.slice(2);
   const cmd = argv.shift();
-  const bool = new Set(['json', 'all', 'no-frames', 'no-web', 'no-watchlist', 'no-pool']);
+  const bool = new Set(['json', 'all', 'no-frames', 'no-web', 'no-watchlist', 'no-pool', 'no-x', 'no-grok']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) { const k = a.slice(2); if (bool.has(k)) flags[k] = true; else { flags[k] = argv[i + 1]; i++; } } else pos.push(a);
   }
   jsonOut = !!flags.json;
-  const cmds = { find: () => cmdFind(false), fetch: () => cmdFind(true), pick: cmdPick, latest: cmdLatest, download: cmdDownload, handles: cmdHandles, doctor: cmdDoctor };
-  if (!cmds[cmd]) die('usage: xdesign find|fetch "<idea>" | pick <n>... | download <url|id>... | latest <handle>... | handles [list|add|rm|check] | doctor', 2);
+  const cmds = { find: () => cmdFind(false), fetch: () => cmdFind(true), pick: cmdPick, latest: cmdLatest, download: cmdDownload, handles: cmdHandles, doctor: cmdDoctor, login: cmdLogin, logout: cmdLogout };
+  if (!cmds[cmd]) die('usage: xdesign find|fetch "<idea>" | pick <n>... | download <url|id>... | latest <handle>... | handles [list|add|rm|check] | login | logout | doctor', 2);
   await cmds[cmd]();
 }
 

@@ -11,6 +11,15 @@ const SCREEN_TYPES = {
   mobile: ['mobile', 'ios', 'android'],
   landing: ['landing', 'website', 'homepage', 'hero', 'web design'],
 };
+// Words too common to find a subject on their own in X search.
+export const GENERIC = new Set(['management', 'manager', 'order', 'orders', 'system', 'platform', 'tracking', 'tracker', 'data', 'smart', 'ai', 'online', 'service', 'services', 'tool', 'tools', 'business', 'web', 'modern', 'clean', 'simple', 'minimal', 'dark', 'light']);
+// A post is design work when its text names design, or its author is a designer by handle
+// (@abu_uiuxdesign posts "Restaurant Revenue Dashboard" with no design word). The screen
+// type alone is not enough: crypto and news posts say "dashboard" too.
+const DESIGN_RE = /\b(ui|ux|design(?:ed|er|ers|ing)?|figma|interface|template|ui ?kit|dribbble|behance|wireframe|mockup|prototype|landing page|web app|mobile app|app concept)\b/i;
+const DESIGNER_HANDLE_RE = /(ui|ux|design|studio|figma|pixel)/i;
+export const isDesignPost = (p) => DESIGN_RE.test(String(p.text || '')) || DESIGNER_HANDLE_RE.test(String(p.handle || ''));
+
 const POST_RE = /(?:x|twitter|fxtwitter|vxtwitter|fixupx)\.com\/([A-Za-z0-9_]{1,15})\/status(?:es)?\/(\d{5,25})/i;
 
 export const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'posts';
@@ -116,8 +125,11 @@ export function quality(post) {
 // recency (0 to 1). So a well received design of another project type (type match only) can
 // pass an exact match nobody liked, but not an exact match that was liked too. Quality and
 // recency never make an unrelated post match (see `matched`).
+// Only the opening of the text counts: a design post names its subject up front, while long
+// threads ("Top 21 project ideas...") mention every subject somewhere.
+export const HEAD_CHARS = 280;
 export function scorePost(post, terms, now = Date.now()) {
-  const text = post.text || '';
+  const text = String(post.text || '').slice(0, HEAD_CHARS);
   const subjectHits = terms.subject.filter((w) => hasWord(text, w));
   const typeHits = terms.types.filter((k) => SCREEN_TYPES[k].some((w) => hasWord(text, w)));
   const matched = subjectHits.length * 3 + typeHits.length * 2;
@@ -140,7 +152,7 @@ export function rankPosts(posts, idea, { all = false, days = 0, minLikes = 0, so
   return posts
     .filter((p) => p && p.media.length && !seen.has(p.id) && seen.add(p.id))
     .map((p) => ({ ...p, rank: scorePost(p, terms, now) }))
-    .filter((p) => (all || p.rank.matched > 0) && (!days || p.rank.ageDays <= days) && (p.likes || 0) >= minLikes)
+    .filter((p) => (all || (p.rank.matched > 0 && isDesignPost(p))) && (!days || p.rank.ageDays <= days) && (p.likes || 0) >= minLikes)
     .sort((a, b) => by(a, b) || Date.parse(b.created_at) - Date.parse(a.created_at))
     .filter((p) => {
       const k = String(p.handle).toLowerCase(), n = (perHandle.get(k) || 0) + 1;

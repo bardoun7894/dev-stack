@@ -1,6 +1,6 @@
 ---
 name: xDesignSkill
-description: "Get the UI/UX design out of the latest X (Twitter) design posts for an idea, from any account, also when the best post is about another kind of project (a healthcare dashboard as the reference for a transport dashboard). Finds posts by web search plus a watchlist, ranks them by closeness to the idea and by likes and saves, shows a numbered gallery for the user to choose from, then saves the chosen posts (images at full size cut into readable tiles with real colors sampled, videos cut into frames) and writes a design extract (tokens, layout, components, motion) mapped onto the user's own project. Also takes pasted post links. Works in any agent that can run a shell command (Claude Code, Antigravity/agy, Codex, Gemini CLI, pi, OpenCode). Triggers: an x.com or twitter.com post link with \"do it like this\", \"design like this post\", \"get the design from this post\", \"latest dashboard designs on X\", \"check the last UI posts\", \"UI inspiration from X/Twitter\", \"/xDesignSkill\", and Darija/Arabic \"دير بحال هاد التصميم\", \"شوف آخر التصاميم ف X\", \"تصميم داشبورد بحال هادا\". Not for Dribbble/Behance research (dribbble-design)."
+description: "Get the UI/UX design out of the latest X (Twitter) design posts for an idea, from any account, also when the best post is about another kind of project (a healthcare dashboard as the reference for a transport dashboard). Finds posts through X's own search (after a one-time login), Grok's X search, web search and a watchlist, ranks them by closeness to the idea and by likes and saves, shows a numbered gallery for the user to choose from, then saves the chosen posts (images at full size cut into readable tiles with real colors sampled, videos cut into frames) and writes a design extract (tokens, layout, components, motion) mapped onto the user's own project. Also takes pasted post links. Works in any agent that can run a shell command (Claude Code, Antigravity/agy, Codex, Gemini CLI, pi, OpenCode). Triggers: an x.com or twitter.com post link with \"do it like this\", \"design like this post\", \"get the design from this post\", \"latest dashboard designs on X\", \"check the last UI posts\", \"UI inspiration from X/Twitter\", \"/xDesignSkill\", and Darija/Arabic \"دير بحال هاد التصميم\", \"شوف آخر التصاميم ف X\", \"تصميم داشبورد بحال هادا\". Not for Dribbble/Behance research (dribbble-design)."
 user-invocable: true
 argument-hint: "<idea, e.g. \"transport fleet dashboard\"> | <x.com post url>..."
 ---
@@ -15,7 +15,20 @@ own content, brand and data.
 Everything runs through one command, `xdesign`, so the steps are the same in every agent.
 If `xdesign` is not on the PATH, or the shell refuses the command name, run
 `node <folder of this file>/scripts/xdesign.mjs` instead.
-It needs Node 18+ and no X login or API key; `ffmpeg` adds tiles, colors and video frames.
+It needs Node 18+. `ffmpeg` adds tiles, colors and video frames. Two optional sources make
+the search much better: an X login (step 0) and the Grok CLI.
+
+### 0. One time per machine (optional, Mac or any desktop)
+
+```bash
+xdesign login     # opens Chrome; the user logs in to X there; `xdesign logout` removes it
+xdesign doctor    # shows: grok, x login, web search, pool
+```
+
+The session lives in its own Chrome profile at `~/.config/xdesign/chrome-profile` (mode 700),
+never in the skill folder. No password is stored: the user types it in the window. Run
+`login` only when the user asks for it or agrees, since they must be at the screen. Suggest a
+spare X account: automated searching is against X's terms and can get an account flagged.
 
 ## Steps
 
@@ -39,12 +52,22 @@ what lets a good post about another business still match.
 xdesign find "transport fleet logistics dashboard"
 ```
 
-It gathers posts four ways and needs no known accounts:
+It gathers posts from these sources and needs no known accounts. Each one that is not set up
+on this machine is skipped with one log line:
 
-1. Web search for X post links about the idea (any account).
-2. The newest posts of the authors that search turned up.
-3. The newest posts of the watchlist (`references/designers.txt` + `~/.config/xdesign/handles.txt`).
-4. The pool: every post an earlier run read (`~/.cache/xdesign/pool.json`, newest 2000).
+1. X's own search, when `xdesign login` was done here: the "Top" and "Latest" results for any
+   subject word plus the screen type, UI/UX posts with images or video and 20+ likes.
+2. Grok's X search: the `grok` CLI here, else over ssh on `XDESIGN_GROK_SSH` (default
+   `MyContabo` when `~/.ssh/config` has it). About 2 to 3 minutes; cached for a day.
+3. Web search (DuckDuckGo) for X post links about the idea.
+4. The newest posts of the authors those searches turned up.
+5. The watchlist (`references/designers.txt` + `~/.config/xdesign/handles.txt`).
+6. The pool: every post an earlier run read (`~/.cache/xdesign/pool.json`, newest 2000).
+
+Every link from 1 to 3 is read through the post API before it is shown, so a link Grok made
+up, or a deleted post, never reaches the gallery. Posts whose opening text and author handle
+name no design work (UI, UX, design, Figma, template...) are dropped, which keeps out news,
+crypto and data-course posts that share the words.
 
 When the log says `web search is blocked`, the search engine is rate-limiting this address.
 The run still returns pool and watchlist posts. For fresh ones, run the two printed queries
@@ -57,7 +80,8 @@ well received one can rank above an exact match nobody liked. At most 3 posts pe
 
 Useful flags: `--days 30`, `--min-likes 50`, `--sort likes|recent`, `--per-author 0`,
 `--limit 20`, `--links url,url` (add posts you found with your own web search tool),
-`--no-web`, `--no-watchlist`, `--no-pool`, `--all` (keep posts with no word match).
+`--min-faves N` (X search likes floor, default 20), `--no-x`, `--no-grok`, `--no-web`,
+`--no-watchlist`, `--no-pool`, `--all` (keep posts with no word match or no design word).
 
 Output folder: `<project-root>/design/inspiration/<date>-x-<slug>/` (`--out DIR` overrides):
 `gallery.html`, `candidates-sheet.jpg`, `candidates.json`, `thumbs/NN.jpg`.
@@ -133,7 +157,8 @@ extract (`/unslop`, `/design-check` where present). Close the task log entry.
 ## Commands
 
 ```
-xdesign find     "<idea>" [--links url,url] [--handles a,b] [--no-web] [--no-watchlist] [--no-pool]
+xdesign find     "<idea>" [--links url,url] [--handles a,b] [--min-faves N] [--no-x] [--no-grok]
+                          [--no-web] [--no-watchlist] [--no-pool]
                           [--days N] [--min-likes N] [--sort score|likes|recent]
                           [--per-author N] [--limit N] [--all] [--out DIR] [--json]
 xdesign pick     <n>... [--from DIR] [--no-frames]
@@ -141,6 +166,7 @@ xdesign fetch    "<idea>" [find flags] [--top N]
 xdesign download <post-url|id>... [--out DIR] [--subject "<text>"] [--no-frames]
 xdesign latest   <handle>... [--limit N] [--json]
 xdesign handles  [list | add <handle>... | rm <handle>... | check [<handle>...]]
+xdesign login | logout
 xdesign doctor
 ```
 
@@ -149,9 +175,9 @@ post API and web search.
 
 ## Limits to tell the user about
 
-- X's own search needs a login and is not used. Posts are found through a web search engine
-  (DuckDuckGo), which indexes only part of X and lags a few days behind; a post it has not
-  indexed is only found if its author is on the watchlist or the link is passed in.
+- Without `xdesign login` and without Grok, posts come only from a web search engine
+  (DuckDuckGo), which indexes part of X and lags a few days; the gallery is much thinner.
+- X login works only where a window can open (the Mac). Servers get Grok, web and pool.
 - That engine blocks an address after roughly 20 requests in a short time. One `find` makes
   2, and repeats of the same idea within a day make none (cached). When blocked, use `--links`.
 - Likes and saves measure reception, not design quality. Step 3 exists for that reason.
@@ -173,7 +199,8 @@ post API and web search.
 ## Files
 
 - `scripts/xdesign.mjs` (commands), `lib.mjs` (ranking, parsing), `net.mjs` (post API, web
-  search), `media.mjs` (ffmpeg, gallery). Tests: `node --test tests/xdesign.test.mjs` from the
+  search, pool), `xsearch.mjs` (X login and X search, playwright-core installed on first
+  `login`), `grok.mjs` (Grok's X search), `media.mjs` (ffmpeg, gallery). Tests: `node --test tests/xdesign.test.mjs` from the
   dev-stack root.
 - `scripts/link-harnesses.sh`: links this skill into every agent's skills folder on the
   machine and puts `xdesign` on the PATH.
