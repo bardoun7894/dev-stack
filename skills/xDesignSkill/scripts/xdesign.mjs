@@ -26,7 +26,8 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { slugify, parsePostRef, cleanHandle, parseHandleList, ideaTerms, rankPosts } from './lib.mjs';
 import { API, sleep, timeline, getPost, webDiscover, saveUrl, loadPool, savePool } from './net.mjs';
-import { hasBin, palette, tiles, videoFrames, contactSheet, galleryHtml, readme } from './media.mjs';
+import { hasBin, contactSheet, galleryHtml } from './media.mjs';
+import { savePosts as saveAll } from './save.mjs';
 import { login, logout, status as xStatus, searchX, PROFILE } from './xsearch.mjs';
 import { searchGrok, grokWhere } from './grok.mjs';
 
@@ -36,8 +37,6 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SEED_FILE = path.join(HERE, '..', 'references', 'designers.txt');
 const USER_FILE = process.env.XDESIGN_HANDLES || path.join(os.homedir(), '.config', 'xdesign', 'handles.txt');
 const MAX_HANDLES = 30, MAX_DOWNLOADS = 30, MAX_HYDRATE = 30, MAX_NEW_AUTHORS = 6, HANDLE_DELAY_MS = 900;
-const MAX_VIDEO_MB = 80, MAX_VIDEO_SEC = 240;
-const TILE_MIN_WIDTH = 2600; // wider than this, small labels are lost when the whole image is viewed at once
 
 const flags = {}; const pos = [];
 let jsonOut = false;
@@ -68,57 +67,8 @@ function outDir(subject) {
   return path.join(root, 'design', 'inspiration', `${new Date().toISOString().slice(0, 10)}-x-${slugify(subject)}`);
 }
 
-// ── saving chosen posts ─────────────────────────────────────────────────
-async function savePosts(posts, subject, dir = outDir(subject)) {
-  fs.mkdirSync(dir, { recursive: true });
-  const manifestFile = path.join(dir, 'manifest.json');
-  const manifest = fs.existsSync(manifestFile) ? readJson(manifestFile) : { source: 'x', subjects: [], posts: [] };
-  if (!manifest.subjects.includes(subject)) manifest.subjects.push(subject);
-  const ff = hasBin('ffmpeg');
-  if (!ff) log('ffmpeg not found: no tiles, no colors, no video frames');
-  let n = manifest.posts.reduce((m, p) => Math.max(m, p.n), 0), added = 0;
-
-  for (const post of posts.slice(0, MAX_DOWNLOADS)) {
-    if (manifest.posts.some((p) => p.id === post.id)) { log(`skip ${post.id} (already saved)`); continue; }
-    n++;
-    const stem = `${String(n).padStart(2, '0')}-${post.handle}-${post.id}`;
-    const entry = { n, id: post.id, url: post.url, handle: post.handle, author: post.author, text: post.text, created_at: post.created_at, likes: post.likes, views: post.views, bookmarks: post.bookmarks, rank: post.rank || null, media: [] };
-    for (let k = 0; k < post.media.length; k++) {
-      const m = post.media[k];
-      const base = path.join(dir, post.media.length > 1 ? `${stem}-${k + 1}` : stem);
-      try {
-        if (m.type === 'photo') {
-          const file = `${base}.${(m.url.match(/\.(jpg|jpeg|png|webp)/i)?.[1] || 'jpg').toLowerCase()}`;
-          const item = { type: 'photo', file: path.basename(file), width: m.width, height: m.height, bytes: await saveUrl(m.url, file), source: m.url };
-          if (ff) {
-            item.palette = palette(file);
-            if ((m.width || 0) >= TILE_MIN_WIDTH) item.tiles = tiles(file, base);
-          }
-          entry.media.push(item);
-        } else {
-          if ((m.duration || 0) > MAX_VIDEO_SEC) throw new Error(`video is ${Math.round(m.duration)} s, over the ${MAX_VIDEO_SEC} s cap`);
-          const file = `${base}.mp4`;
-          const item = { type: 'video', file: path.basename(file), width: m.width, height: m.height, bytes: await saveUrl(m.url, file, MAX_VIDEO_MB), source: m.url };
-          if (ff && !flags['no-frames']) {
-            Object.assign(item, videoFrames(file, base, m.duration));
-            if (item.frames?.length) item.palette = palette(path.join(dir, item.frames[Math.floor(item.frames.length / 2)]));
-          }
-          fs.writeFileSync(path.join(dir, '.gitignore'), '*.mp4\n');
-          entry.media.push(item);
-        }
-      } catch (e) {
-        entry.media.push({ type: m.type, error: e.message, source: m.url });
-        log(`  ${post.id} media ${k + 1}: ${e.message}`);
-      }
-    }
-    manifest.posts.push(entry); added++;
-    log(`saved ${stem}  ${entry.media.map((x) => x.error ? 'ERR' : x.type === 'photo' ? `${x.width}x${x.height}${x.tiles ? ' +' + x.tiles.length + ' tiles' : ''}` : `video ${x.duration ?? '?'}s ${x.frames?.length ?? 0} frames`).join(', ')}`);
-  }
-  manifest.generated = new Date().toISOString();
-  fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
-  fs.writeFileSync(path.join(dir, 'README.md'), readme(manifest));
-  console.log(`${added} new post(s) saved, ${manifest.posts.length} in folder\n${dir}`);
-}
+// Saving lives in save.mjs; failed downloads are not recorded, so a rerun retries them.
+const savePosts = (posts, subject, dir = outDir(subject)) => saveAll(posts, subject, dir, { noFrames: !!flags['no-frames'], log });
 
 function printPosts(posts) {
   if (jsonOut) { console.log(JSON.stringify(posts, null, 2)); return; }

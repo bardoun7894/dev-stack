@@ -226,3 +226,34 @@ test('only the opening of a post counts for the match', () => {
   assert.equal(scorePost(thread, terms, NOW).matched, 0);
   assert.equal(scorePost(post('Restaurant POS dashboard UI', 1), terms, NOW).matched, 8);
 });
+
+test('save: a 5xx download is retried; a post whose files all failed is not recorded and is saved on the next run', async () => {
+  const { createServer } = await import('node:http');
+  const { readFileSync } = await import('node:fs');
+  const { savePosts } = await import(join(S, 'save.mjs'));
+  const hits = new Map(); let bOk = false;
+  const srv = createServer((req, res) => {
+    const n = (hits.get(req.url) || 0) + 1; hits.set(req.url, n);
+    if (req.url === '/a.jpg' && n === 1) { res.writeHead(503); return res.end(); }
+    if (req.url === '/b.jpg' && !bOk) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'content-type': 'image/jpeg' }); res.end('not-really-a-jpeg');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const mk = (id, file) => post('dashboard UI', 1, { id, handle: 'h_design', url: `https://x.com/h_design/status/${id}`, media: [{ type: 'photo', url: `${base}/${file}`, width: 100, height: 100 }] });
+  const dir = mkdtempSync(join(tmpdir(), 'xdesign-save-'));
+  const logs = []; const log = (s) => logs.push(s);
+  try {
+    const first = await savePosts([mk('111', 'a.jpg'), mk('222', 'b.jpg')], 'test', dir, { log });
+    assert.deepEqual([first.added, first.failed], [1, 1]);
+    assert.equal(hits.get('/a.jpg'), 2, 'the 503 was retried once');
+    assert.equal(hits.get('/b.jpg'), 1, 'a 404 is not retried');
+    assert.ok(logs.some((l) => /FAILED .*222/.test(l)));
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')).posts.map((p) => p.id), ['111']);
+    bOk = true;
+    const second = await savePosts([mk('111', 'a.jpg'), mk('222', 'b.jpg')], 'test', dir, { log });
+    assert.deepEqual([second.added, second.failed], [1, 0]);
+    const m = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
+    assert.deepEqual(m.posts.map((p) => [p.n, p.id]), [[1, '111'], [2, '222']]);
+  } finally { srv.close(); }
+});

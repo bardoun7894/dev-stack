@@ -97,11 +97,21 @@ export async function webDiscover(idea, { max = 40 } = {}) {
   return { refs: [...refs.values()], notes, blocked, queries };
 }
 
+// Downloads retry twice on a network error or a 5xx answer (pbs.twimg.com and video.twimg.com
+// drop connections now and then); a 4xx or an over-cap size fails at once.
 export async function saveUrl(url, file, maxMb = 0) {
-  const res = await fetch(url, { headers: { 'user-agent': UA }, signal: AbortSignal.timeout(120000) });
-  if (!res.ok) throw new Error(`http ${res.status} for ${url}`);
-  const len = Number(res.headers.get('content-length') || 0);
-  if (maxMb && len > maxMb * 1048576) throw new Error(`${(len / 1048576).toFixed(0)} MB is over the ${maxMb} MB cap`);
-  fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
-  return fs.statSync(file).size;
+  let last;
+  for (const wait of [0, 2000, 6000]) {
+    if (wait) await sleep(wait);
+    let res;
+    try { res = await fetch(url, { headers: { 'user-agent': UA }, signal: AbortSignal.timeout(120000) }); }
+    catch (e) { last = new Error(`${e.message}${e.cause?.code ? ' (' + e.cause.code + ')' : ''} for ${url}`); continue; }
+    if (res.status >= 500) { last = new Error(`http ${res.status} for ${url}`); continue; }
+    if (!res.ok) throw new Error(`http ${res.status} for ${url}`);
+    const len = Number(res.headers.get('content-length') || 0);
+    if (maxMb && len > maxMb * 1048576) throw new Error(`${(len / 1048576).toFixed(0)} MB is over the ${maxMb} MB cap`);
+    try { fs.writeFileSync(file, Buffer.from(await res.arrayBuffer())); } catch (e) { last = e; continue; }
+    return fs.statSync(file).size;
+  }
+  throw last;
 }
