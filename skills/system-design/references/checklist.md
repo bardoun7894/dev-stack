@@ -9,6 +9,7 @@ Run before the hard stop. One line per check.
 - [ ] Every new service, datastore, queue, provider or host has a D-code saying why reuse failed.
 - [ ] Container diagram shows every component named elsewhere in the file.
 - [ ] Capacity section shows arithmetic and a cost per unit for AI/media calls.
+- [ ] For AI/LLM features: Cold static knowledge (CAG prefix, byte-identical, prompt-cached) is separated from Hot dynamic/retrieved data (RAG, after the prefix) per `rag-cag`.
 - [ ] Each entity has one owning component, a retention period and a backup.
 - [ ] Critical paths show timeouts, retries and idempotency keys on every external call.
 - [ ] Failure table covers each external provider and each datastore; SPOFs listed; restore test named.
