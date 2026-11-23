@@ -11,6 +11,7 @@
 //   xdesign latest   <handle>... [--limit N] [--json]
 //   xdesign handles  [list | add <handle>... | rm <handle>... | check [<handle>...]]
 //   xdesign login | logout                                  X session for X's own search
+//   xdesign session export | ssh <host> xdesign session import   copy that session to a server
 //   xdesign doctor
 //
 // `find` gathers posts from X's own search (only after `xdesign login`; see xsearch.mjs),
@@ -28,7 +29,7 @@ import { slugify, parsePostRef, cleanHandle, parseHandleList, ideaTerms, rankPos
 import { API, sleep, timeline, getPost, webDiscover, saveUrl, loadPool, savePool } from './net.mjs';
 import { hasBin, contactSheet, galleryHtml } from './media.mjs';
 import { savePosts as saveAll } from './save.mjs';
-import { login, logout, status as xStatus, searchX, PROFILE } from './xsearch.mjs';
+import { login, logout, status as xStatus, searchX, exportSession, importSession, PROFILE } from './xsearch.mjs';
 import { searchGrok, grokWhere } from './grok.mjs';
 
 export * from './lib.mjs';
@@ -245,6 +246,19 @@ async function cmdLogin() {
   console.log(`${r.already ? 'already logged in' : 'logged in'} (session kept in ${PROFILE}, no password stored)`);
 }
 
+async function cmdSession() {
+  const sub = pos[0];
+  if (sub === 'export') {
+    if (process.stdout.isTTY) die('refusing to print the X session to a terminal; pipe it: xdesign session export | ssh <host> xdesign session import', 2);
+    process.stdout.write(JSON.stringify(await exportSession()));
+  } else if (sub === 'import') {
+    let raw = ''; for await (const chunk of process.stdin) raw += chunk;
+    const r = await importSession(JSON.parse(raw || '{}'));
+    if (!r.ok) die('cookies imported but X session not readable back');
+    console.log(`X session imported (${r.count} cookies) into ${PROFILE}`);
+  } else die('usage: xdesign session export | ssh <host> xdesign session import', 2);
+}
+
 async function cmdLogout() {
   await logout();
   console.log(`removed ${PROFILE}`);
@@ -278,8 +292,8 @@ async function main() {
     if (a.startsWith('--')) { const k = a.slice(2); if (bool.has(k)) flags[k] = true; else { flags[k] = argv[i + 1]; i++; } } else pos.push(a);
   }
   jsonOut = !!flags.json;
-  const cmds = { find: () => cmdFind(false), fetch: () => cmdFind(true), pick: cmdPick, latest: cmdLatest, download: cmdDownload, handles: cmdHandles, doctor: cmdDoctor, login: cmdLogin, logout: cmdLogout };
-  if (!cmds[cmd]) die('usage: xdesign find|fetch "<idea>" | pick <n>... | download <url|id>... | latest <handle>... | handles [list|add|rm|check] | login | logout | doctor', 2);
+  const cmds = { find: () => cmdFind(false), fetch: () => cmdFind(true), pick: cmdPick, latest: cmdLatest, download: cmdDownload, handles: cmdHandles, doctor: cmdDoctor, login: cmdLogin, logout: cmdLogout, session: cmdSession };
+  if (!cmds[cmd]) die('usage: xdesign find|fetch "<idea>" | pick <n>... | download <url|id>... | latest <handle>... | handles [list|add|rm|check] | login | logout | session export|import | doctor', 2);
   await cmds[cmd]();
 }
 

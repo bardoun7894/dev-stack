@@ -257,3 +257,10 @@ test('save: a 5xx download is retried; a post whose files all failed is not reco
     assert.deepEqual(m.posts.map((p) => [p.n, p.id]), [[1, '111'], [2, '222']]);
   } finally { srv.close(); }
 });
+
+test('session import takes only x.com / twitter.com cookies and needs the session cookie', async () => {
+  const { importSession } = await import(join(S, 'xsearch.mjs'));
+  await assert.rejects(importSession({ cookies: [{ domain: '.evil.com', name: 'auth_token', value: 'v' }] }), /no X session cookie/);
+  await assert.rejects(importSession({ cookies: [{ domain: '.x.com', name: 'ct0', value: 'v' }] }), /no X session cookie/);
+  await assert.rejects(importSession({}), /no X session cookie/);
+});

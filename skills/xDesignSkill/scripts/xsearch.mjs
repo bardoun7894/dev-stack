@@ -67,6 +67,30 @@ export async function login() {
   } finally { await ctx.close().catch(() => {}); }
 }
 
+// Move the X session to a machine with no screen (a server): `xdesign session export | ssh host
+// xdesign session import`. Only x.com / twitter.com cookies travel, through the pipe; nothing
+// is written outside the two profiles. The caller refuses to print them to a terminal.
+const isX = (c) => /(^|\.)(x|twitter)\.com$/.test(String(c.domain).replace(/^\./, ''));
+export async function exportSession() {
+  if (!fs.existsSync(PROFILE)) throw new Error('no login profile here (run: xdesign login)');
+  const pw = await loadPlaywright();
+  if (!pw) throw new Error('playwright-core not installed (run: xdesign login)');
+  const ctx = await openProfile(pw, true);
+  try {
+    if (!(await hasAuth(ctx))) throw new Error('profile has no X session (run: xdesign login)');
+    return { cookies: (await ctx.cookies()).filter(isX) };
+  } finally { await ctx.close().catch(() => {}); }
+}
+export async function importSession(data) {
+  const cookies = (data?.cookies || []).filter(isX);
+  if (!cookies.some((c) => c.name === 'auth_token' && c.value)) throw new Error('input has no X session cookie');
+  const pw = await loadPlaywright({ install: true });
+  if (!pw) throw new Error('playwright-core could not be installed');
+  const ctx = await openProfile(pw, true);
+  try { await ctx.addCookies(cookies); return { ok: await hasAuth(ctx), count: cookies.length }; }
+  finally { await ctx.close().catch(() => {}); }
+}
+
 export async function logout() {
   if (fs.existsSync(PROFILE)) fs.rmSync(PROFILE, { recursive: true, force: true });
 }
