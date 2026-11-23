@@ -3,10 +3,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const { parsePostRef, cleanHandle, parseHandleList, normalizePost, ideaTerms, scorePost, rankPosts, quantize, slugify } =
-  await import(join(ROOT, 'skills', 'xDesignSkill', 'scripts', 'xdesign.mjs'));
+const S = join(ROOT, 'skills', 'xDesignSkill', 'scripts');
+// Before the first import: net.mjs reads the cache folder once, when it loads. Without this the
+// pool test would write its fixtures into the real ~/.cache/xdesign.
+process.env.XDESIGN_CACHE = mkdtempSync(join(tmpdir(), 'xdesign-test-'));
+const { parsePostRef, extractPostRefs, searchQueries, cleanHandle, parseHandleList, normalizePost, ideaTerms, quality, scorePost, rankPosts, quantize, slugify } = await import(join(S, 'xdesign.mjs'));
+const { galleryHtml } = await import(join(S, 'media.mjs'));
+const { loadPool, savePool } = await import(join(S, 'net.mjs'));
 
 const NOW = Date.parse('2026-11-23T12:00:00Z');
 const post = (text, daysAgo = 1, extra = {}) => ({
@@ -72,9 +79,9 @@ test('rankPosts drops unmatched posts and posts without media, honours --days an
   assert.equal(rankPosts(posts, 'insurance dashboard', { now: NOW, all: true }).length, 3);
 });
 
-test('recency and reach order matched posts but never make an unrelated post match', () => {
+test('recency and quality order matched posts but never make an unrelated post match', () => {
   const terms = ideaTerms('bank dashboard');
-  const viral = scorePost(post('Puzzle game', 0, { views: 5_000_000 }), terms, NOW);
+  const viral = scorePost(post('Puzzle game', 0, { likes: 90000, bookmarks: 50000 }), terms, NOW);
   assert.equal(viral.matched, 0);
   const fresh = scorePost(post('Bank dashboard', 1), terms, NOW);
   const old = scorePost(post('Bank dashboard', 300), terms, NOW);
@@ -97,6 +104,7 @@ test('normalizePost reads an FxTwitter status: original photo, best mp4 variant'
   assert.equal(p.text, 'Dash');
   assert.equal(p.created_at, '2026-11-22T16:57:40.000Z');
   assert.deepEqual(p.media.map((m) => [m.type, m.url]), [['photo', 'https://pbs.twimg.com/media/X.jpg?name=orig'], ['video', 'https://v/high.mp4']]);
+  assert.equal(p.media[0].thumb, 'https://pbs.twimg.com/media/X.jpg?name=small');
 });
 
 test('normalizePost reads the syndication shape (single-post fallback)', () => {
@@ -106,7 +114,7 @@ test('normalizePost reads the syndication shape (single-post fallback)', () => {
   });
   assert.equal(p.url, 'https://x.com/b/status/2');
   assert.equal(p.text, 'Care & Hub');
-  assert.deepEqual(p.media, [{ type: 'photo', url: 'https://pbs.twimg.com/media/Y.jpg?name=orig', width: 4096, height: 3072 }]);
+  assert.deepEqual(p.media, [{ type: 'photo', url: 'https://pbs.twimg.com/media/Y.jpg?name=orig', thumb: 'https://pbs.twimg.com/media/Y.jpg?name=small', width: 4096, height: 3072 }]);
 });
 
 test('quantize returns the dominant colors with shares, merging near-identical ones', () => {
@@ -124,4 +132,71 @@ test('quantize returns the dominant colors with shares, merging near-identical o
 test('slugify makes a safe folder part', () => {
   assert.equal(slugify('Transport & Fleet / Dashboard!'), 'transport-fleet-dashboard');
   assert.equal(slugify('داشبورد'), 'posts');
+});
+
+test('quality rewards likes and saves, capped at 3, and works without a saves count', () => {
+  assert.equal(quality({ likes: 0, bookmarks: 0 }), 0);
+  assert.equal(quality({ likes: 99, bookmarks: 99 }), 2);
+  assert.equal(quality({ likes: 999, bookmarks: null }), 3);
+  assert.equal(quality({ likes: 9_999_999, bookmarks: 9_999_999 }), 3);
+  assert.ok(quality({ likes: 399, bookmarks: 443 }) > quality({ likes: 15, bookmarks: 7 }));
+});
+
+test('a well received post of another project type passes an exact match nobody liked, not a liked one', () => {
+  const strong = post('Healthcare analytics dashboard', 5, { id: 'strong', likes: 900, bookmarks: 800 });
+  const weak = post('Fleet dashboard', 5, { id: 'weak', likes: 1, bookmarks: 0 });
+  const liked = post('Fleet dashboard', 5, { id: 'liked', likes: 100, bookmarks: 50 });
+  assert.deepEqual(rankPosts([weak, strong], 'fleet dashboard', { now: NOW }).map((p) => p.id), ['strong', 'weak']);
+  assert.deepEqual(rankPosts([strong, liked], 'fleet dashboard', { now: NOW }).map((p) => p.id), ['liked', 'strong']);
+});
+
+test('rankPosts drops duplicate ids, caps posts per author, filters by likes, sorts on request', () => {
+  const posts = [
+    post('Bank dashboard one', 1, { id: 'a1', handle: 'A', likes: 50 }),
+    post('Bank dashboard two', 2, { id: 'a2', handle: 'a', likes: 40 }),
+    post('Bank dashboard three', 3, { id: 'a3', handle: 'A', likes: 30 }),
+    post('Bank dashboard other', 4, { id: 'b1', handle: 'B', likes: 5 }),
+    post('Bank dashboard one', 1, { id: 'a1', handle: 'A', likes: 50 }),
+  ];
+  assert.equal(rankPosts(posts, 'bank dashboard', { now: NOW }).length, 4);
+  assert.deepEqual(rankPosts(posts, 'bank dashboard', { now: NOW, perAuthor: 2 }).map((p) => p.id), ['a1', 'a2', 'b1']);
+  assert.deepEqual(rankPosts(posts, 'bank dashboard', { now: NOW, minLikes: 35 }).map((p) => p.id), ['a1', 'a2']);
+  assert.deepEqual(rankPosts(posts, 'bank dashboard', { now: NOW, sort: 'recent' }).map((p) => p.id), ['a1', 'a2', 'a3', 'b1']);
+});
+
+test('extractPostRefs finds post links in a search page, encoded or not, once each', () => {
+  const html = `<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fx.com%2FIamMuhammadMuiz%2Fstatus%2F2095957126229148112&amp;rut=1">a</a>
+    <a href="https://x.com/IamMuhammadMuiz/status/2095957126229148112">again</a>
+    <a href="https://twitter.com/uifoysal/status/2123467455419007426?s=20">b</a>
+    <a href="https://x.com/i/status/111111111111">not an author link</a> <a href="https://x.com/search?q=dashboard">search</a>`;
+  assert.deepEqual(extractPostRefs(html), [{ id: '2095957126229148112', handle: 'IamMuhammadMuiz' }, { id: '2123467455419007426', handle: 'uifoysal' }]);
+  assert.deepEqual(extractPostRefs('nothing here'), []);
+});
+
+test('searchQueries asks for the idea, and for the screen type alone when there is a subject', () => {
+  assert.deepEqual(searchQueries('transport fleet dashboard'), ['site:x.com transport fleet dashboard UI design', 'site:x.com "dashboard" UI UX design']);
+  assert.deepEqual(searchQueries('dashboard'), ['site:x.com dashboard UI design']);
+  assert.deepEqual(searchQueries('restaurant menu'), ['site:x.com restaurant menu UI design']);
+});
+
+test('galleryHtml numbers the cards, links the post, and escapes post text', () => {
+  const html = galleryHtml('fleet <dash>', [{ n: 1, url: 'https://x.com/a/status/1', handle: 'a', text: '<script>alert(1)</script> "Fleet"', created_at: '2026-11-01T00:00:00.000Z', likes: 1500, bookmarks: 20, views: null,
+    media: [{ type: 'photo', url: 'u', thumb: 'https://pbs.twimg.com/media/X.jpg?name=small' }], thumbFile: 'thumbs/01.jpg', rank: { subjectHits: ['fleet'], typeHits: ['dashboard'], score: 7.1 } }]);
+  assert.ok(html.includes('<h1>fleet &lt;dash&gt;</h1>'));
+  assert.ok(html.includes('src="thumbs/01.jpg"'));
+  assert.ok(html.includes('href="https://x.com/a/status/1"'));
+  assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt; &quot;Fleet&quot;'));
+  assert.ok(!html.includes('<script>'));
+  assert.ok(html.includes('1.5k likes') && html.includes('? views') && html.includes('match: fleet, type: dashboard'));
+});
+
+test('the pool keeps posts across runs: merged by id, newest copy wins, posts without media left out', () => {
+  assert.deepEqual(loadPool(), []);
+  assert.equal(savePool([post('Fleet dashboard', 3, { id: 'p1', likes: 5 }), post('No media', 1, { id: 'p2', media: [] })]), 1);
+  assert.equal(savePool([post('Fleet dashboard', 3, { id: 'p1', likes: 80, rank: { score: 9 } }), post('Bank dashboard', 1, { id: 'p3' })]), 2);
+  const pool = loadPool();
+  assert.deepEqual(pool.map((p) => p.id), ['p3', 'p1']); // newest first
+  assert.equal(pool[1].likes, 80);
+  assert.equal(pool[1].rank, undefined);
+  assert.deepEqual(rankPosts(pool, 'fleet dashboard', { now: NOW }).map((p) => p.id), ['p1', 'p3']);
 });

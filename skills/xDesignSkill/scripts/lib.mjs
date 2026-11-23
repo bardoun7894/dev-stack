@@ -1,6 +1,6 @@
 // lib.mjs — pure logic of xdesign.mjs: reading post links and handles, one shape for a post,
-// ranking posts against an idea, dominant colors. No network, no files. Tested in
-// tests/xdesign.test.mjs.
+// web-search queries, ranking posts against an idea, dominant colors. No network, no files.
+// Tested in tests/xdesign.test.mjs.
 
 // Words that say nothing about the subject of a design post.
 const STOP = new Set(['ui', 'ux', 'design', 'designs', 'the', 'a', 'an', 'and', 'or', 'for', 'of', 'to', 'in', 'on', 'with', 'my', 'our', 'new', 'like', 'app', 'apps', 'concept', 'screen', 'screens', 'page']);
@@ -11,15 +11,26 @@ const SCREEN_TYPES = {
   mobile: ['mobile', 'ios', 'android'],
   landing: ['landing', 'website', 'homepage', 'hero', 'web design'],
 };
+const POST_RE = /(?:x|twitter|fxtwitter|vxtwitter|fixupx)\.com\/([A-Za-z0-9_]{1,15})\/status(?:es)?\/(\d{5,25})/i;
 
-// ── pure helpers (exported for tests) ───────────────────────────────────
 export const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'posts';
 
 export function parsePostRef(ref) {
   const s = String(ref).trim();
   if (/^\d{5,25}$/.test(s)) return { id: s, handle: null };
-  const m = s.match(/(?:x|twitter|fxtwitter|vxtwitter|fixupx)\.com\/([A-Za-z0-9_]{1,15})\/status(?:es)?\/(\d{5,25})/i);
+  const m = s.match(POST_RE);
   return m ? { id: m[2], handle: m[1] } : null;
+}
+
+// Every X post link inside a search result page (links may be URL-encoded once or twice).
+export function extractPostRefs(html) {
+  let text = String(html);
+  for (let i = 0; i < 2; i++) text = text.replace(/%(2F|3A|3F|3D|25)/gi, (m) => decodeURIComponent(m));
+  const seen = new Map();
+  for (const m of text.matchAll(new RegExp(POST_RE.source, 'gi'))) {
+    if (!['i', 'intent', 'search', 'hashtag', 'home'].includes(m[1].toLowerCase()) && !seen.has(m[2])) seen.set(m[2], { id: m[2], handle: m[1] });
+  }
+  return [...seen.values()];
 }
 
 export function cleanHandle(h) {
@@ -42,13 +53,15 @@ function pickVideoUrl(m) {
   return list.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0].url;
 }
 
+const smallOf = (url) => String(url).replace(/[?&]name=\w+/, '') + '?name=small';
+
 // One shape for a post, from either an FxTwitter status object or the X syndication one.
 export function normalizePost(t) {
   if (!t) return null;
   if (t.mediaDetails || t.id_str) { // syndication (fallback for a single post)
     const media = (t.mediaDetails || []).map((m) => m.type === 'photo'
-      ? { type: 'photo', url: m.media_url_https + '?name=orig', width: m.original_info?.width, height: m.original_info?.height }
-      : { type: 'video', url: pickVideoUrl({ variants: m.video_info?.variants }), width: m.original_info?.width, height: m.original_info?.height, duration: (m.video_info?.duration_millis || 0) / 1000 || undefined });
+      ? { type: 'photo', url: m.media_url_https + '?name=orig', thumb: smallOf(m.media_url_https), width: m.original_info?.width, height: m.original_info?.height }
+      : { type: 'video', url: pickVideoUrl({ variants: m.video_info?.variants }), thumb: m.media_url_https || null, width: m.original_info?.width, height: m.original_info?.height, duration: (m.video_info?.duration_millis || 0) / 1000 || undefined });
     return {
       id: t.id_str, handle: t.user?.screen_name, author: t.user?.name, url: `https://x.com/${t.user?.screen_name}/status/${t.id_str}`,
       text: String(t.text || '').replace(/&amp;/g, '&').replace(/\s*https:\/\/t\.co\/\S+/g, '').trim(),
@@ -57,8 +70,8 @@ export function normalizePost(t) {
     };
   }
   const media = (t.media?.all || []).map((m) => m.type === 'photo'
-    ? { type: 'photo', url: m.url, width: m.width, height: m.height }
-    : { type: 'video', url: pickVideoUrl(m), width: m.width, height: m.height, duration: m.duration });
+    ? { type: 'photo', url: m.url, thumb: smallOf(m.url), width: m.width, height: m.height }
+    : { type: 'video', url: pickVideoUrl(m), thumb: m.thumbnail_url || null, width: m.width, height: m.height, duration: m.duration });
   return {
     id: String(t.id), handle: t.author?.screen_name, author: t.author?.name, url: t.url,
     text: String(t.text || '').trim(),
@@ -76,13 +89,33 @@ export function ideaTerms(idea) {
   return { subject, types };
 }
 
+// Search-engine queries for X posts about the idea: the idea itself, then the screen type
+// alone, which is what brings in good posts about another kind of project. Two at most:
+// the engine blocks an address after a handful of requests.
+export function searchQueries(idea) {
+  const { subject, types } = ideaTerms(idea);
+  const type = types[0] || '';
+  const qs = [`site:x.com ${[...subject, type].join(' ').trim()} UI design`];
+  if (type && subject.length) qs.push(`site:x.com "${type}" UI UX design`);
+  return qs;
+}
+
 const hasWord = (text, w) => {
   const stem = w.length > 4 ? w.replace(/(?:ies|es|s|ing)$/, '') : w;
   return new RegExp(`(^|[^a-z0-9])${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(text);
 };
 
-// subject word = 3 points each, same screen type = 2. Recency and reach only order posts
-// that already match; they never make an unrelated post match (see `matched`).
+// How well a post was received, 0 to 3. Likes and bookmarks count; a design saved by many
+// people is the best public sign that the design is good.
+export function quality(post) {
+  const l = Math.log10((post.likes || 0) + 1), b = Math.log10((post.bookmarks || 0) + 1);
+  return +Math.min(3, post.bookmarks == null ? l : (l + b) / 2).toFixed(2);
+}
+
+// subject word = 3 points each, same screen type = 2, plus quality x 1.5 (0 to 4.5) and
+// recency (0 to 1). So a well received design of another project type (type match only) can
+// pass an exact match nobody liked, but not an exact match that was liked too. Quality and
+// recency never make an unrelated post match (see `matched`).
 export function scorePost(post, terms, now = Date.now()) {
   const text = post.text || '';
   const subjectHits = terms.subject.filter((w) => hasWord(text, w));
@@ -90,16 +123,30 @@ export function scorePost(post, terms, now = Date.now()) {
   const matched = subjectHits.length * 3 + typeHits.length * 2;
   const ageDays = post.created_at ? (now - Date.parse(post.created_at)) / 864e5 : 365;
   const recency = Math.max(0, 1 - ageDays / 60);
-  const reach = Math.min(1, Math.log10((post.views || post.likes || 0) + 1) / 6);
-  return { matched, score: +(matched + recency + reach).toFixed(2), subjectHits, typeHits, ageDays: Math.round(ageDays) };
+  const q = quality(post);
+  return { matched, quality: q, score: +(matched + q * 1.5 + recency).toFixed(2), subjectHits, typeHits, ageDays: Math.round(ageDays) };
 }
 
-export function rankPosts(posts, idea, { all = false, days = 0, now = Date.now() } = {}) {
+// perAuthor caps how many posts one account may take, so the list stays a choice between
+// different designers (0 = no cap).
+export function rankPosts(posts, idea, { all = false, days = 0, minLikes = 0, sort = 'score', perAuthor = 0, now = Date.now() } = {}) {
   const terms = ideaTerms(idea);
+  const seen = new Set(), perHandle = new Map();
+  const by = {
+    score: (a, b) => b.rank.score - a.rank.score,
+    likes: (a, b) => (b.likes || 0) - (a.likes || 0),
+    recent: (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+  }[sort] || ((a, b) => b.rank.score - a.rank.score);
   return posts
+    .filter((p) => p && p.media.length && !seen.has(p.id) && seen.add(p.id))
     .map((p) => ({ ...p, rank: scorePost(p, terms, now) }))
-    .filter((p) => p.media.length && (all || p.rank.matched > 0) && (!days || p.rank.ageDays <= days))
-    .sort((a, b) => b.rank.score - a.rank.score || Date.parse(b.created_at) - Date.parse(a.created_at));
+    .filter((p) => (all || p.rank.matched > 0) && (!days || p.rank.ageDays <= days) && (p.likes || 0) >= minLikes)
+    .sort((a, b) => by(a, b) || Date.parse(b.created_at) - Date.parse(a.created_at))
+    .filter((p) => {
+      const k = String(p.handle).toLowerCase(), n = (perHandle.get(k) || 0) + 1;
+      perHandle.set(k, n);
+      return !perAuthor || n <= perAuthor;
+    });
 }
 
 // Dominant colors of raw RGB24 pixels: 5 bits per channel buckets, averaged, near twins merged.

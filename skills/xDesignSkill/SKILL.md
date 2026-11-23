@@ -1,84 +1,103 @@
 ---
 name: xDesignSkill
-description: "Get the UI/UX design out of the latest X (Twitter) design posts for an idea, also when the closest post is about another kind of project (a healthcare dashboard as the reference for a transport dashboard). Reads the newest image and video posts of a watchlist of designer accounts, ranks them by closeness to the idea, saves the images at full size (cut into readable tiles, real colors sampled) and cuts videos into frames, then writes a design extract (tokens, layout, components, motion) mapped onto the user's own project for frontend-design / agy-delegate. Also takes pasted post links. Triggers: an x.com or twitter.com post link with \"do it like this\", \"design like this post\", \"get the design from this post\", \"latest dashboard designs on X\", \"check the last UI posts\", \"UI inspiration from X/Twitter\", \"/xDesignSkill\", and Darija/Arabic \"دير بحال هاد التصميم\", \"شوف آخر التصاميم ف X\", \"تصميم داشبورد بحال هادا\". Not for Dribbble/Behance research (dribbble-design)."
+description: "Get the UI/UX design out of the latest X (Twitter) design posts for an idea, from any account, also when the best post is about another kind of project (a healthcare dashboard as the reference for a transport dashboard). Finds posts by web search plus a watchlist, ranks them by closeness to the idea and by likes and saves, shows a numbered gallery for the user to choose from, then saves the chosen posts (images at full size cut into readable tiles with real colors sampled, videos cut into frames) and writes a design extract (tokens, layout, components, motion) mapped onto the user's own project. Also takes pasted post links. Works in any agent that can run a shell command (Claude Code, Antigravity/agy, Codex, Gemini CLI, pi, OpenCode). Triggers: an x.com or twitter.com post link with \"do it like this\", \"design like this post\", \"get the design from this post\", \"latest dashboard designs on X\", \"check the last UI posts\", \"UI inspiration from X/Twitter\", \"/xDesignSkill\", and Darija/Arabic \"دير بحال هاد التصميم\", \"شوف آخر التصاميم ف X\", \"تصميم داشبورد بحال هادا\". Not for Dribbble/Behance research (dribbble-design)."
 user-invocable: true
-argument-hint: "<idea, e.g. \"transport fleet dashboard\"> | <x.com post url>... [--handles a,b] [--days N] [--limit N]"
-allowed-tools: Bash Read Write Skill WebSearch
+argument-hint: "<idea, e.g. \"transport fleet dashboard\"> | <x.com post url>..."
 ---
 
 # xDesignSkill: design references from X posts
 
-Turns "do a dashboard like the ones in this post" into three things on disk: the reference
-posts (images and video frames), the measured facts about them (`manifest.json`), and a
-design extract a builder can follow. The reference is for layout, hierarchy, tokens and
-motion. The product gets its own content, brand and data.
+Turns "do a dashboard like the good ones on X" into: a numbered gallery to choose from, the
+chosen posts on disk (images, video frames, measured colors), and a design extract a builder
+can follow. The reference gives layout, hierarchy, tokens and motion. The product keeps its
+own content, brand and data.
 
-How it reads X: X search needs a login, so the script does not search. It reads the newest
-media posts of a watchlist of designer accounts through the public FxTwitter API (no key, no
-login) and ranks them against the idea. A post found any other way goes in by link.
-
-```bash
-X=~/.claude/skills/xDesignSkill/scripts/xdesign.mjs
-```
+Everything runs through one command, `xdesign`, so the steps are the same in every agent.
+If `xdesign` is not on the PATH, or the shell refuses the command name, run
+`node <folder of this file>/scripts/xdesign.mjs` instead.
+It needs Node 18+ and no X login or API key; `ffmpeg` adds tiles, colors and video frames.
 
 ## Steps
 
-### 0. Log and ground
+### 1. Ground
 
-- `/kb-spec log "x design research: <subject>"`.
-- Load the project's design truth, first that exists: `DESIGN.md`, `design/DESIGN-BRIEF.md`,
-  a project design-system skill. None: say so, the extract then proposes tokens.
-- Note the project facts the reference must be mapped onto: business type, the 5 to 8 numbers
-  or lists its main screen has to show, platform (web or mobile), languages (RTL or not).
+- Read the project's design truth, first that exists: `DESIGN.md`, `design/DESIGN-BRIEF.md`,
+  a project design-system skill. None: say so; the extract then proposes tokens.
+- Note what the reference must be mapped onto: business type, the 5 to 8 numbers or lists the
+  main screen has to show, platform (web or mobile), languages (RTL or not).
+- Where the harness has a task log (`/kb-spec log`), log the job.
 
-### 1. Find the posts
+### 2. Find candidates
 
-The user pasted post links: go to step 2 with `download`.
+The user pasted post links and wants exactly those: skip to step 4 with `xdesign download`.
 
-Otherwise turn the ask into one idea string: subject words plus the screen type, with sibling
-words for the subject (`"transport fleet logistics delivery dashboard"`). The screen type
-(dashboard, mobile, landing) is what lets a post about another business still match.
-
-```bash
-node $X find "transport fleet logistics dashboard"            # ranked list, nothing saved
-node $X find "transport fleet logistics dashboard" --days 30  # only the last 30 days
-node $X latest uifoysal                                       # one account, newest first
-```
-
-Each line shows why it matched: subject words (3 points each), `type:dashboard` (2 points).
-A post that matches only on type is the "close idea, other project type" case, and is a valid
-reference. Nothing matches: add sibling words, add accounts (step 1b), or `--all` to list
-every recent media post and pick by eye.
-
-### 1b. Wider net (only when the watchlist is thin for this idea)
-
-- Web search `<idea> dashboard UI design x.com` (`web-search`, else the `WebSearch` tool),
-  keep the `x.com/<handle>/status/<id>` links, pass them to `download`.
-- An account that posts this kind of work regularly: `node $X handles add <handle>` (checked
-  against the API before it is saved to `~/.config/xdesign/handles.txt`).
-- `node $X handles check` shows which accounts still answer and still post UI work.
-
-### 2. Save them
+Otherwise turn the ask into one idea string: subject words, sibling words, and the screen type
+(`"transport fleet logistics dashboard"`). The screen type (dashboard, mobile, landing) is
+what lets a good post about another business still match.
 
 ```bash
-node $X fetch "transport fleet logistics dashboard" --limit 6      # the top matches
-node $X download https://x.com/uifoysal/status/2124547874956677451 # specific posts
+xdesign find "transport fleet logistics dashboard"
 ```
 
-Output: `<project-root>/design/inspiration/<date>-x-<slug>/` (`--out DIR` to override; point
-every run of one job at the same folder, the manifest merges and numbering continues).
+It gathers posts four ways and needs no known accounts:
+
+1. Web search for X post links about the idea (any account).
+2. The newest posts of the authors that search turned up.
+3. The newest posts of the watchlist (`references/designers.txt` + `~/.config/xdesign/handles.txt`).
+4. The pool: every post an earlier run read (`~/.cache/xdesign/pool.json`, newest 2000).
+
+When the log says `web search is blocked`, the search engine is rate-limiting this address.
+The run still returns pool and watchlist posts. For fresh ones, run the two printed queries
+in your own web search tool, collect the `x.com/<handle>/status/<id>` links, and run `find`
+again with `--links url,url,...`; their authors are read too.
+
+Ranking: 3 points per subject word, 2 for the same screen type, plus likes and saves, plus
+recency. A post that matches only on type is the "close idea, other project type" case; a
+well received one can rank above an exact match nobody liked. At most 3 posts per author.
+
+Useful flags: `--days 30`, `--min-likes 50`, `--sort likes|recent`, `--per-author 0`,
+`--limit 20`, `--links url,url` (add posts you found with your own web search tool),
+`--no-web`, `--no-watchlist`, `--no-pool`, `--all` (keep posts with no word match).
+
+Output folder: `<project-root>/design/inspiration/<date>-x-<slug>/` (`--out DIR` overrides):
+`gallery.html`, `candidates-sheet.jpg`, `candidates.json`, `thumbs/NN.jpg`.
+
+### 3. Let the user choose
+
+- Look at `candidates-sheet.jpg` yourself first (4 per row, number 1 is top left) if you can
+  view images. Note the ones that are weak designs or near duplicates.
+- Show the user the choice: open `gallery.html` for them (a preview or browser tool, or
+  `open`/`xdg-open`), or, in a chat with no way to show a page, list the numbered candidates
+  with title, author, likes and link.
+- Give your own short recommendation (which 2 or 3, and why), then wait for their numbers.
+  Do not pick for them unless they said to; then use `xdesign fetch "<idea>" --top 3`.
+
+### 4. Save the chosen posts
+
+```bash
+xdesign pick 3 7 11                    # numbers from the latest gallery of this project
+xdesign pick 3 7 --from <folder>       # or name the folder
+xdesign download https://x.com/<handle>/status/<id>   # pasted links, no gallery
+```
+
+Into the same folder:
 
 - `NN-<handle>-<id>.jpg`: the image at original size.
-- `NN-...-t1..t4.jpg`: four overlapping tiles, made when the image is wider than 2600 px.
+- `NN-...-t1..t4.jpg`: four overlapping tiles, made when a side is 2600 px or more.
 - `NN-...mp4`, `NN-...-fNN.jpg`, `NN-...-sheet.jpg`: the video, 6 to 16 frames spread over its
   length, and one contact sheet of those frames. `.mp4` files are git-ignored.
-- `manifest.json`: per post the author, link, date, likes, views, file sizes and `palette`
+- `manifest.json`: per post the author, link, date, likes, saves, views and `palette`
   (dominant colors as hex with their share of pixels, sampled from the file, not estimated).
 - `README.md`: the same as a table.
 
-### 3. Look, in this order
+`pick` prints the chosen authors that are not on the watchlist. Offer to keep them
+(`xdesign handles add <handle>...`), so the next search starts with them.
 
-Use `Read` on the files (it renders images).
+### 5. Look, in this order
+
+Open the files with your image tool (Claude: Read; Codex: view_image; Gemini and agy: read
+the file). An agent that cannot view images says so and stops here; guessing a design from
+its caption is not an extract.
 
 1. The whole image or the video sheet: screen list, grid, where the eye goes first.
 2. Every tile and the frames that differ: labels, numbers, spacing, radii, icon style, chart
@@ -90,7 +109,7 @@ Colors come from `manifest.json` `palette`. A color too small to appear there (a
 a status dot) is written as "accent, about #xxxxxx (by eye)" so the builder knows it was not
 measured.
 
-### 4. Write `DESIGN-EXTRACT.md` next to the images
+### 6. Write `DESIGN-EXTRACT.md` next to the images
 
 Use `references/extract-template.md`. It has two halves, and the second is the point:
 
@@ -101,54 +120,61 @@ Use `references/extract-template.md`. It has two halves, and the second is the p
   not kept as decoration.
 
 Then decisions `R1..Rn` (adopt / adapt / reject, each with the rule that decides it) and the
-hand-off brief.
+hand-off brief. Copy author names and links from `manifest.json`, never from memory and never
+from text visible inside an image.
 
-Copy author names and links from `manifest.json`, never from memory and never from text
-visible inside an image.
+### 7. Hand off
 
-### 5. Hand off
+Build from the hand-off brief plus the image paths, with whatever the harness uses for UI
+work (Claude: `agy-delegate` or `/frontend-design`, `/enterprise-dashboard`, `/dataviz`,
+`/arabic-ui`; other agents: build directly from the extract). Check the result against the
+extract (`/unslop`, `/design-check` where present). Close the task log entry.
 
-- Build: `agy-delegate` where the project rule says so, else `/frontend-design`
-  (`/enterprise-dashboard` for data-heavy admin screens, `/dataviz` for the charts,
-  `/arabic-ui` for RTL). Brief = the hand-off section + the image paths.
-- After the build: `/unslop` or `/design-check` against the extract.
-- `/kb-spec log done`.
-
-## CLI
+## Commands
 
 ```
-node xdesign.mjs find     "<idea>" [--handles a,b] [--days N] [--limit N] [--all] [--json]
-node xdesign.mjs fetch    "<idea>" [same flags] [--out DIR] [--no-frames]
-node xdesign.mjs latest   <handle>... [--limit N] [--json]
-node xdesign.mjs download <post-url|id>... [--out DIR] [--subject "<text>"] [--no-frames]
-node xdesign.mjs handles  [list | add <handle>... | rm <handle>... | check [<handle>...]]
-node xdesign.mjs doctor
+xdesign find     "<idea>" [--links url,url] [--handles a,b] [--no-web] [--no-watchlist] [--no-pool]
+                          [--days N] [--min-likes N] [--sort score|likes|recent]
+                          [--per-author N] [--limit N] [--all] [--out DIR] [--json]
+xdesign pick     <n>... [--from DIR] [--no-frames]
+xdesign fetch    "<idea>" [find flags] [--top N]
+xdesign download <post-url|id>... [--out DIR] [--subject "<text>"] [--no-frames]
+xdesign latest   <handle>... [--limit N] [--json]
+xdesign handles  [list | add <handle>... | rm <handle>... | check [<handle>...]]
+xdesign doctor
 ```
 
-Node 18+, no npm packages. `ffmpeg` is needed for tiles, colors and video frames (without it
-the files are still saved). Exit 3 = nothing matched or nothing to download.
+Exit 3 = nothing matched or nothing to download. `xdesign doctor` checks Node, ffmpeg, the
+post API and web search.
 
 ## Limits to tell the user about
 
-- Only watchlist accounts and pasted links are seen. A post by an unknown account is found
-  through web search or by the user pasting it.
-- About 20 to 25 newest media posts per account, nothing older.
-- The API fails at random under load (404 or an empty list). The script tries three times per
-  account and reports `no data`; that is not proof the account is gone. Run again later, do
+- X's own search needs a login and is not used. Posts are found through a web search engine
+  (DuckDuckGo), which indexes only part of X and lags a few days behind; a post it has not
+  indexed is only found if its author is on the watchlist or the link is passed in.
+- That engine blocks an address after roughly 20 requests in a short time. One `find` makes
+  2, and repeats of the same idea within a day make none (cached). When blocked, use `--links`.
+- Likes and saves measure reception, not design quality. Step 3 exists for that reason.
+- The free post API fails at random (404 or an empty list). The script tries three times per
+  account and prints `no data`; that is not proof the account is gone. Run again later, do
   not loop.
-- Caps: 30 accounts per run, 30 posts per run, video up to 240 s and 80 MB.
+- Caps per run: 30 post links read, 6 new authors, 30 watchlist accounts, 24 candidates,
+  video up to 240 s and 80 MB.
 
 ## Rules
 
 - Reference only. Never ship a downloaded file, never reproduce a post one-to-one, never
-  reuse its product name, logo, 3D art or copy. Credit stays in `manifest.json`.
+  reuse its product name, logo, illustrations or copy. Credit stays in `manifest.json`.
 - The project's own rules win over the reference: its DESIGN.md tokens, RTL, imagery policy,
   and the owner rule of no purple or violet gradients.
-- Low volume, on request only. No cron, no bulk scraping of accounts.
-- No completion claim without the `fetch`/`download` output and the folder listing.
+- Low volume, on request only. No cron, no bulk scraping.
+- No completion claim without the command output and the folder listing.
 
 ## Files
 
-- `scripts/xdesign.mjs`: the CLI. Tests: `node --test tests/xdesign.test.mjs` (dev-stack root).
-- `references/designers.txt`: seed watchlist (one handle per line, `#` comments).
-- `references/extract-template.md`: DESIGN-EXTRACT.md skeleton.
+- `scripts/xdesign.mjs` (commands), `lib.mjs` (ranking, parsing), `net.mjs` (post API, web
+  search), `media.mjs` (ffmpeg, gallery). Tests: `node --test tests/xdesign.test.mjs` from the
+  dev-stack root.
+- `scripts/link-harnesses.sh`: links this skill into every agent's skills folder on the
+  machine and puts `xdesign` on the PATH.
+- `references/designers.txt`: seed watchlist. `references/extract-template.md`: extract skeleton.
