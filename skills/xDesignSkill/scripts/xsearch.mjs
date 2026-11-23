@@ -23,7 +23,8 @@ const ARGS = ['--disable-blink-features=AutomationControlled', '--disable-dev-sh
 function findBrowser() {
   const env = process.env.XDESIGN_BROWSER || process.env.CHROME_PATH;
   const mac = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge', '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'];
-  const linux = ['/usr/bin/chromium-browser', '/usr/bin/chromium', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/snap/bin/chromium'];
+  // Snap Chromium (Ubuntu's /usr/bin/chromium-browser too) cannot write a profile under ~/.config: last.
+  const linux = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium'];
   return [env, ...(process.platform === 'darwin' ? mac : linux)].filter(Boolean).find((p) => fs.existsSync(p)) || null;
 }
 
