@@ -41,6 +41,7 @@ This table lets any skill know where it sits in the graph without reading the fu
 | `animate`                         | phase 5 auto-route                                  | polish                                           | **auto**    |
 | `clarify`                         | phase 5 auto-route                                  | test-driven-development                          | **auto**    |
 | `quieter`                         | phase 5 auto-route                                  | polish                                           | **auto**    |
+| `system-ux`                       | phase 2c (new apps) + phase 5 auto-route (UI work)  | system-design / design-md → frontend-design      | **auto**    |
 | `frontend-design`                 | phase 5 auto-route                                  | polish → audit                                   | **auto**    |
 | `vercel-react-best-practices`     | phase 5 auto-route                                  | optimize → verification-before-completion        | **auto**    |
 | `grill-me`                        | USER "grill me" (STANDALONE ONLY)                   | writing-plans (if accepted)                      | manual      |

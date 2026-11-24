@@ -1,8 +1,23 @@
 {
-  "pin_skills": ["kb-query", "kb-spec", "kb-dev", "test-driven-development", "verification-before-completion",
-                 "systematic-debugging", "karpathy-guidelines", "jev", "lean-ctx",
-                 "brainstorming", "writing-plans", "kb-compile", "kb-ingest", "kb-lint", "requesting-code-review",
-                 "receiving-code-review"],
+  "pin_skills": [
+    "kb-query",
+    "kb-spec",
+    "kb-dev",
+    "test-driven-development",
+    "verification-before-completion",
+    "systematic-debugging",
+    "karpathy-guidelines",
+    "jev",
+    "lean-ctx",
+    "brainstorming",
+    "writing-plans",
+    "kb-compile",
+    "kb-ingest",
+    "kb-lint",
+    "requesting-code-review",
+    "receiving-code-review",
+    "system-ux"
+  ],
   "pin_agents": [],
   "keep_if_uses_14d_at_least": 3
 }
