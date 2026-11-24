@@ -6,6 +6,7 @@ When Phase 5 hits a UI/frontend task, route to the right specialist skill instea
 
 | Task content contains…                                                | Auto-route to                |
 |-----------------------------------------------------------------------|------------------------------|
+| new app, dashboard, admin/ERP/CRM, form, user flow, nav/IA, UX audit  | `system-ux` (runs FIRST, before `frontend-design`) |
 | "build", "create", "design" + "page" / "component" / "landing"        | `frontend-design`            |
 | "responsive", "mobile", "breakpoint", "viewport", "tablet", "iPad"    | `adapt`                      |
 | "animate", "transition", "motion", "hover effect", "micro-interaction"| `animate`                    |
@@ -43,6 +44,7 @@ These never auto-fire from kb-dev — the user must explicitly request them:
 When the user is working on a design/theme concern, the preferred chain is:
 
 ```
+0. /system-ux               (AUTO — UX architecture, Object-Action Matrix, Inductive screens)
 1. /design-md <brand>       (optional — adopt a brand's design system)
 2. /design-check             (scan for conflicts against the theme — read-only)
 3. /normalize <scope>        (apply the fixes design-check identified)

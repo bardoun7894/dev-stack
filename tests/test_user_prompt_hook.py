@@ -191,5 +191,17 @@ class HookTest(unittest.TestCase):
         self.assertIn("REMINDER", ctx)
 
 
+    def test_system_ux_auto_hint_fires_once_for_ui_ux_and_skips_backend(self):
+        be = self.run_hook("fix the login bug in the payment API", "sess-ux-be")
+        self.assertNotIn("AUTO-USE system-ux", be)
+
+        first = self.run_hook("build an admin dashboard with filters for orders", "sess-ux-en")
+        self.assertIn("AUTO-USE system-ux", first)
+        second = self.run_hook("now add a multi-step onboarding form", "sess-ux-en")
+        self.assertNotIn("AUTO-USE system-ux", second)
+
+        ar = self.run_hook("صمم تجربة المستخدم ولوحة التحكم للطلبات", "sess-ux-ar")
+        self.assertIn("AUTO-USE system-ux", ar)
+
 if __name__ == "__main__":
     unittest.main()

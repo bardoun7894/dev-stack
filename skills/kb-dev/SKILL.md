@@ -15,7 +15,7 @@ Rule (owner 2026-10-27, CLAUDE.md "WORK SPLIT"): split work by context, not by r
 | 0 | Prior art | `/kb-query` |
 | 1 | Brainstorm | `brainstorming` |
 | 2 | Spec | `/kb-spec pre` then `/speckit.specify`; research via `jdelegate --role researcher` (question only) into `research.md` |
-| 2c | System design | new apps only: `system-design`, owner approves D/Q codes |
+| 2c | System & UX design | new apps: `system-ux` (Mode A → `ux-architecture.md`) + `system-design`, owner approves Object–Action Matrix & D/Q codes; UI-heavy features in existing apps: `system-ux` Mode B delta |
 | 2d | EGM review | every spec, automatic: Claude spawns the Agent subagent_type egm:egm-synthesizer on specs/NNN/spec.md (it runs the Goldfish reviewers in parallel and merges findings); tell it native Grep/Glob are denied, use mcp__lean-ctx__ctx_search/ctx_glob/ctx_tree. Show findings as F-codes; owner decides each; apply to spec.md before /kb-spec plan. agy/Codex: /egm:egm-review then /egm:egm-resolve. FAST LANE (no spec) skips. |
 | 3 | Plan | `/kb-spec plan` then `/speckit.plan`, `writing-plans` |
 | 4 | Tasks | `/kb-spec tasks` then `/speckit.tasks`; add the "Done when" section |

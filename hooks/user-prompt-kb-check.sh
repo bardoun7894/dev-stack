@@ -87,6 +87,7 @@ fi
 # Without a session_id we cannot tell, so every prompt counts as the first (never under-inject).
 remind_pending=1
 nag_pending=1
+ux_hint_pending=1
 seen_file=""
 if [ -n "$session_id" ]; then
   seen_dir="$HOME/.cache/dev-stack/hook-seen"
@@ -98,6 +99,7 @@ if [ -n "$session_id" ]; then
   fi
   grep -qx reminded "$seen_file" 2>/dev/null && remind_pending=0
   grep -qx nagged "$seen_file" 2>/dev/null && nag_pending=0
+  grep -qx ux_hinted "$seen_file" 2>/dev/null && ux_hint_pending=0
 fi
 mark_seen() { [ -n "$seen_file" ] && printf "%s\n" "$1" >> "$seen_file" 2>/dev/null; return 0; }
 
@@ -372,7 +374,7 @@ if [ $remind_pending -eq 1 ] && [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 
   prompt_len=${#user_prompt}
   if [ "$prompt_len" -lt 200 ]; then
     # English engineering vocabulary
-    en_pattern='feature|bug|fix|implement|build|ship|spec|/speckit|/kb|/grill|history|architect|refactor|deploy|migrat|design|create|add |adding|update |updating|change|modif|how do|how does|why does|what does|where is|what was|how did|prior|previous|exist|current|test|review|merge|branch|workflow|pipeline|orchestr|delegat|skill|hook|kb-dev|kb-spec|kb-query|grill-me|claude\.md|\.md|\.py|\.ts|\.tsx|\.js|\.php|\.go|\.rs|\.java|\.kt|\.swift|\.dart|\.rb|\.cs|database|api|endpoint|service|component|module|package|library|repo|repository|commit|push|pull|pr |/pr|issue|tasks|plan|decision|requirement|integration|permission|role|admin|user|login|logout|auth|session|sidebar|route|controller|middleware|docker|compose|kubectl|k3s|k8s|pod|ssh|http 500|500 error|404|error|broken|blank|crash|fail|not working|doesn.t work|doesn.t apply|not applied|backend|frontend|nextjs|laravel|fastapi|filament|sanctum|tailwind'
+    en_pattern='feature|bug|fix|implement|build|ship|spec|/speckit|/kb|/grill|history|architect|refactor|deploy|migrat|design|create|add |adding|update |updating|change|modif|how do|how does|why does|what does|where is|what was|how did|prior|previous|exist|current|test|review|merge|branch|workflow|pipeline|orchestr|delegat|skill|hook|kb-dev|kb-spec|kb-query|grill-me|claude\.md|\.md|\.py|\.ts|\.tsx|\.js|\.php|\.go|\.rs|\.java|\.kt|\.swift|\.dart|\.rb|\.cs|database|api|endpoint|service|component|module|package|library|repo|repository|commit|push|pull|pr |/pr|issue|tasks|plan|decision|requirement|integration|permission|role|admin|user|login|logout|auth|session|sidebar|route|controller|middleware|docker|compose|kubectl|k3s|k8s|pod|ssh|http 500|500 error|404|error|broken|blank|crash|fail|not working|doesn.t work|doesn.t apply|not applied|backend|frontend|nextjs|laravel|fastapi|filament|sanctum|tailwind|ux|user flow|wireframe|dashboard|onboarding|navigation|usability'
 
     # Arabic engineering vocabulary (root forms + common conjugations)
     #   ميزة/خاصية = feature        خطأ/علة/مشكلة = bug         أصلح/صلح/إصلاح = fix
@@ -389,7 +391,7 @@ if [ $remind_pending -eq 1 ] && [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 
     #   نقطة نهاية = endpoint        مكتبة = library             مستودع = repo
     #   لماذا/كيف/ماذا/أين/متى = why/how/what/where/when (question words)
     #   سابق/الحالي/الموجود = prior/current/existing
-    ar_pattern='ميزة|خاصية|خطأ|علة|مشكلة|أصلح|صلح|إصلاح|نفذ|نفّذ|تنفيذ|ابني|ابن |بناء|اعمل|صنع|نشر|إطلاق|شحن|مواصفات|مواصفة|تاريخ|سجل|هيكل|بنية|معمارية|إعادة هيكلة|تصميم|أنشئ|إنشاء|أضف|إضافة|عدّل|تحديث|غيّر|تغيير|اختبار|فحص|مراجعة|دمج|فرع|سير عمل|قرار|متطلب|تكامل|كود|شفرة|برمجة|ملف |وحدة|مكون|قاعدة بيانات|واجهة|خدمة|نقطة نهاية|مكتبة|مستودع|لماذا|كيف|ماذا|أين|متى|سابق|الحالي|الموجود|كب-ديف|كب-سبك|كب-كويري'
+    ar_pattern='ميزة|خاصية|خطأ|علة|مشكلة|أصلح|صلح|إصلاح|نفذ|نفّذ|تنفيذ|ابني|ابن |بناء|اعمل|صنع|نشر|إطلاق|شحن|مواصفات|مواصفة|تاريخ|سجل|هيكل|بنية|معمارية|إعادة هيكلة|تصميم|أنشئ|إنشاء|أضف|إضافة|عدّل|تحديث|غيّر|تغيير|اختبار|فحص|مراجعة|دمج|فرع|سير عمل|قرار|متطلب|تكامل|كود|شفرة|برمجة|ملف |وحدة|مكون|قاعدة بيانات|واجهة|خدمة|نقطة نهاية|مكتبة|مستودع|لماذا|كيف|ماذا|أين|متى|سابق|الحالي|الموجود|كب-ديف|كب-سبك|كب-كويري|تجربة المستخدم|مسار المستخدم|لوحة تحكم|شاشة'
 
     if ! printf '%s' "$user_prompt" | grep -qiE "$en_pattern|$ar_pattern"; then
       emit_reminder=0
@@ -406,6 +408,21 @@ if [ $remind_pending -eq 1 ] && [ -n "$user_prompt" ] && [ $in_kb_project -eq 0 
       fi
     fi
   fi
+fi
+
+# --- Automatic system-ux reminder (once per session for UI/UX/system-app prompts) ---
+if [ $ux_hint_pending -eq 1 ] && [ $kb_system_prompt -eq 0 ] && [ -n "$user_prompt" ]; then
+  case "$user_prompt" in
+    /*) ;;
+    *)
+      ux_en='\b(ux|ui/ux|user experience|user flow|information architecture|wireframe|usability|onboarding|dashboard|admin panel|backoffice|erp|crm|navigation|sidebar|wizard|form|screen|modal|drawer|table view|saas|web app|mobile app|system app)\b'
+      ux_ar='تجربة المستخدم|مسار المستخدم|لوحة تحكم|لوحة التحكم|واجهة المستخدم|شاشة|نموذج|استمارة|التنقل|قائمة جانبية'
+      if printf '%s' "$user_prompt" | grep -qiE "$ux_en|$ux_ar"; then
+        printf '%s\n' '<skill_auto>AUTO-USE system-ux (~/.claude/skills/system-ux/SKILL.md): Apply Mode A (specs/NNN/ux-architecture.md + check.sh) for new apps/systems, Mode B (Feature UX Delta: Lean Hypothesis, Object-Action Delta, Inductive Main Instruction, 5 UI states, 100ms/400ms/1s/10s latency & error rules) before UI code, or Mode C for UX audits. Skip only for FAST LANE tiny edits.</skill_auto>'
+        mark_seen ux_hinted
+      fi
+      ;;
+  esac
 fi
 
 # --- Join the Jev skill suggestion started above ---
