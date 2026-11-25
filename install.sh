@@ -159,6 +159,31 @@ if [ -f "$viewmd_hook_src" ]; then
   fi
 fi
 
+# 5c. install-guard PreToolUse supply-chain hook
+ig_hook_src="$REPO/hooks/install-guard.sh"
+ig_hook_dst="$HOOKS_DIR/install-guard.sh"
+if [ -f "$ig_hook_src" ]; then
+  if [ -L "$ig_hook_dst" ]; then
+    current_target="$(readlink "$ig_hook_dst")"
+    if [ "$current_target" = "$ig_hook_src" ]; then
+      echo "  ok       install-guard.sh (already linked to dev-stack)"
+    elif [ $update_symlinks -eq 1 ]; then
+      rm "$ig_hook_dst"
+      ln -s "$ig_hook_src" "$ig_hook_dst"
+      chmod +x "$ig_hook_src"
+      echo "  updated  install-guard.sh (was → $current_target)"
+    else
+      echo "  stale    install-guard.sh → $current_target (run with --update-symlinks to fix)"
+    fi
+  elif [ -e "$ig_hook_dst" ]; then
+    echo "  skip     install-guard.sh (real file exists, leaving alone)"
+  else
+    ln -s "$ig_hook_src" "$ig_hook_dst"
+    chmod +x "$ig_hook_src"
+    echo "  link     install-guard.sh"
+  fi
+fi
+
 # 6. Agents (orchestrator + role specialists)
 echo "[6/$TOTAL_PHASES] agents"
 link_agent() {
@@ -392,6 +417,22 @@ if ! grep -q "view-md-stop.sh" "$settings_file" 2>/dev/null; then
 JSON
 else
   echo "  ok       view-md-stop.sh already wired in $settings_file"
+fi
+
+if ! grep -q "install-guard.sh" "$settings_file" 2>/dev/null; then
+  ig_entry='{"matcher":"Bash|mcp__lean-ctx__ctx_shell","hooks":[{"type":"command","command":"$HOME/.claude/hooks/install-guard.sh","timeout":5}]}'
+  if command -v jq >/dev/null 2>&1 && [ -f "$settings_file" ] \
+     && jq --argjson e "$ig_entry" '.hooks.PreToolUse = ((.hooks.PreToolUse // []) + [$e])' "$settings_file" > "$settings_file.ig.tmp" 2>/dev/null; then
+    cp "$settings_file" "$settings_file.bak-install-guard"
+    mv "$settings_file.ig.tmp" "$settings_file"
+    echo "  wired    install-guard.sh into $settings_file (backup: $settings_file.bak-install-guard)"
+  else
+    rm -f "$settings_file.ig.tmp"
+    echo "  WARNING  install-guard.sh is NOT active. Add this to $settings_file under .hooks.PreToolUse[]:"
+    echo "$ig_entry"
+  fi
+else
+  echo "  ok       install-guard.sh already wired in $settings_file"
 fi
 
 # Settings reminder

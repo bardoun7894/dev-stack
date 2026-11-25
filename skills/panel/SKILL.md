@@ -57,65 +57,36 @@ Run the KB chain **once**, not four times:
 2. If `Notebook ID` is configured in project `CLAUDE.md`, run `mcp__notebooklm-mcp__notebook_query` with the same question.
 3. Collapse into a single **Prior art** preamble. All four reviewers get the same preamble — apples-to-apples.
 
-## Step 2 — Round 1: Independent drafts (parallel)
+## Step 2 & Step 3 — Deterministic Round 1 + Round 2 (`panel-run`)
 
-Fan out in a single message with four parallel calls. No reviewer sees the others' work in this round.
+Never pump six raw CLI transcripts through the live coordinator context. Write the shared **Prior art** block and your own blind **Plan A (Claude)** draft to temp files first (before seeing any peer output), then invoke `panel-run` **once**:
 
-**Claude (inline, in this session):** produces its plan/review directly.
-
-**Codex** — `Bash`:
 ```bash
-codex exec \
-  --model gpt-5.4 \
-  --sandbox read-only \
-  "<Prior art + target + task + format>" \
-  2>&1
-```
-
-**Gemini** — `Bash`:
-```bash
-gemini \
-  -p "<Prior art + target + task + format>" \
-  --approval-mode plan \
-  -o text \
-  --include-directories "<relevant paths>" \
-  2>&1
-```
-
-**OpenCode/MiniMax** — `Bash`:
-```bash
-opencode run "<Prior art + target + task + format>" \
-  -m opencode/minimax-m2.5-free \
-  2>&1
-```
-
-Shared prompt skeleton:
-```
-Prior art from our KB (trust this — don't re-derive):
+scratch_dir="$(mktemp -d)"
+cat > "$scratch_dir/prior-art.md" <<'EOF'
 <kb-query citations + NotebookLM excerpt>
+EOF
 
-Target: <file / module / feature / diff>
-Task: <plan | review | bug-hunt | security | design-review>
-Scope: ONLY <boundary>. Do NOT <out-of-scope>.
-Format: `file:line` - severity - issue - suggested fix
-(for plans) Output: 1) Overview 2) Files/modules touched 3) Steps in order 4) Edge cases 5) Open questions
-Skip preambles. Lead with findings.
+cat > "$scratch_dir/draft-a.md" <<'EOF'
+<Claude's independent Round 1 plan/review — written blind before running peers>
+EOF
+
+panel-run \
+  --target "<file / module / feature / PR>" \
+  --scope "<plan | review | bug-hunt | security | design-review>" \
+  --slug "<kebab-slug>" \
+  --prior-art-file "$scratch_dir/prior-art.md" \
+  --draft-a-file "$scratch_dir/draft-a.md" \
+  --prompt-extra "ONLY <boundary>. Do NOT <out-of-scope>." \
+  --include-dir "<relevant path>"
 ```
 
-**OpenCode-specific prompt addition** (append to the skeleton):
-```
-Your focus: clarity of the proposed approach, UX/user-facing language, issue severity classification, any cross-cutting concern the other reviewers (code-focused) tend to miss. Flag ambiguous requirements, inconsistent terminology, and user-impact risks.
-```
+What `panel-run` does deterministically in a single call:
+1. **Round 1 (parallel, blind):** Runs Reviewer B (`codex exec --model gpt-5.4 --sandbox read-only`), Reviewer C (`gemini --approval-mode plan`), and Reviewer D (`opencode run -m opencode/minimax-m2.5-free`) concurrently, saving verbatim drafts to `ai-knowledge-base/raw/panel/<YYYY-MM-DD>-<slug>/r1-*.md`.
+2. **Automatic retries & fallbacks:** Retries any failed/timed-out CLI once with a narrower prompt, drops unavailable CLIs cleanly (`4-reviewer` -> `3-reviewer` -> `2-reviewer`), and exits `2` if all external CLIs are unavailable.
+3. **Round 2 (parallel, confidence-scored 1–5):** Feeds each external reviewer the peer drafts (`B` gets `A+C+D`, `C` gets `A+B+D`, `D` gets `A+B+C`), saves `r2-*.md` + `digest.json`, pre-populates `ai-knowledge-base/raw/panel/<YYYY-MM-DD>-<slug>.md`, and prints **only** file paths + parsed `TOP_CRITIQUES` sorted by confidence (`1–5`).
 
-Save all four outputs verbatim into a scratch note before moving on. Losing one round-1 draft means the cross-review cannot run.
-
-## Step 3 — Round 2: Cross-review with confidence scores (parallel)
-
-Each reviewer gets the other three's round-1 drafts and is asked to critique them. **Each critique item must include a confidence score (1–5)** — this feeds the weighted synthesis.
-
-Run again in parallel — four calls in one message.
-
-**Confidence scale:**
+**Confidence scale (used in Round 2 & Round 3):**
 ```
 5 — Certain. I would stake the decision on this.
 4 — High confidence. Strong evidence or reasoning.
@@ -124,57 +95,9 @@ Run again in parallel — four calls in one message.
 1 — Speculative. Surfacing anyway because the risk is non-trivial.
 ```
 
-**Claude** reads B (Codex) + C (Gemini) + D (OpenCode) and writes: "what each missed, where I disagree, where I update my own A in light of theirs. Each critique item: `<reviewer>:<item>` — confidence 1–5 — issue — recommendation."
-
-**Codex** — gets A (Claude) + C (Gemini) + D (OpenCode) in the prompt:
-```bash
-codex exec \
-  --model gpt-5.4 \
-  --sandbox read-only \
-  "You are Reviewer B. Here are three peer plans for <target>.
-   PLAN A (Claude):
-   <verbatim A>
-
-   PLAN C (Gemini):
-   <verbatim C>
-
-   PLAN D (OpenCode/MiniMax):
-   <verbatim D>
-
-   Your task: critique A, C, and D. What did each miss, where is each wrong, what's your P0 dissent?
-   Ignore: style, phrasing, taste. Focus on correctness, edge cases, missing steps, hidden risks.
-   Format: \`A:<item>\` or \`C:<item>\` or \`D:<item>\` — confidence 1-5 — issue — recommendation
-   Skip preambles." \
-  2>&1
-```
-
-**Gemini** — gets A + B + D:
-```bash
-gemini \
-  -p "You are Reviewer C. Here are three peer plans for <target>.
-      PLAN A (Claude): <verbatim A>
-      PLAN B (Codex):  <verbatim B>
-      PLAN D (OpenCode/MiniMax): <verbatim D>
-      Task: critique A, B, and D. What did each miss, where is each wrong, what's your P0 dissent?
-      Focus on long-context / cross-file / design / token-adherence issues.
-      Format: \`A:<item>\` or \`B:<item>\` or \`D:<item>\` — confidence 1-5 — issue — recommendation
-      Skip preambles." \
-  --approval-mode plan -o text \
-  2>&1
-```
-
-**OpenCode/MiniMax** — gets A + B + C:
-```bash
-opencode run "You are Reviewer D. Here are three peer plans for <target>.
-PLAN A (Claude): <verbatim A>
-PLAN B (Codex):  <verbatim B>
-PLAN C (Gemini): <verbatim C>
-Task: critique A, B, and C. Focus on: clarity of language and requirements, user-impact risks, severity mis-labeling, cross-cutting concerns the code-focused reviewers may have missed.
-Format: \`A:<item>\` or \`B:<item>\` or \`C:<item>\` — confidence 1-5 — issue — recommendation
-Skip preambles." \
-  -m opencode/minimax-m2.5-free \
-  2>&1
-```
+After `panel-run` finishes:
+1. Read `r1-B-codex.md`, `r1-C-gemini.md`, `r1-D-opencode.md` (and `r2-*.md` when `TOP_CRITIQUES` needs context) by file reference.
+2. Formulate **Claude's Round 2 critique on B + C + D** (`<reviewer>:<item>` — confidence `1–5` — issue — recommendation) and proceed directly to Step 4.
 
 ## Step 4 — Round 3: Weighted synthesis (Claude)
 

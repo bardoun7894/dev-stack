@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""repo-audit — deterministic 0-token supply-chain reconnaissance for GitHub repos & local dirs.
+
+Fetches repository metadata, license, pinned commit SHA, file inventory, lifecycle install hooks,
+binary blobs, and static red-flag patterns without cloning untrusted code.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+BINARY_EXTS = {
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".wasm", ".jar", ".class", ".pyc", ".whl", ".node",
+}
+MANIFEST_NAMES = {
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg", "Cargo.toml", "deno.json",
+    "deno.jsonc", "install.sh", "setup.sh", "Makefile", "SKILL.md", "mcp.json", ".mcp.json",
+}
+CODE_EXTS = {".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".rb", ".md", ".json", ".toml", ".yaml", ".yml"}
+NPM_LIFECYCLE_HOOKS = ("preinstall", "install", "postinstall", "preuninstall", "postuninstall", "prepare")
+COPYLEFT_LICENSES = {"AGPL-3.0", "AGPL-3.0-only", "AGPL-3.0-or-later", "GPL-3.0", "GPL-3.0-only", "SSPL-1.0", "NOASSERTION"}
+
+RED_FLAG_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
+    ("remote_shell_pipe", "HIGH", re.compile(r"\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(sh|bash|zsh|python3?|node)\b", re.I)),
+    ("credential_access", "HIGH", re.compile(r"(~/\.ssh|/\.ssh/id_|~/\.aws|/\.aws/credentials|ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENROUTER_API_KEY|GITHUB_TOKEN|security\s+find-generic-password|Login\s+Data|Cookies\.binarycookies)", re.I)),
+    ("obfuscated_exec", "HIGH", re.compile(r"(base64\s+-d\s*\||eval\s*\(\s*atob|exec\s*\(\s*base64|fromCharCode\([^)]{40,}\))", re.I)),
+    ("unrestricted_deno_or_shell", "MEDIUM", re.compile(r"\bdeno\s+(run|install)\s+-A\b|\bsubprocess\.(Popen|run|call)\([^)]*shell\s*=\s*True", re.I)),
+    ("account_or_telemetry_gate", "MEDIUM", re.compile(r"(swamp-club\.com|device/code|verify-account|mandatory.*login)", re.I)),
+]
+
+
+def parse_github_target(target: str) -> tuple[str, str, str | None] | None:
+    t = target.strip()
+    m = re.match(r"^https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?:/(?:tree|blob)/([^/\s]+).*)?/?$", t)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+    m = re.match(r"^git@github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$", t)
+    if m:
+        return m.group(1), m.group(2), None
+    m = re.match(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$", t)
+    if m and not Path(t).exists():
+        return m.group(1), m.group(2), None
+    return None
+
+
+def gh_api(endpoint: str) -> Any:
+    gh_bin = os.environ.get("REPO_AUDIT_GH_BIN", "gh")
+    res = subprocess.run(
+        [gh_bin, "api", endpoint],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f"gh api {endpoint} failed: {res.stderr.strip() or res.stdout.strip()}")
+    return json.loads(res.stdout)
+
+
+def scan_file_content(rel_path: str, text: str, install_hooks: list[str], red_flags: list[dict[str, str]]) -> None:
+    base = os.path.basename(rel_path)
+    if base == "package.json":
+        try:
+            pkg = json.loads(text)
+            scripts = pkg.get("scripts") if isinstance(pkg, dict) else None
+            if isinstance(scripts, dict):
+                for h in NPM_LIFECYCLE_HOOKS:
+                    if h in scripts and scripts[h]:
+                        install_hooks.append(f"{rel_path}:{h} -> {str(scripts[h])[:120]}")
+        except Exception:
+            pass
+    elif base == "setup.py":
+        if re.search(r"\bcmdclass\b|\bsubprocess\b|\bos\.system\b", text):
+            install_hooks.append(f"{rel_path}:custom_setup_py")
+    elif base == "build.rs":
+        install_hooks.append(f"{rel_path}:rust_build_script")
+
+    for category, severity, rx in RED_FLAG_PATTERNS:
+        m = rx.search(text)
+        if m:
+            snippet = m.group(0).strip().replace("\n", " ")[:100]
+            red_flags.append({
+                "file": rel_path,
+                "category": category,
+                "severity": severity,
+                "match": snippet,
+            })
+
+
+def compute_risk(license_id: str, install_hooks: list[str], binaries: list[str], red_flags: list[dict[str, str]], incomplete: list[str] | None = None) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    high = False
+    med = False
+
+    for rf in red_flags:
+        if rf["severity"] == "HIGH":
+            high = True
+            reasons.append(f"{rf['category']} in {rf['file']} (`{rf['match']}`)")
+        else:
+            med = True
+            reasons.append(f"{rf['category']} in {rf['file']} (`{rf['match']}`)")
+
+    if install_hooks:
+        med = True
+        if any("curl" in h or "wget" in h or "sh" in h for h in install_hooks):
+            high = True
+        reasons.append(f"{len(install_hooks)} install hook(s): {install_hooks[0]}")
+
+    if binaries:
+        high = True
+        reasons.append(f"{len(binaries)} binary artifact(s): {', '.join(binaries[:3])}")
+
+    if license_id in COPYLEFT_LICENSES or license_id == "NONE":
+        med = True
+        reasons.append(f"license is {license_id}")
+
+    for note in incomplete or []:
+        med = True
+        reasons.append(note)
+
+    level = "HIGH" if high else ("MEDIUM" if med else "LOW")
+    return level, reasons
+
+
+def audit_local(root: Path) -> dict[str, Any]:
+    files: list[str] = []
+    binaries: list[str] = []
+    install_hooks: list[str] = []
+    red_flags: list[dict[str, str]] = []
+    skills: list[str] = []
+    license_id = "NONE"
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"}]
+        for fn in sorted(filenames):
+            full = Path(dirpath) / fn
+            rel = str(full.relative_to(root))
+            files.append(rel)
+            ext = full.suffix.lower()
+            if ext in BINARY_EXTS:
+                binaries.append(rel)
+                continue
+            if fn == "SKILL.md":
+                skills.append(rel)
+            if fn.upper().startswith("LICENSE"):
+                try:
+                    lic_txt = full.read_text(encoding="utf-8", errors="replace")[:2000]
+                    if "MIT License" in lic_txt:
+                        license_id = "MIT"
+                    elif "Apache License" in lic_txt:
+                        license_id = "Apache-2.0"
+                    elif "GNU AFFERO GENERAL PUBLIC LICENSE" in lic_txt or "AGPL" in lic_txt:
+                        license_id = "AGPL-3.0"
+                    else:
+                        license_id = "CUSTOM"
+                except Exception:
+                    pass
+            if (fn in MANIFEST_NAMES or fn == "build.rs" or ext in CODE_EXTS) and full.stat().st_size <= 131072:
+                try:
+                    txt = full.read_text(encoding="utf-8", errors="replace")
+                    scan_file_content(rel, txt, install_hooks, red_flags)
+                except Exception:
+                    pass
+
+    level, reasons = compute_risk(license_id, install_hooks, binaries, red_flags)
+    return {
+        "mode": "local",
+        "target": str(root.resolve()),
+        "pin_target": None,
+        "license": license_id,
+        "stars": None,
+        "pushed_at": None,
+        "file_count": len(files),
+        "skills": skills,
+        "binaries": binaries,
+        "install_hooks": install_hooks,
+        "red_flags": red_flags,
+        "risk_level": level,
+        "reasons": reasons,
+    }
+
+
+def should_inspect_remote_blob(path: str, size: int) -> bool:
+    if size > 131072:
+        return False
+    base = os.path.basename(path)
+    if base in MANIFEST_NAMES or base == "build.rs":
+        return True
+    return Path(path).suffix.lower() in CODE_EXTS
+
+
+import concurrent.futures
+
+
+def detect_license_from_text(lic_txt: str) -> str:
+    if "GNU AFFERO GENERAL PUBLIC LICENSE" in lic_txt or "AGPL" in lic_txt:
+        return "AGPL-3.0"
+    if "MIT License" in lic_txt:
+        return "MIT"
+    if "Apache License" in lic_txt:
+        return "Apache-2.0"
+    return "CUSTOM"
+
+
+def audit_github(owner: str, repo: str, ref_override: str | None) -> dict[str, Any]:
+    meta = gh_api(f"repos/{owner}/{repo}")
+    ref = ref_override or meta.get("default_branch") or "main"
+    commit = gh_api(f"repos/{owner}/{repo}/commits/{ref}")
+    sha = commit.get("sha", "")
+    tree_resp = gh_api(f"repos/{owner}/{repo}/git/trees/{sha}?recursive=1")
+    blobs = [e for e in tree_resp.get("tree", []) if e.get("type") == "blob"]
+
+    files = [b["path"] for b in blobs]
+    binaries = [b["path"] for b in blobs if Path(b["path"]).suffix.lower() in BINARY_EXTS]
+    skills = [b["path"] for b in blobs if os.path.basename(b["path"]) == "SKILL.md"]
+    install_hooks: list[str] = []
+    red_flags: list[dict[str, str]] = []
+
+    lic_obj = meta.get("license") or {}
+    license_id = lic_obj.get("spdx_id") or "NONE"
+
+    all_candidates = [b for b in blobs if should_inspect_remote_blob(b["path"], int(b.get("size") or 0))]
+    oversize = [b["path"] for b in blobs if int(b.get("size") or 0) > 131072 and should_inspect_remote_blob(b["path"], 0)]
+    max_inspect = 300
+    candidates = all_candidates[:max_inspect]
+    skipped_cap = len(all_candidates) - len(candidates)
+    lic_blobs = [b for b in blobs if os.path.basename(b["path"]).upper().startswith("LICENSE") and "/" not in b["path"]]
+    if license_id in ("NOASSERTION", "NONE") and lic_blobs:
+        candidates = lic_blobs[:1] + candidates
+
+    failed_fetches: list[str] = []
+
+    def fetch_blob(p: str) -> tuple[str, str | None]:
+        try:
+            obj = gh_api(f"repos/{owner}/{repo}/contents/{p}?ref={sha}")
+            if isinstance(obj, dict) and obj.get("encoding") == "base64" and obj.get("content"):
+                return p, base64.b64decode(obj["content"]).decode("utf-8", errors="replace")
+        except Exception:
+            failed_fetches.append(p)
+        return p, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        fetched = list(pool.map(lambda b: fetch_blob(b["path"]), candidates))
+
+    for p, raw in fetched:
+        if raw is None:
+            continue
+        if os.path.basename(p).upper().startswith("LICENSE") and "/" not in p and license_id in ("NOASSERTION", "NONE"):
+            license_id = detect_license_from_text(raw[:4000])
+            continue
+        scan_file_content(p, raw, install_hooks, red_flags)
+
+    incomplete: list[str] = []
+    if tree_resp.get("truncated"):
+        incomplete.append("repo tree truncated by GitHub; inventory incomplete")
+    if skipped_cap > 0:
+        incomplete.append(f"{skipped_cap} file(s) beyond the {max_inspect}-file inspection cap were not scanned")
+    if oversize:
+        incomplete.append(f"{len(oversize)} file(s) over 128 KB were not scanned: {', '.join(oversize[:5])}")
+    if failed_fetches:
+        incomplete.append(f"{len(failed_fetches)} file(s) could not be fetched and were not scanned: {', '.join(failed_fetches[:5])}")
+    level, reasons = compute_risk(license_id, install_hooks, binaries, red_flags, incomplete)
+    return {
+        "mode": "github",
+        "target": f"{owner}/{repo}",
+        "pin_target": f"{owner}/{repo}@{sha}",
+        "sha": sha,
+        "license": license_id,
+        "stars": meta.get("stargazers_count"),
+        "forks": meta.get("forks_count"),
+        "archived": bool(meta.get("archived")),
+        "pushed_at": meta.get("pushed_at"),
+        "tree_truncated": bool(tree_resp.get("truncated")),
+        "file_count": len(files),
+        "inspected_files": [c["path"] for c in candidates],
+        "skills": skills,
+        "binaries": binaries,
+        "install_hooks": install_hooks,
+        "red_flags": red_flags,
+        "risk_level": level,
+        "reasons": reasons,
+    }
+
+
+def format_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        f"# repo-audit: {report['target']}",
+        f"- RISK_LEVEL: {report['risk_level']}",
+        f"- PIN_TARGET: {report.get('pin_target') or 'local-directory'}",
+        f"- LICENSE: {report['license']}",
+    ]
+    if report["mode"] == "github":
+        lines.append(
+            f"- PROVENANCE: stars={report.get('stars')} forks={report.get('forks')} "
+            f"pushed_at={report.get('pushed_at')} archived={report.get('archived')}"
+        )
+    lines.append(f"- INVENTORY: {report['file_count']} files, {len(report['skills'])} SKILL.md, {len(report['binaries'])} binaries")
+    if report["skills"]:
+        lines.append(f"- SKILLS: {', '.join(report['skills'][:8])}")
+    if report["install_hooks"]:
+        lines.append("- INSTALL_HOOKS:")
+        for h in report["install_hooks"][:8]:
+            lines.append(f"  - {h}")
+    if report["binaries"]:
+        lines.append(f"- BINARIES: {', '.join(report['binaries'][:8])}")
+    if report["red_flags"]:
+        lines.append("- RED_FLAGS:")
+        for rf in report["red_flags"][:12]:
+            lines.append(f"  - [{rf['severity']}] {rf['file']} ({rf['category']}): `{rf['match']}`")
+    if not report["reasons"]:
+        lines.append("- SUMMARY: No lifecycle hooks, binary blobs, or static red flags detected.")
+    else:
+        lines.append("- REASONS: " + "; ".join(report["reasons"]))
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Deterministic supply-chain audit for GitHub repos or local directories.")
+    ap.add_argument("target", help="GitHub URL, owner/repo, or local path")
+    ap.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    args = ap.parse_args()
+
+    local_path = Path(args.target).expanduser()
+    try:
+        if local_path.exists():
+            report = audit_local(local_path)
+        else:
+            gh_parsed = parse_github_target(args.target)
+            if not gh_parsed:
+                sys.stderr.write(f"repo-audit: target '{args.target}' is neither an existing path nor a GitHub repo.\n")
+                return 2
+            report = audit_github(*gh_parsed)
+    except Exception as exc:
+        sys.stderr.write(f"repo-audit error: {exc}\n")
+        return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(format_markdown(report))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
