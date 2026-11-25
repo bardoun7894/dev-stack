@@ -1,6 +1,6 @@
 ---
 name: boat
-description: Control boat.dev cloud sandboxes (persistent Ubuntu VMs) and the boat GitHub Actions runner. Use for "boat", "boat.dev", "run tests on boat", "sandbox VM", "runs-on: boat", "CI on boat", "instead of MyContabo for tests", isolated test runs, PR CI.
+description: "Control boat.dev cloud sandboxes (persistent Ubuntu VMs) and the boat GitHub Actions runner. Use for \"boat\", \"boat.dev\", \"run tests on boat\", \"sandbox VM\", \"runs-on: boat\", \"CI on boat\", \"instead of MyContabo for tests\", isolated test runs, PR CI."
 ---
 
 # boat
